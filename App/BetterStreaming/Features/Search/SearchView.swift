@@ -25,7 +25,7 @@ struct SearchView: View {
             Group {
                 if query.trimmingCharacters(in: .whitespaces).isEmpty {
                     browse
-                } else if results.isEmpty {
+                } else if results.isEmpty && matchingAlbums.isEmpty {
                     ContentUnavailableView.search(text: query)
                 } else {
                     resultsList
@@ -44,12 +44,34 @@ struct SearchView: View {
         }
     }
 
+    private var matchingAlbums: [Album] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return [] }
+        return model.albums.filter {
+            $0.title.localizedCaseInsensitiveContains(q) || $0.artist.localizedCaseInsensitiveContains(q)
+        }
+    }
+
     private var resultsList: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
-                ForEach(results) { track in
-                    TrackRowView(track: track, context: results)
-                    Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+            LazyVStack(alignment: .leading, spacing: 16) {
+                if !matchingAlbums.isEmpty {
+                    SectionHeader(title: "Albums")
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 18) {
+                        ForEach(matchingAlbums) { album in
+                            NavigationLink(value: LibraryRoute.album(album.id)) {
+                                AlbumGridCellStatic(album: album)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                if !results.isEmpty {
+                    SectionHeader(title: "Songs")
+                    ForEach(results) { track in
+                        TrackRowView(track: track, context: results)
+                        Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                    }
                 }
             }
             .padding(DesignTokens.phonePadding)
