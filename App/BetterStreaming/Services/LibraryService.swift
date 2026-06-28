@@ -33,6 +33,7 @@ actor LibraryService {
 
     private var configs: [SourceConfig] = []
     private var allTracks: [Track] = []
+    private var didLoadFromDisk = false
 
     init() {
         let fm = FileManager.default
@@ -44,21 +45,19 @@ actor LibraryService {
         try? fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
         configsURL = support.appendingPathComponent("sources.json")
         libraryURL = support.appendingPathComponent("library.json")
-        if let data = try? Data(contentsOf: configsURL),
-           let decoded = try? JSONDecoder().decode([SourceConfig].self, from: data) {
-            configs = decoded
-        }
-        if let data = try? Data(contentsOf: libraryURL),
-           let decoded = try? JSONDecoder().decode([Track].self, from: data) {
-            allTracks = decoded
-        }
-        refreshCacheStates()
     }
 
     // MARK: Load
 
     func bootstrap() -> (configs: [SourceConfig], tracks: [Track]) {
-        (configs, allTracks)
+        loadFromDiskIfNeeded()
+        return (configs, allTracks)
+    }
+
+    func refreshCacheSnapshot() -> [Track] {
+        loadFromDiskIfNeeded()
+        refreshCacheStates()
+        return allTracks
     }
 
     // MARK: Source management
@@ -74,6 +73,7 @@ actor LibraryService {
         password: String?,
         rootPath: String
     ) -> SourceConfig {
+        loadFromDiskIfNeeded()
         let id = UUID().uuidString
         KeychainStore.set(password, account: id)
         let cfg = SourceConfig(
@@ -94,6 +94,7 @@ actor LibraryService {
     }
 
     func removeSource(_ id: String) {
+        loadFromDiskIfNeeded()
         configs.removeAll { $0.id == id }
         allTracks.removeAll { $0.sourceID == id }
         KeychainStore.delete(account: id)
@@ -101,13 +102,17 @@ actor LibraryService {
         persistLibrary()
     }
 
-    func configList() -> [SourceConfig] { configs }
+    func configList() -> [SourceConfig] {
+        loadFromDiskIfNeeded()
+        return configs
+    }
 
     // MARK: Scan
 
     /// Recursively scan a source into tracks (path-first). Returns the full
     /// merged library so the caller can replace its state.
     func scan(sourceID: String) async throws -> [Track] {
+        loadFromDiskIfNeeded()
         guard let cfg = configs.first(where: { $0.id == sourceID }),
               let client = makeClient(cfg) else { return allTracks }
 
@@ -131,6 +136,7 @@ actor LibraryService {
     // MARK: Playback resolution (cache-first)
 
     func playableURL(for track: Track, offline: Bool) async -> URL? {
+        loadFromDiskIfNeeded()
         let local = cacheFileURL(for: track)
         if FileManager.default.fileExists(atPath: local.path) { return local }
         if offline { return nil }
@@ -167,6 +173,7 @@ actor LibraryService {
     }
 
     func cachedBytes() -> Int64 {
+        loadFromDiskIfNeeded()
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: cacheDir, includingPropertiesForKeys: [.fileSizeKey]
         ) else { return 0 }
@@ -189,6 +196,19 @@ actor LibraryService {
     }
 
     // MARK: Internals
+
+    private func loadFromDiskIfNeeded() {
+        guard !didLoadFromDisk else { return }
+        didLoadFromDisk = true
+        if let data = try? Data(contentsOf: configsURL),
+           let decoded = try? JSONDecoder().decode([SourceConfig].self, from: data) {
+            configs = decoded
+        }
+        if let data = try? Data(contentsOf: libraryURL),
+           let decoded = try? JSONDecoder().decode([Track].self, from: data) {
+            allTracks = decoded
+        }
+    }
 
     private func makeClient(_ cfg: SourceConfig) -> (any RemoteFileSystemClient)? {
         let password = KeychainStore.get(account: cfg.id)
@@ -261,19 +281,28 @@ actor LibraryService {
     }
 
     private func cacheFileURL(for track: Track) -> URL {
-        let ext = (track.remotePath ?? track.folderPath as String) as NSString
-        let pathExtension = ext.pathExtension.isEmpty ? "dat" : ext.pathExtension
-        return cacheDir.appendingPathComponent("\(stableHash(track.id)).\(pathExtension)")
+        Self.cacheFileURL(for: track, cacheDir: cacheDir)
     }
 
     private func refreshCacheStates() {
-        for index in allTracks.indices {
-            if isCached(allTracks[index]) {
-                if allTracks[index].cacheState != .cached { allTracks[index].cacheState = .cached }
-            } else if allTracks[index].cacheState == .cached {
-                allTracks[index].cacheState = .remoteOnly
+        Self.refreshCacheStates(&allTracks, cacheDir: cacheDir)
+    }
+
+    private static func refreshCacheStates(_ tracks: inout [Track], cacheDir: URL) {
+        for index in tracks.indices {
+            let isCached = FileManager.default.fileExists(atPath: cacheFileURL(for: tracks[index], cacheDir: cacheDir).path)
+            if isCached {
+                if tracks[index].cacheState != .cached { tracks[index].cacheState = .cached }
+            } else if tracks[index].cacheState == .cached {
+                tracks[index].cacheState = .remoteOnly
             }
         }
+    }
+
+    private static func cacheFileURL(for track: Track, cacheDir: URL) -> URL {
+        let ext = (track.remotePath ?? track.folderPath as String) as NSString
+        let pathExtension = ext.pathExtension.isEmpty ? "dat" : ext.pathExtension
+        return cacheDir.appendingPathComponent("\(stableHash(track.id)).\(pathExtension)")
     }
 
     private func persistConfigs() {
@@ -293,7 +322,7 @@ actor LibraryService {
         #endif
     }
 
-    private func stableHash(_ string: String) -> String {
+    private static func stableHash(_ string: String) -> String {
         var hash: UInt64 = 1_469_598_103_934_665_603
         for byte in string.utf8 {
             hash ^= UInt64(byte)

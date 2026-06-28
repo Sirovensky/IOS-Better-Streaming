@@ -197,9 +197,11 @@ final class PlaybackEngine {
         let clamped = min(max(seconds, 0), max(duration, 0))
         let time = CMTime(seconds: clamped, preferredTimescale: 600)
         player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-            guard let self else { return }
-            self.elapsed = clamped
-            self.updateNowPlayingInfo()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.elapsed = clamped
+                self.updateNowPlayingInfo()
+            }
         }
     }
 
@@ -310,7 +312,9 @@ final class PlaybackEngine {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.handlePlaybackEnded() }
+            Task { @MainActor [weak self] in
+                self?.handlePlaybackEnded()
+            }
         }
 
         player.replaceCurrentItem(with: item)
@@ -371,9 +375,9 @@ final class PlaybackEngine {
     private func addPeriodicTimeObserver() {
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            MainActor.assumeIsolated {
+            let seconds = time.seconds
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                let seconds = time.seconds
                 if seconds.isFinite { self.elapsed = seconds }
             }
         }
@@ -399,14 +403,17 @@ final class PlaybackEngine {
             object: nil,
             queue: .main
         ) { [weak self] note in
-            MainActor.assumeIsolated { self?.handleInterruption(note) }
+            let typeValue = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let optionsValue = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
+            Task { @MainActor [weak self] in
+                self?.handleInterruption(typeValue: typeValue, optionsValue: optionsValue)
+            }
         }
     }
 
-    private func handleInterruption(_ note: Notification) {
+    private func handleInterruption(typeValue: UInt?, optionsValue: UInt?) {
         guard
-            let info = note.userInfo,
-            let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+            let typeValue,
             let type = AVAudioSession.InterruptionType(rawValue: typeValue)
         else { return }
 
@@ -415,7 +422,7 @@ final class PlaybackEngine {
             interruptedWhilePlaying = isPlaying
             pause()
         case .ended:
-            let options = (info[AVAudioSessionInterruptionOptionKey] as? UInt).map(AVAudioSession.InterruptionOptions.init)
+            let options = optionsValue.map(AVAudioSession.InterruptionOptions.init)
             if interruptedWhilePlaying, options?.contains(.shouldResume) == true {
                 resume()
             }

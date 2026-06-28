@@ -37,7 +37,7 @@ struct HomeView: View {
 
     private var greeting: String {
         let hour = Calendar.current.component(.hour, from: Date())
-        switch hour {
+        return switch hour {
         case 5..<12: "Good morning"
         case 12..<17: "Good afternoon"
         case 17..<22: "Good evening"
@@ -53,15 +53,17 @@ struct HomeView: View {
             Image(systemName: "music.note.house")
                 .font(.system(size: 52))
                 .foregroundStyle(DesignTokens.brandPrimary)
-            Text(model.hasSources ? "Scanning your library…" : "Add your music")
+            Text(model.isBootstrapping ? "Loading your library…" : (model.hasSources ? "Scanning your library…" : "Add your music"))
                 .font(.title2.weight(.bold))
                 .foregroundStyle(DesignTokens.textPrimary)
-            Text(model.hasSources
-                 ? "Your songs will appear here as the scan finds them. Folders are playable before it finishes."
-                 : "Connect your NAS or server to start listening to your own library.")
+            Text(model.isBootstrapping
+                 ? "Opening your saved library on this device."
+                 : (model.hasSources
+                    ? "Your songs will appear here as the scan finds them. Folders are playable before it finishes."
+                    : "Connect your NAS or server to start listening to your own library."))
                 .font(.subheadline)
                 .foregroundStyle(DesignTokens.textSecondary)
-            if !model.hasSources {
+            if !model.hasSources && !model.isBootstrapping {
                 NavigationLink(value: LibraryRoute.sources) {
                     Label("Add a source", systemImage: "externaldrive.badge.plus").frame(maxWidth: .infinity)
                 }

@@ -24,8 +24,6 @@ struct OnboardingView: View {
     }
 
     var body: some View {
-        @Bindable var autoCache = model.autoCache
-
         ZStack {
             DesignTokens.surfaceCanvas.ignoresSafeArea()
             VStack(spacing: 0) {
@@ -34,7 +32,7 @@ struct OnboardingView: View {
                         switch step {
                         case 0: welcome
                         case 1: connect
-                        default: settings(autoCache)
+                        default: settings
                         }
                     }
                     .padding(24)
@@ -135,8 +133,10 @@ struct OnboardingView: View {
 
     // MARK: Step 2 — settings
 
-    private func settings(_ autoCache: AutoCacheController) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
+    private var settings: some View {
+        @Bindable var autoCache = model.autoCache
+
+        return VStack(alignment: .leading, spacing: 16) {
             stepTitle("Stay ready offline", "Better Streaming can keep the music you play most ready without the source.")
 
             VStack(spacing: 0) {

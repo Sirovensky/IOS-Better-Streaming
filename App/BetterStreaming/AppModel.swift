@@ -17,6 +17,7 @@ final class AppModel {
     private(set) var tracks: [Track] = []
     private(set) var playlists: [Playlist] = []
     private(set) var recentlyPlayedIDs: [String] = []
+    private(set) var isBootstrapping = true
     private(set) var isScanning = false
 
     var offlineMode: Bool {
@@ -32,10 +33,11 @@ final class AppModel {
     private var trackIndex: [String: Int] = [:]
     private var sourceConfigs: [SourceConfig] = []
     private var sourceHealth: [String: SourceHealth] = [:]
+    private var startupMaintenanceTask: Task<Void, Never>?
 
     var hasSources: Bool { !sources.isEmpty }
     var hasLibrary: Bool { !tracks.isEmpty }
-    var needsOnboarding: Bool { !hasCompletedOnboarding && sources.isEmpty }
+    var needsOnboarding: Bool { !isBootstrapping && !hasCompletedOnboarding && sources.isEmpty }
 
     init() {
         offlineMode = UserDefaults.standard.bool(forKey: "offlineMode.v1")
@@ -52,11 +54,35 @@ final class AppModel {
         sourceConfigs = snapshot.configs
         tracks = snapshot.tracks
         rebuildIndex()
-        for cfg in sourceConfigs where sourceHealth[cfg.id] == nil { sourceHealth[cfg.id] = .online }
+        for cfg in sourceConfigs where sourceHealth[cfg.id] == nil { sourceHealth[cfg.id] = .asleep }
         rebuildSources()
+        isBootstrapping = false
         reconcileAutoCache()
-        // Refresh each source from the server in the background (path-first).
-        for cfg in sourceConfigs { await rescan(cfg.id) }
+        schedulePostLaunchMaintenance()
+    }
+
+    private func schedulePostLaunchMaintenance() {
+        startupMaintenanceTask?.cancel()
+        guard !sourceConfigs.isEmpty else { return }
+
+        startupMaintenanceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard !Task.isCancelled, let self else { return }
+
+            let refreshed = await self.library.refreshCacheSnapshot()
+            guard !Task.isCancelled else { return }
+            self.tracks = refreshed
+            self.rebuildIndex()
+            self.rebuildSources()
+            self.reconcileAutoCache()
+
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            for cfg in self.sourceConfigs {
+                guard !Task.isCancelled else { return }
+                await self.rescan(cfg.id)
+            }
+        }
     }
 
     func rescan(_ sourceID: String) async {

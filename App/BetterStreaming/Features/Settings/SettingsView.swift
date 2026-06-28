@@ -4,11 +4,9 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        @Bindable var autoCache = model.autoCache
-
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
-                autoCacheSection(autoCache)
+                autoCacheSection
                 sourcesSection
                 aboutSection
             }
@@ -21,8 +19,10 @@ struct SettingsView: View {
 
     // MARK: Auto-cache (ask #7)
 
-    private func autoCacheSection(_ autoCache: AutoCacheController) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private var autoCacheSection: some View {
+        @Bindable var autoCache = model.autoCache
+
+        return VStack(alignment: .leading, spacing: 10) {
             SectionHeader(title: "Auto-cache", detail: "Keep the music you play most ready offline")
 
             VStack(spacing: 0) {

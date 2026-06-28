@@ -10,11 +10,9 @@ struct OfflineLibraryView: View {
     private var autoCached: [Track] { model.tracks.filter { $0.cacheState == .prefetched } }
 
     var body: some View {
-        @Bindable var model = model
-
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
-                offlineModeCard(model: model)
+                offlineModeCard
                 storageCard
                 if downloaded.isEmpty && autoCached.isEmpty {
                     AppEmptyState(
@@ -33,9 +31,11 @@ struct OfflineLibraryView: View {
         .navigationTitle("Offline")
     }
 
-    private func offlineModeCard(model: AppModel) -> some View {
-        VStack(spacing: 0) {
-            Toggle(isOn: $model.offlineMode) {
+    private var offlineModeCard: some View {
+        @Bindable var bindableModel = model
+
+        return VStack(spacing: 0) {
+            Toggle(isOn: $bindableModel.offlineMode) {
                 HStack(spacing: 12) {
                     Image(systemName: model.offlineMode ? "wifi.slash" : "wifi")
                         .foregroundStyle(DesignTokens.brandPrimary)
