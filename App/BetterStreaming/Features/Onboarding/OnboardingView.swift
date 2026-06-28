@@ -1,5 +1,6 @@
 import BetterStreamingSources
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// First-run setup: welcome → connect a source → key settings. Matches the docs'
 /// principle that setup starts from a Library shell's "Add Source", not a bare
@@ -19,6 +20,7 @@ struct OnboardingView: View {
     @State private var showFolderPicker = false
     @State private var testState: TestState = .idle
     @State private var isTesting = false
+    @State private var showLocalImporter = false
 
     private enum TestState: Equatable {
         case idle, success, failure(String)
@@ -80,7 +82,22 @@ struct OnboardingView: View {
                 valueRow("arrow.down.circle", "Offline ready", "Keep your most-played music on device.")
             }
             .padding(.top, 8)
+
+            Button {
+                showLocalImporter = true
+            } label: {
+                Label("Use music on this device", systemImage: "iphone")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(SecondaryActionButtonStyle())
+
             Spacer(minLength: 12)
+        }
+        .fileImporter(isPresented: $showLocalImporter, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result {
+                model.addLocalSource(name: url.lastPathComponent, folderURL: url)
+                dismiss()
+            }
         }
     }
 
@@ -101,7 +118,7 @@ struct OnboardingView: View {
             stepTitle("Connect your library", "Credentials stay in the Keychain on this device.")
 
             Picker("Protocol", selection: $proto) {
-                ForEach(SourceProtocol.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(SourceProtocol.servers) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .onChange(of: proto) { _, _ in testState = .idle }

@@ -35,6 +35,7 @@ struct SourceConfig: Codable, Sendable, Identifiable {
     var username: String?
     var domain: String?
     var rootPath: String    // path within the share to scan
+    var bookmark: String? = nil   // base64 security-scoped bookmark for local sources
 }
 
 /// Bridges the Core package (SMB/WebDAV file access, recursive scan) to the
@@ -53,6 +54,8 @@ actor LibraryService {
     /// add→scan succeed even if the Keychain read lags/fails; Keychain remains
     /// the durable store for relaunches.
     private var sessionPasswords: [String: String] = [:]
+    /// Resolved + security-scope-accessing folder URLs for local sources, by id.
+    private var localRoots: [String: URL] = [:]
 
     init() {
         let fm = FileManager.default
@@ -113,8 +116,34 @@ actor LibraryService {
         return cfg
     }
 
+    /// Add an on-device / Files / iCloud folder as a source. `bookmark` is a
+    /// base64 security-scoped bookmark created by the caller from the picked URL.
+    func addLocalSource(name: String, bookmark: String, displayPath: String) -> SourceConfig {
+        loadFromDiskIfNeeded()
+        let cfg = SourceConfig(
+            id: UUID().uuidString,
+            shareID: UUID().uuidString,
+            name: name.isEmpty ? "Local Music" : name,
+            proto: SourceProtocol.local.rawValue,
+            host: "",
+            port: 0,
+            share: (displayPath as NSString).lastPathComponent,
+            username: nil,
+            domain: nil,
+            rootPath: displayPath,
+            bookmark: bookmark
+        )
+        configs.append(cfg)
+        persistConfigs()
+        return cfg
+    }
+
     func removeSource(_ id: String) {
         loadFromDiskIfNeeded()
+        if let url = localRoots[id] {
+            url.stopAccessingSecurityScopedResource()
+            localRoots[id] = nil
+        }
         configs.removeAll { $0.id == id }
         allTracks.removeAll { $0.sourceID == id }
         KeychainStore.delete(account: id)
@@ -133,8 +162,18 @@ actor LibraryService {
     /// merged library so the caller can replace its state.
     func scan(sourceID: String) async throws -> [Track] {
         loadFromDiskIfNeeded()
-        guard let cfg = configs.first(where: { $0.id == sourceID }),
-              let client = makeClient(cfg) else { return allTracks }
+        guard let cfg = configs.first(where: { $0.id == sourceID }) else { return allTracks }
+
+        if cfg.proto == SourceProtocol.local.rawValue {
+            let scanned = try scanLocal(cfg)
+            allTracks.removeAll { $0.sourceID == cfg.id }
+            allTracks.append(contentsOf: scanned)
+            refreshCacheStates()
+            persistLibrary()
+            return allTracks
+        }
+
+        guard let client = makeClient(cfg) else { return allTracks }
 
         // Tolerant recursive walk. The Core RemoteLibraryScanner aborts the whole
         // scan if any single folder fails to list (perms/system dirs), which made
@@ -236,6 +275,7 @@ actor LibraryService {
 
     func playableURL(for track: Track, offline: Bool) async -> URL? {
         loadFromDiskIfNeeded()
+        if let localURL = localFileURL(for: track) { return localURL }   // local source: play in place
         let local = cacheFileURL(for: track)
         if FileManager.default.fileExists(atPath: local.path) { return local }
         if offline { return nil }
@@ -284,7 +324,7 @@ actor LibraryService {
 
     /// Embedded artwork for a cached file, for Now Playing / lock screen.
     func artworkData(for track: Track) async -> Data? {
-        let local = cacheFileURL(for: track)
+        let local = localFileURL(for: track) ?? cacheFileURL(for: track)
         guard FileManager.default.fileExists(atPath: local.path) else { return nil }
         let asset = AVURLAsset(url: local)
         guard let items = try? await asset.load(.commonMetadata) else { return nil }
@@ -367,6 +407,73 @@ actor LibraryService {
         }
     }
 
+    // MARK: Local files
+
+    private func localRootURL(for cfg: SourceConfig) -> URL? {
+        if let url = localRoots[cfg.id] { return url }
+        guard let b64 = cfg.bookmark, let data = Data(base64Encoded: b64) else { return nil }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { return nil }
+        _ = url.startAccessingSecurityScopedResource()
+        localRoots[cfg.id] = url
+        return url
+    }
+
+    private func scanLocal(_ cfg: SourceConfig) throws -> [Track] {
+        guard let root = localRootURL(for: cfg) else {
+            throw LibraryError(kind: .notFound, message: "Couldn’t open the chosen folder. Pick it again.")
+        }
+        let classifier = MediaFileClassifier()
+        var scanned: [Track] = []
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        if let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys)) {
+            for case let url as URL in enumerator {
+                if scanned.count >= 100_000 { break }
+                let values = try? url.resourceValues(forKeys: keys)
+                guard values?.isRegularFile == true,
+                      let kind = classifier.classify(fileName: url.lastPathComponent) else { continue }
+                scanned.append(localTrack(url: url, kind: kind, cfg: cfg, size: values?.fileSize, modified: values?.contentModificationDate))
+            }
+        }
+        return scanned
+    }
+
+    private func localTrack(url: URL, kind: IndexedMediaKind, cfg: SourceConfig, size: Int?, modified: Date?) -> Track {
+        let path = url.path
+        let components = url.pathComponents
+        let title = url.deletingPathExtension().lastPathComponent
+        let album = components.count >= 2 ? components[components.count - 2] : cfg.name
+        let artist = components.count >= 3 ? components[components.count - 3] : "Unknown Artist"
+        return Track(
+            id: "local-" + Self.stableHash(path),
+            title: title.isEmpty ? url.lastPathComponent : title,
+            artist: artist,
+            album: album,
+            albumID: "\(artist)::\(album)".lowercased(),
+            artistID: artist.lowercased(),
+            genre: "Unknown",
+            durationSeconds: 0,
+            kind: kind == .audio ? .audio : .video,
+            cacheState: .cached,
+            sourceID: cfg.id,
+            sourceName: cfg.name,
+            folderPath: path,
+            shareID: cfg.shareID,
+            remotePath: path,
+            sizeBytes: size.map(Int64.init),
+            modifiedAtEpoch: modified?.timeIntervalSince1970
+        )
+    }
+
+    /// Resolved on-disk URL for a local-source track (security scope active), else nil.
+    private func localFileURL(for track: Track) -> URL? {
+        guard let cfg = configs.first(where: { $0.id == track.sourceID }),
+              cfg.proto == SourceProtocol.local.rawValue,
+              localRootURL(for: cfg) != nil else { return nil }
+        let url = URL(fileURLWithPath: track.remotePath ?? track.folderPath)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     private func remoteIdentity(for track: Track, cfg: SourceConfig) -> RemoteItemIdentity {
         RemoteItemIdentity(
             sourceID: SourceID(rawValue: UUID(uuidString: cfg.id) ?? UUID()),
@@ -383,16 +490,17 @@ actor LibraryService {
     }
 
     private func refreshCacheStates() {
-        Self.refreshCacheStates(&allTracks, cacheDir: cacheDir)
-    }
-
-    private static func refreshCacheStates(_ tracks: inout [Track], cacheDir: URL) {
-        for index in tracks.indices {
-            let isCached = FileManager.default.fileExists(atPath: cacheFileURL(for: tracks[index], cacheDir: cacheDir).path)
+        let localIDs = Set(configs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
+        for index in allTracks.indices {
+            if localIDs.contains(allTracks[index].sourceID) {
+                allTracks[index].cacheState = .cached   // local files are always on-device
+                continue
+            }
+            let isCached = FileManager.default.fileExists(atPath: Self.cacheFileURL(for: allTracks[index], cacheDir: cacheDir).path)
             if isCached {
-                if tracks[index].cacheState != .cached { tracks[index].cacheState = .cached }
-            } else if tracks[index].cacheState == .cached {
-                tracks[index].cacheState = .remoteOnly
+                if allTracks[index].cacheState != .cached { allTracks[index].cacheState = .cached }
+            } else if allTracks[index].cacheState == .cached {
+                allTracks[index].cacheState = .remoteOnly
             }
         }
     }

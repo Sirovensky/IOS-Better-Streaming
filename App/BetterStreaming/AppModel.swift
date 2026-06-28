@@ -155,6 +155,25 @@ final class AppModel {
         )
     }
 
+    /// Add an on-device / Files / iCloud folder as a source. Creates a
+    /// security-scoped bookmark from the picked folder for durable access.
+    func addLocalSource(name: String, folderURL: URL) {
+        let accessed = folderURL.startAccessingSecurityScopedResource()
+        let bookmark = try? folderURL.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        if accessed { folderURL.stopAccessingSecurityScopedResource() }
+        guard let bookmark else { return }
+        let b64 = bookmark.base64EncodedString()
+        let path = folderURL.path
+        Task {
+            let cfg = await library.addLocalSource(name: name, bookmark: b64, displayPath: path)
+            sourceConfigs.append(cfg)
+            sourceHealth[cfg.id] = .online
+            completeOnboarding()
+            rebuildSources()
+            await rescan(cfg.id)
+        }
+    }
+
     func removeSource(_ id: String) {
         Task { await library.removeSource(id) }
         sourceConfigs.removeAll { $0.id == id }

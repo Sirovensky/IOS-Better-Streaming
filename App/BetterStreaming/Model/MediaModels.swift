@@ -86,13 +86,19 @@ enum SourceProtocol: String, Codable, Sendable, Hashable, CaseIterable, Identifi
     case webDAV = "WebDAV"
     case ftp = "FTP"
     case sftp = "SFTP"
+    case local = "Local"
 
     var id: String { rawValue }
 
-    /// Whether Core ships a real adapter for this protocol. SMB and WebDAV are
-    /// wired; FTP/SFTP are protocol-neutral behind RemoteFileSystemClient and
-    /// need their adapter module built (see build checklist).
-    var hasAdapter: Bool { self == .smb || self == .webDAV }
+    /// Server protocols only (excludes on-device local files).
+    static var servers: [SourceProtocol] { [.smb, .webDAV, .ftp, .sftp] }
+
+    var isLocal: Bool { self == .local }
+
+    /// Whether Core ships a real adapter for this protocol. SMB, WebDAV and
+    /// local files are wired; FTP/SFTP are protocol-neutral behind
+    /// RemoteFileSystemClient and need their adapter module built.
+    var hasAdapter: Bool { self == .smb || self == .webDAV || self == .local }
 
     /// Whether a live pre-save connection test exists (SMB only today).
     var hasConnectionTest: Bool { self == .smb }
@@ -103,6 +109,7 @@ enum SourceProtocol: String, Codable, Sendable, Hashable, CaseIterable, Identifi
         case .webDAV: "HTTP-based shares, Nextcloud, many NAS"
         case .ftp: "Classic file servers"
         case .sftp: "FTP over SSH"
+        case .local: "Music already on this device or in Files"
         }
     }
 
@@ -112,6 +119,7 @@ enum SourceProtocol: String, Codable, Sendable, Hashable, CaseIterable, Identifi
         case .webDAV: "globe"
         case .ftp: "arrow.up.arrow.down.circle"
         case .sftp: "lock.icloud"
+        case .local: "iphone"
         }
     }
 
@@ -121,6 +129,7 @@ enum SourceProtocol: String, Codable, Sendable, Hashable, CaseIterable, Identifi
         case .webDAV: 443
         case .ftp: 21
         case .sftp: 22
+        case .local: 0
         }
     }
 

@@ -1,6 +1,7 @@
 import BetterStreamingSources
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Add a music source. Protocol-aware (SMB / WebDAV / FTP / SFTP). The library
 /// model is protocol-neutral; only SMB has a live connection test today, the
@@ -20,21 +21,31 @@ struct SourceSetupView: View {
     @State private var showFolderPicker = false
     @State private var testState: TestState = .idle
     @State private var isTesting = false
+    @State private var localFolderURL: URL?
+    @State private var localName = ""
+    @State private var showLocalImporter = false
 
     private enum TestState: Equatable {
         case idle, success, failure(String)
         var isOnline: Bool { if case .success = self { return true }; return false }
     }
 
-    private var canAdd: Bool { !host.trimmed.isEmpty && !path.trimmed.isEmpty }
+    private var canAdd: Bool {
+        if proto == .local { return localFolderURL != nil }
+        return !host.trimmed.isEmpty && !path.trimmed.isEmpty
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 protocolPicker
-                connectionForm
-                folderRow
-                testRow
+                if proto == .local {
+                    localForm
+                } else {
+                    connectionForm
+                    folderRow
+                    testRow
+                }
                 Button { addSource() } label: {
                     Label("Add source", systemImage: "externaldrive.badge.plus").frame(maxWidth: .infinity)
                 }
@@ -47,6 +58,12 @@ struct SourceSetupView: View {
         .appScreenBackground()
         .navigationTitle("Add Source")
         .navigationBarTitleDisplayMode(.inline)
+        .fileImporter(isPresented: $showLocalImporter, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result {
+                localFolderURL = url
+                if localName.isEmpty { localName = url.lastPathComponent }
+            }
+        }
         .sheet(isPresented: $showFolderPicker) {
             RemoteFolderPicker(
                 proto: proto,
@@ -176,7 +193,37 @@ struct SourceSetupView: View {
         }
     }
 
+    private var localForm: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "On-device music")
+            VStack(spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: "textformat").foregroundStyle(DesignTokens.textTertiary).frame(width: 24)
+                    TextField("Name (optional)", text: $localName).foregroundStyle(DesignTokens.textPrimary)
+                }
+                .padding(12)
+                .background(DesignTokens.surfaceRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                Button { showLocalImporter = true } label: {
+                    Label(localFolderURL?.lastPathComponent ?? "Choose music folder", systemImage: "folder.badge.plus")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SecondaryActionButtonStyle())
+            }
+            .padding(14)
+            .surfaceCard(fill: DesignTokens.surfaceCard)
+
+            Text("Pick a folder from Files, iCloud Drive, or this device. Music plays straight from there — no download.")
+                .font(.caption2).foregroundStyle(DesignTokens.textTertiary)
+        }
+    }
+
     private func addSource() {
+        if proto == .local {
+            if let url = localFolderURL { model.addLocalSource(name: localName, folderURL: url) }
+            dismiss()
+            return
+        }
         model.addSource(
             name: path.trimmed,
             proto: proto,
