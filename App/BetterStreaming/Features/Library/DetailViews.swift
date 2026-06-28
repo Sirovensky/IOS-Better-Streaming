@@ -255,6 +255,13 @@ struct AllSongsView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
+                PlayShuffleBar(
+                    play: { model.engine.setShuffle(false); model.engine.play(model.audioTracks) },
+                    shuffle: { model.shuffleAll() }
+                )
+                .disabled(model.audioTracks.isEmpty)
+                .padding(.bottom, 6)
+
                 ForEach(model.audioTracks) { track in
                     TrackRowView(track: track, context: model.audioTracks)
                     Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
@@ -265,6 +272,25 @@ struct AllSongsView: View {
         }
         .appScreenBackground()
         .navigationTitle("Songs")
+    }
+}
+
+/// Reusable Play / Shuffle action pair for list headers.
+struct PlayShuffleBar: View {
+    var play: () -> Void
+    var shuffle: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: play) {
+                Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(PrimaryActionButtonStyle())
+            Button(action: shuffle) {
+                Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(SecondaryActionButtonStyle())
+        }
     }
 }
 
