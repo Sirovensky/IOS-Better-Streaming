@@ -323,7 +323,9 @@ final class PlaybackEngine {
             player.play()
             isPlaying = true
         }
-        onTrackStarted?(queue[currentIndex])
+        if queue.indices.contains(currentIndex) {
+            onTrackStarted?(queue[currentIndex])
+        }
         updateNowPlayingInfo()
     }
 
@@ -439,12 +441,14 @@ final class PlaybackEngine {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }
+        let safeDuration = duration.isFinite && duration >= 0 ? duration : 0
+        let safeElapsed = elapsed.isFinite && elapsed >= 0 ? elapsed : 0
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: track.title,
             MPMediaItemPropertyArtist: track.artist,
             MPMediaItemPropertyAlbumTitle: track.album,
-            MPMediaItemPropertyPlaybackDuration: duration,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
+            MPMediaItemPropertyPlaybackDuration: safeDuration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: safeElapsed,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
         ]
         if let art = currentArtwork {
@@ -457,29 +461,32 @@ final class PlaybackEngine {
         let center = MPRemoteCommandCenter.shared()
         // Remote command handlers are delivered on the main thread, so it's safe
         // to bridge into the MainActor synchronously.
+        // Remote commands may be delivered off the main thread on some OS
+        // versions; hop to the main actor explicitly rather than asserting it.
         center.playCommand.addTarget { [weak self] _ in
-            MainActor.assumeIsolated { self?.resume() }
+            Task { @MainActor in self?.resume() }
             return .success
         }
         center.pauseCommand.addTarget { [weak self] _ in
-            MainActor.assumeIsolated { self?.pause() }
+            Task { @MainActor in self?.pause() }
             return .success
         }
         center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            MainActor.assumeIsolated { self?.togglePlayPause() }
+            Task { @MainActor in self?.togglePlayPause() }
             return .success
         }
         center.nextTrackCommand.addTarget { [weak self] _ in
-            MainActor.assumeIsolated { self?.next() }
+            Task { @MainActor in self?.next() }
             return .success
         }
         center.previousTrackCommand.addTarget { [weak self] _ in
-            MainActor.assumeIsolated { self?.previous() }
+            Task { @MainActor in self?.previous() }
             return .success
         }
         center.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            MainActor.assumeIsolated { self?.seek(toSeconds: event.positionTime) }
+            let position = event.positionTime
+            Task { @MainActor in self?.seek(toSeconds: position) }
             return .success
         }
     }
