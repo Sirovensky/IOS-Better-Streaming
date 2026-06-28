@@ -112,11 +112,14 @@ struct NowPlayingView: View {
                             .shadow(color: .black.opacity(0.4), radius: 24, y: 14)
                             .scaleEffect(engine.isPlaying ? 1.0 : 0.84)
                             .animation(.spring(response: 0.45, dampingFraction: 0.7), value: engine.isPlaying)
+                            .gesture(dismissDrag)
 
                         Spacer(minLength: 16)
 
                         trackHeader(track)
                             .padding(.horizontal, 28)
+                            .contentShape(Rectangle())
+                            .gesture(dismissDrag)
 
                         scrubber
                             .padding(.horizontal, 28)
@@ -165,6 +168,16 @@ struct NowPlayingView: View {
             endPoint: .bottom
         )
         .overlay(Color.black.opacity(0.18))
+    }
+
+    /// Swipe down anywhere in the top area (artwork / title) to dismiss.
+    private var dismissDrag: some Gesture {
+        DragGesture(minimumDistance: 24, coordinateSpace: .local)
+            .onEnded { value in
+                if value.translation.height > 60, abs(value.translation.width) < value.translation.height {
+                    dismiss()
+                }
+            }
     }
 
     private var grabber: some View {
