@@ -174,7 +174,7 @@ actor LibraryService {
         guard let cfg = configs.first(where: { $0.id == sourceID }) else { return allTracks }
 
         if cfg.proto == SourceProtocol.local.rawValue {
-            let scanned = try scanLocal(cfg)
+            let scanned = try await scanLocal(cfg)
             allTracks.removeAll { $0.sourceID == cfg.id }
             allTracks.append(contentsOf: scanned)
             refreshCacheStates()
@@ -444,7 +444,7 @@ actor LibraryService {
         return url
     }
 
-    private func scanLocal(_ cfg: SourceConfig) throws -> [Track] {
+    private func scanLocal(_ cfg: SourceConfig) async throws -> [Track] {
         guard let root = localRootURL(for: cfg) else {
             throw LibraryError(kind: .notFound, message: "Couldn’t open the chosen folder. Pick it again.")
         }
@@ -460,7 +460,35 @@ actor LibraryService {
                 scanned.append(localTrack(url: url, kind: kind, cfg: cfg, size: values?.fileSize, modified: values?.contentModificationDate))
             }
         }
+        await attachLocalArtwork(&scanned)
         return scanned
+    }
+
+    /// Per album: use a folder cover image (cover.jpg/folder.jpg/…) if present,
+    /// otherwise extract embedded artwork from a track — so covers show in the
+    /// library without playing.
+    private func attachLocalArtwork(_ tracks: inout [Track]) async {
+        var coverByAlbum: [String: URL] = [:]
+        var dirChecked: [String: URL?] = [:]
+        let names: Set<String> = ["cover.jpg", "folder.jpg", "front.jpg", "cover.png", "folder.png", "album.jpg", "albumart.jpg"]
+        for i in tracks.indices {
+            let albumID = tracks[i].albumID
+            if let url = coverByAlbum[albumID] { tracks[i].artworkURL = url; continue }
+            let dir = URL(fileURLWithPath: tracks[i].remotePath ?? tracks[i].folderPath).deletingLastPathComponent()
+            let folderCover: URL?
+            if let cached = dirChecked[dir.path] {
+                folderCover = cached
+            } else {
+                folderCover = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil))?
+                    .first { names.contains($0.lastPathComponent.lowercased()) }
+                dirChecked[dir.path] = folderCover
+            }
+            let art = folderCover ?? (await cacheAlbumArtwork(for: tracks[i]))
+            if let art {
+                coverByAlbum[albumID] = art
+                tracks[i].artworkURL = art
+            }
+        }
     }
 
     private func localTrack(url: URL, kind: IndexedMediaKind, cfg: SourceConfig, size: Int?, modified: Date?) -> Track {
