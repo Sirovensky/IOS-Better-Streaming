@@ -373,6 +373,12 @@ final class AppModel {
             Task {
                 let cached = await self.library.isCached(track)
                 if cached, let i = self.trackIndex[track.id] { self.tracks[i].cacheState = .cached }
+                if let art = await self.library.cacheAlbumArtwork(for: track) {
+                    for idx in self.tracks.indices
+                    where self.tracks[idx].albumID == track.albumID && self.tracks[idx].artworkURL == nil {
+                        self.tracks[idx].artworkURL = art
+                    }
+                }
             }
         }
     }

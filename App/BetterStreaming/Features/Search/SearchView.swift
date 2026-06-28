@@ -1,9 +1,22 @@
 import SwiftUI
 
+private extension View {
+    /// Focus the search field where supported (iOS 18+); no-op on older OS.
+    @ViewBuilder
+    func autoFocusSearch(_ focused: FocusState<Bool>.Binding) -> some View {
+        if #available(iOS 18.0, *) {
+            self.searchFocused(focused)
+        } else {
+            self
+        }
+    }
+}
+
 struct SearchView: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
     @State private var path: [LibraryRoute] = []
+    @FocusState private var searchFocused: Bool
 
     private var results: [Track] { model.searchResults(query) }
 
@@ -23,6 +36,12 @@ struct SearchView: View {
             .libraryDestinations()
         }
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Songs, artists, albums, folders")
+        .autoFocusSearch($searchFocused)
+        .task {
+            // Open the keyboard immediately when Search appears.
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            searchFocused = true
+        }
     }
 
     private var resultsList: some View {

@@ -44,6 +44,7 @@ struct SourceConfig: Codable, Sendable, Identifiable {
 /// the App's own `MediaKind`/`CacheState` don't clash with Core's.
 actor LibraryService {
     private let cacheDir: URL
+    private let artworkDir: URL
     private let configsURL: URL
     private let libraryURL: URL
 
@@ -66,6 +67,8 @@ actor LibraryService {
             ?? fm.temporaryDirectory
         cacheDir = caches.appendingPathComponent("Media", isDirectory: true)
         try? fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        artworkDir = caches.appendingPathComponent("Artwork", isDirectory: true)
+        try? fm.createDirectory(at: artworkDir, withIntermediateDirectories: true)
         configsURL = support.appendingPathComponent("sources.json")
         libraryURL = support.appendingPathComponent("library.json")
     }
@@ -337,6 +340,16 @@ actor LibraryService {
             if let data = try? await item.load(.dataValue) { return data }
         }
         return nil
+    }
+
+    /// Extract embedded artwork from a locally-available track and cache a
+    /// shared thumbnail per album. Returns the cached file URL (or nil).
+    func cacheAlbumArtwork(for track: Track) async -> URL? {
+        let dest = artworkDir.appendingPathComponent(Self.stableHash(track.albumID) + ".jpg")
+        if FileManager.default.fileExists(atPath: dest.path) { return dest }
+        guard let data = await artworkData(for: track) else { return nil }
+        try? data.write(to: dest, options: .atomic)
+        return FileManager.default.fileExists(atPath: dest.path) ? dest : nil
     }
 
     // MARK: Internals
