@@ -110,6 +110,16 @@ final class PlaybackEngine {
         startCurrentItem(autoPlay: true)
     }
 
+    /// Shuffle a fresh set and start from a random track (not pinned to index 0).
+    func playShuffled(_ tracks: [Track]) {
+        guard !tracks.isEmpty else { return }
+        shuffleEnabled = true
+        unshuffledQueue = tracks
+        queue = tracks.shuffled()
+        currentIndex = 0
+        startCurrentItem(autoPlay: true)
+    }
+
     func playNext(_ track: Track) {
         let insertAt = min(currentIndex + 1, queue.count)
         queue.insert(track, at: insertAt)

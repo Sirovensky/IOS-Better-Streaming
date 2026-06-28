@@ -286,22 +286,21 @@ final class AppModel {
     func playAlbum(_ albumID: String, shuffled: Bool = false) {
         let list = playableContext(tracks(forAlbum: albumID))
         guard !list.isEmpty else { return }
-        engine.setShuffle(shuffled)
-        engine.play(list, startAt: 0)
+        if shuffled { engine.playShuffled(list) }
+        else { engine.setShuffle(false); engine.play(list, startAt: 0) }
     }
 
     func playPlaylist(_ playlist: Playlist, shuffled: Bool = false) {
         let list = playableContext(tracks(playlist.trackIDs))
         guard !list.isEmpty else { return }
-        engine.setShuffle(shuffled)
-        engine.play(list, startAt: 0)
+        if shuffled { engine.playShuffled(list) }
+        else { engine.setShuffle(false); engine.play(list, startAt: 0) }
     }
 
     func shuffleAll() {
         let list = playableContext(audioTracks)
         guard !list.isEmpty else { return }
-        engine.setShuffle(true)
-        engine.play(list, startAt: 0)
+        engine.playShuffled(list)
     }
 
     private func playableContext(_ context: [Track]) -> [Track] {
@@ -415,6 +414,9 @@ final class AppModel {
 
     private func reconcileAutoCache() {
         let reachable = sourceHealth.values.contains { $0.isReachable }
-        autoCache.scheduleReconcile(library: audioTracks, reachable: reachable && !offlineMode)
+        // Local-file tracks are always on-device; never auto-cache/evict them.
+        let localIDs = Set(sourceConfigs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
+        let evictable = audioTracks.filter { !localIDs.contains($0.sourceID) }
+        autoCache.scheduleReconcile(library: evictable, reachable: reachable && !offlineMode)
     }
 }

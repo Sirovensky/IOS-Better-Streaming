@@ -240,18 +240,19 @@ actor LibraryService {
             modifiedAt: entry.modifiedAt
         )
         let components = entry.path.remotePathComponents
-        let title = (entry.name as NSString).deletingPathExtension
+        let parsed = Self.parseTrack((entry.name as NSString).deletingPathExtension)
         let album = components.count >= 2 ? components[components.count - 2] : cfg.name
         let artist = components.count >= 3 ? components[components.count - 3] : "Unknown Artist"
         return Track(
             id: identity.stableKey,
-            title: title.isEmpty ? entry.name : title,
+            title: parsed.title.isEmpty ? entry.name : parsed.title,
             artist: artist,
             album: album,
             albumID: "\(artist)::\(album)".lowercased(),
             artistID: artist.lowercased(),
             genre: "Unknown",
             durationSeconds: 0,
+            trackNumber: parsed.number,
             kind: kind == .audio ? .audio : .video,
             cacheState: .remoteOnly,
             sourceID: cfg.id,
@@ -465,18 +466,19 @@ actor LibraryService {
     private func localTrack(url: URL, kind: IndexedMediaKind, cfg: SourceConfig, size: Int?, modified: Date?) -> Track {
         let path = url.path
         let components = url.pathComponents
-        let title = url.deletingPathExtension().lastPathComponent
+        let parsed = Self.parseTrack(url.deletingPathExtension().lastPathComponent)
         let album = components.count >= 2 ? components[components.count - 2] : cfg.name
         let artist = components.count >= 3 ? components[components.count - 3] : "Unknown Artist"
         return Track(
             id: "local-" + Self.stableHash(path),
-            title: title.isEmpty ? url.lastPathComponent : title,
+            title: parsed.title.isEmpty ? url.lastPathComponent : parsed.title,
             artist: artist,
             album: album,
             albumID: "\(artist)::\(album)".lowercased(),
             artistID: artist.lowercased(),
             genre: "Unknown",
             durationSeconds: 0,
+            trackNumber: parsed.number,
             kind: kind == .audio ? .audio : .video,
             cacheState: .cached,
             sourceID: cfg.id,
@@ -550,6 +552,19 @@ actor LibraryService {
             forKey: .fileProtectionKey
         )
         #endif
+    }
+
+    /// Parse a leading track number off a filename and return the cleaned title.
+    /// "05 Avantasia - Song" -> (5, "Avantasia - Song"). Years like "1979 x"
+    /// (4+ digits) are left untouched.
+    static func parseTrack(_ rawTitle: String) -> (number: Int?, title: String) {
+        let trimmed = rawTitle.trimmingCharacters(in: .whitespaces)
+        let digits = trimmed.prefix(while: { $0.isNumber })
+        guard !digits.isEmpty, digits.count <= 3, let number = Int(digits) else { return (nil, trimmed) }
+        var rest = trimmed.dropFirst(digits.count)
+        rest = rest.drop(while: { " .-_)\t".contains($0) })
+        let title = rest.trimmingCharacters(in: .whitespaces)
+        return (number, title.isEmpty ? trimmed : title)
     }
 
     private static func stableHash(_ string: String) -> String {
