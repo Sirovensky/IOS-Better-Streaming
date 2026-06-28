@@ -396,14 +396,36 @@ public actor FileBackedCacheManager: CacheManaging {
     private var jobItemsByID: [CacheJobID: Set<MediaItemID>] = [:]
     private var eventContinuationsByJobID: [CacheJobID: [UUID: AsyncStream<CacheEvent>.Continuation]] = [:]
 
-    public init(rootDirectory: URL, records: [CacheRecord] = []) {
+    /// Soft budget (in bytes) for auto-cached/prefetched files that are safe to evict.
+    /// `nil` means unlimited (no automatic eviction). Pinned content
+    /// (`.manual/.folder/.playlist/.smartPack`) is never counted nor evicted.
+    public var maxAutoCacheBytes: Int64?
+
+    public init(rootDirectory: URL, records: [CacheRecord] = [], maxAutoCacheBytes: Int64? = nil) {
         self.pathResolver = CachePathResolver(rootDirectory: rootDirectory)
         self.recordsByMediaItemID = Dictionary(uniqueKeysWithValues: records.map { ($0.mediaItemID, $0) })
+        self.maxAutoCacheBytes = maxAutoCacheBytes
     }
 
-    public init(pathResolver: CachePathResolver, records: [CacheRecord] = []) {
+    public init(pathResolver: CachePathResolver, records: [CacheRecord] = [], maxAutoCacheBytes: Int64? = nil) {
         self.pathResolver = pathResolver
         self.recordsByMediaItemID = Dictionary(uniqueKeysWithValues: records.map { ($0.mediaItemID, $0) })
+        self.maxAutoCacheBytes = maxAutoCacheBytes
+    }
+
+    /// Updates the auto-cache budget at runtime. Pass `nil` to disable eviction.
+    public func setMaxAutoCacheBytes(_ bytes: Int64?) {
+        maxAutoCacheBytes = bytes.map { max(0, $0) }
+    }
+
+    /// Marks an item as freshly played so it sorts as "warm" during quota eviction.
+    public func notePlayed(_ mediaItemID: MediaItemID) {
+        guard var record = recordsByMediaItemID[mediaItemID] else {
+            return
+        }
+        record.lastPlayedAt = Date()
+        recordsByMediaItemID[mediaItemID] = record
+        emit(.recordChanged(record), for: mediaItemID)
     }
 
     public func record(for itemID: MediaItemID) async throws -> CacheRecord? {
@@ -673,7 +695,68 @@ public actor FileBackedCacheManager: CacheManaging {
     }
 
     public func enforceQuota() async throws {
-        // Quota policy lands with durable offline packs. MVP keeps pinned/cache files stable.
+        guard let budget = maxAutoCacheBytes else {
+            return // Unlimited: nothing to enforce.
+        }
+
+        var evictable = recordsByMediaItemID.values.filter(Self.isEvictable)
+        var total = evictable.reduce(Int64(0)) { $0 + $1.bytesDone }
+        guard total > budget else {
+            return
+        }
+
+        // Coldest first: oldest `lastPlayedAt` is evicted first; a `nil`
+        // `lastPlayedAt` (never played) is treated as the coldest of all.
+        evictable.sort { lhs, rhs in
+            switch (lhs.lastPlayedAt, rhs.lastPlayedAt) {
+            case let (left?, right?):
+                return left < right
+            case (nil, .some):
+                return true
+            case (.some, nil):
+                return false
+            case (nil, nil):
+                return false
+            }
+        }
+
+        for record in evictable {
+            guard total > budget else {
+                break
+            }
+
+            let fileURL = record.identity.map { pathResolver.completeFileURL(for: $0) } ?? record.localFileURL
+            if let fileURL {
+                try? FileManager.default.removeItem(at: fileURL)
+            }
+
+            var evicted = record
+            evicted.state = .evicted
+            evicted.localFileURL = nil
+            recordsByMediaItemID[evicted.mediaItemID] = evicted
+            emit(.recordChanged(evicted), for: evicted.mediaItemID)
+
+            total -= record.bytesDone
+        }
+    }
+
+    /// A record is safe to auto-evict only when it holds completed bytes on disk and
+    /// nothing durable pins it. Empty `requiredBy` or only `.queuePrefetch` entries
+    /// are evictable; `.manual/.folder/.playlist/.smartPack` are never evicted.
+    private static func isEvictable(_ record: CacheRecord) -> Bool {
+        switch record.state {
+        case .cached, .prefetched:
+            break
+        default:
+            return false
+        }
+
+        return record.requiredBy.allSatisfy { requirement in
+            if case .queuePrefetch = requirement {
+                return true
+            }
+            return false
+        }
     }
 
     private func removeContinuation(_ continuationID: UUID, for jobID: CacheJobID) {

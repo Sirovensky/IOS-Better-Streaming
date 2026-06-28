@@ -2,12 +2,13 @@ import SwiftUI
 
 @main
 struct BetterStreamingApp: App {
-    @StateObject private var environment = AppEnvironment()
+    @State private var model = AppModel()
 
     var body: some Scene {
         WindowGroup {
             RootTabView()
-                .environmentObject(environment)
+                .environment(model)
+                .tint(DesignTokens.brandPrimary)
         }
     }
 }

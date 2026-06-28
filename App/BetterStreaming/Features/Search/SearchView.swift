@@ -1,137 +1,85 @@
 import SwiftUI
 
 struct SearchView: View {
-    @EnvironmentObject private var environment: AppEnvironment
+    @Environment(AppModel.self) private var model
     @State private var query = ""
-    @State private var filter: SearchFilter = .all
+    @State private var path: [LibraryRoute] = []
+
+    private var results: [Track] { model.searchResults(query) }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    Picker("Search filter", selection: $filter) {
-                        ForEach(SearchFilter.allCases) { filter in
-                            Text(filter.rawValue).tag(filter)
-                        }
-                    }
-                    .pickerStyle(.segmented)
+        NavigationStack(path: $path) {
+            Group {
+                if query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    browse
+                } else if results.isEmpty {
+                    ContentUnavailableView.search(text: query)
+                } else {
+                    resultsList
+                }
+            }
+            .appScreenBackground()
+            .navigationTitle("Search")
+            .libraryDestinations()
+        }
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Songs, artists, albums, folders")
+    }
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        SectionHeader(
-                            title: query.isEmpty ? "Recent Context" : "Matches",
-                            detail: "Results show title, filename, folder path, and cache state"
-                        )
+    private var resultsList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 4) {
+                ForEach(results) { track in
+                    TrackRowView(track: track, context: results)
+                    Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                }
+            }
+            .padding(DesignTokens.phonePadding)
+            .padding(.bottom, 120)
+        }
+    }
 
-                        let results = filteredResults
-                        if results.isEmpty {
-                            EmptySearchCard(query: query)
-                        } else {
-                            VStack(spacing: 0) {
-                                ForEach(results) { result in
-                                    SearchResultRow(result: result)
-
-                                    if result.id != results.last?.id {
-                                        Divider()
-                                            .overlay(DesignTokens.borderSubtle.opacity(DesignTokens.borderSubtleOpacity))
+    private var browse: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 18) {
+                if !model.recentlyPlayed.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        SectionHeader(title: "Recently Played")
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 14) {
+                                ForEach(model.recentlyPlayed.prefix(10)) { track in
+                                    SquareArtTile(artworkKey: track.albumID, url: track.artworkURL,
+                                                  title: track.title, subtitle: track.artist) {
+                                        path.append(.album(track.albumID))
                                     }
                                 }
                             }
-                            .padding(.horizontal, 12)
-                            .surfaceCard(fill: DesignTokens.surfaceCard)
+                        }
+                        .scrollIndicators(.hidden)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    SectionHeader(title: "Browse")
+                    let genres = Array(Set(model.audioTracks.map(\.genre))).sorted()
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                        ForEach(genres, id: \.self) { genre in
+                            Button { query = genre } label: {
+                                HStack {
+                                    Text(genre).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
+                                    Spacer()
+                                    Image(systemName: "music.quarternote.3").foregroundStyle(DesignTokens.brandPrimary)
+                                }
+                                .padding(14)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .surfaceCard(fill: DesignTokens.surfaceCard)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
-                .padding(DesignTokens.phonePadding)
-                .padding(.bottom, 24)
             }
-            .appScreenBackground()
-            .searchable(text: $query, prompt: "Songs, folders, albums, files")
-            .navigationTitle("Search")
-            .toolbar {
-                Menu {
-                    Button("Playable Only", systemImage: "checkmark.circle") {}
-                    Button("Reveal Paths", systemImage: "folder") {}
-                    Button("Offline Mode", systemImage: environment.offlineMode ? "wifi.slash" : "wifi") {
-                        environment.toggleOfflineMode()
-                    }
-                } label: {
-                    Label("Search Options", systemImage: "line.3.horizontal.decrease.circle")
-                }
-            }
+            .padding(DesignTokens.phonePadding)
+            .padding(.bottom, 120)
         }
     }
-
-    private var filteredResults: [SearchResult] {
-        environment.searchResults(for: query).filter { result in
-            switch filter {
-            case .all:
-                true
-            case .cached:
-                result.status == .cached || result.status == .prefetched || result.status == .stale
-            case .folders:
-                result.systemImage == "folder"
-            }
-        }
-    }
-}
-
-private enum SearchFilter: String, CaseIterable, Identifiable {
-    case all = "All"
-    case cached = "Cached"
-    case folders = "Folders"
-
-    var id: String { rawValue }
-}
-
-private struct SearchResultRow: View {
-    var result: SearchResult
-
-    var body: some View {
-        HStack(spacing: 12) {
-            MediaArtwork(symbol: result.systemImage, status: result.status, size: 46)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(result.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(DesignTokens.textPrimary)
-                    .lineLimit(1)
-                Text(result.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(DesignTokens.textSecondary)
-                    .lineLimit(1)
-                Text(result.context.middleTruncated(maxLength: 54))
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(DesignTokens.textTertiary)
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 8)
-
-            CacheStatusPill(status: result.status)
-                .fixedSize()
-        }
-        .padding(.vertical, 9)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(result.title), \(result.status.label)")
-    }
-}
-
-private struct EmptySearchCard: View {
-    var query: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            StatusPill(label: "No match", systemImage: "magnifyingglass", tint: DesignTokens.textSecondary)
-            Text("No indexed title, filename, album, artist, or folder path matches \(query).")
-                .font(.subheadline)
-                .foregroundStyle(DesignTokens.textSecondary)
-        }
-        .padding(14)
-        .surfaceCard(fill: DesignTokens.surfaceCard)
-    }
-}
-
-#Preview {
-    SearchView()
-        .environmentObject(AppEnvironment())
 }

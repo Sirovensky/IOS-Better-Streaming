@@ -19,10 +19,10 @@ public struct Redactor: Sendable {
         var redacted = value
         redacted = redactURLs(in: redacted)
         redacted = redactAuthorization(in: redacted)
-        redacted = redactAssignments(in: redacted, keys: Self.secretAssignmentKeys, placeholder: Self.redactedPlaceholder)
-        redacted = redactAssignments(in: redacted, keys: Self.usernameAssignmentKeys, placeholder: Self.usernamePlaceholder)
-        redacted = redactAssignments(in: redacted, keys: Self.hostAssignmentKeys, placeholder: Self.hostPlaceholder)
-        redacted = redactAssignments(in: redacted, keys: Self.pathAssignmentKeys, placeholder: Self.pathPlaceholder)
+        redacted = redactAssignments(in: redacted, using: Self.secretAssignmentRegexes, placeholder: Self.redactedPlaceholder)
+        redacted = redactAssignments(in: redacted, using: Self.usernameAssignmentRegexes, placeholder: Self.usernamePlaceholder)
+        redacted = redactAssignments(in: redacted, using: Self.hostAssignmentRegexes, placeholder: Self.hostPlaceholder)
+        redacted = redactAssignments(in: redacted, using: Self.pathAssignmentRegexes, placeholder: Self.pathPlaceholder)
         redacted = redactUNCPaths(in: redacted)
         redacted = redactKnownTokenShapes(in: redacted)
         redacted = redactEmailAddresses(in: redacted)
@@ -78,10 +78,7 @@ public struct Redactor: Sendable {
     }
 
     private func redactURLs(in value: String) -> String {
-        replacingMatches(
-            in: value,
-            pattern: #"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"']+"#
-        ) { match in
+        replacingMatches(in: value, using: Self.urlRegex) { match in
             sanitizedURLString(match)
         }
     }
@@ -161,31 +158,27 @@ public struct Redactor: Sendable {
 
     private func redactAuthorization(in value: String) -> String {
         var redacted = value
-        redacted = redacted.replacingOccurrences(
-            of: #"(?i)\b(authorization\s*[:=]\s*)(?:bearer|basic|digest)?\s*[^,\s;}]+"#,
-            with: "$1\(Self.redactedPlaceholder)",
-            options: .regularExpression
+        redacted = replacingAll(
+            in: redacted,
+            using: Self.authorizationAssignmentRegex,
+            template: "$1\(Self.redactedPlaceholder)"
         )
-        redacted = redacted.replacingOccurrences(
-            of: #"(?i)\b(bearer|basic)\s+[a-z0-9._~+/\-=]{4,}"#,
-            with: "$1 \(Self.tokenPlaceholder)",
-            options: .regularExpression
+        redacted = replacingAll(
+            in: redacted,
+            using: Self.bearerBasicTokenRegex,
+            template: "$1 \(Self.tokenPlaceholder)"
         )
         return redacted
     }
 
-    private func redactAssignments(in value: String, keys: String, placeholder: String) -> String {
-        replacingMatches(
-            in: value,
-            pattern: #"(?i)(["']?\b(?:\#(keys))\b["']?)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^&\s,;}]+)"#
-        ) { match in
+    private func redactAssignments(in value: String, using regexes: AssignmentRegexes, placeholder: String) -> String {
+        replacingMatches(in: value, using: regexes.full) { match in
             let nsMatch = match as NSString
             guard
-                let regex = try? NSRegularExpression(
-                    pattern: #"(?i)(["']?\b(?:\#(keys))\b["']?)(\s*[:=]\s*)"#,
-                    options: []
-                ),
-                let prefixMatch = regex.firstMatch(in: match, range: NSRange(location: 0, length: nsMatch.length))
+                let prefixMatch = regexes.prefix.firstMatch(
+                    in: match,
+                    range: NSRange(location: 0, length: nsMatch.length)
+                )
             else {
                 return placeholder
             }
@@ -197,54 +190,40 @@ public struct Redactor: Sendable {
     }
 
     private func redactUNCPaths(in value: String) -> String {
-        value.replacingOccurrences(
-            of: #"\\\\[^\\\s]+(?:\\[^\s\\]+)*"#,
-            with: Self.pathPlaceholder,
-            options: .regularExpression
-        )
+        replacingAll(in: value, using: Self.uncPathRegex, template: Self.pathPlaceholder)
     }
 
     private func redactKnownTokenShapes(in value: String) -> String {
-        value.replacingOccurrences(
-            of: #"\b(?:sk|pk|gh[pousr]?|xox[baprs])[-_][a-zA-Z0-9._-]{12,}\b"#,
-            with: Self.tokenPlaceholder,
-            options: .regularExpression
-        )
+        replacingAll(in: value, using: Self.knownTokenShapeRegex, template: Self.tokenPlaceholder)
     }
 
     private func redactEmailAddresses(in value: String) -> String {
-        value.replacingOccurrences(
-            of: #"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b"#,
-            with: "\(Self.usernamePlaceholder)@\(Self.hostPlaceholder)",
-            options: .regularExpression
+        replacingAll(
+            in: value,
+            using: Self.emailRegex,
+            template: "\(Self.usernamePlaceholder)@\(Self.hostPlaceholder)"
         )
     }
 
     private func redactHostLiterals(in value: String) -> String {
         var redacted = value
-        redacted = redacted.replacingOccurrences(
-            of: #"(?<![\w])(?:\d{1,3}\.){3}\d{1,3}(?![\w])"#,
-            with: Self.hostPlaceholder,
-            options: .regularExpression
-        )
-        redacted = redacted.replacingOccurrences(
-            of: #"\[[0-9a-fA-F:]{2,}\]"#,
-            with: Self.hostPlaceholder,
-            options: .regularExpression
-        )
-        redacted = redacted.replacingOccurrences(
-            of: #"(?i)(?<![@\w-])(?:[a-z0-9-]{1,63}\.)+(?:local|lan|home|internal|home\.arpa|example|invalid|test|com|net|org|io|dev|app)(?![\w-])"#,
-            with: Self.hostPlaceholder,
-            options: .regularExpression
-        )
+        redacted = replacingAll(in: redacted, using: Self.ipv4Regex, template: Self.hostPlaceholder)
+        redacted = replacingAll(in: redacted, using: Self.ipv6Regex, template: Self.hostPlaceholder)
+        redacted = replacingAll(in: redacted, using: Self.hostNameRegex, template: Self.hostPlaceholder)
         return redacted
     }
 
-    private func replacingMatches(in value: String, pattern: String, transform: (String) -> String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return value
-        }
+    /// Applies a template-based replacement to every match of a precompiled regex.
+    /// Equivalent to `replacingOccurrences(of:with:options:.regularExpression)`.
+    private func replacingAll(in value: String, using regex: NSRegularExpression, template: String) -> String {
+        regex.stringByReplacingMatches(
+            in: value,
+            range: NSRange(location: 0, length: (value as NSString).length),
+            withTemplate: template
+        )
+    }
 
+    private func replacingMatches(in value: String, using regex: NSRegularExpression, transform: (String) -> String) -> String {
         let nsValue = value as NSString
         let matches = regex.matches(in: value, range: NSRange(location: 0, length: nsValue.length))
         var result = value
@@ -300,6 +279,72 @@ public struct Redactor: Sendable {
     private static let usernameAssignmentKeys = #"username|user|login|account|domain|workgroup"#
     private static let hostAssignmentKeys = #"host|hostname|server|endpoint|address|ip"#
     private static let pathAssignmentKeys = #"path|folder|file|share|root"#
+
+    // MARK: - Cached compiled regular expressions
+    //
+    // `redact` runs on a logging hot path. `NSRegularExpression` is immutable and
+    // documented as thread-safe, so we compile each pattern exactly once and reuse
+    // it. `nonisolated(unsafe)` opts these out of Swift 6's Sendable check (the type
+    // is not marked `Sendable` on every SDK) without changing the immutable, thread-safe
+    // semantics relied upon here.
+
+    private struct AssignmentRegexes {
+        let full: NSRegularExpression
+        let prefix: NSRegularExpression
+
+        init(keys: String) {
+            full = try! NSRegularExpression(
+                pattern: #"(?i)(["']?\b(?:\#(keys))\b["']?)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^&\s,;}]+)"#,
+                options: []
+            )
+            prefix = try! NSRegularExpression(
+                pattern: #"(?i)(["']?\b(?:\#(keys))\b["']?)(\s*[:=]\s*)"#,
+                options: []
+            )
+        }
+    }
+
+    nonisolated(unsafe) private static let urlRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"']+"#,
+        options: []
+    )
+    nonisolated(unsafe) private static let authorizationAssignmentRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b(authorization\s*[:=]\s*)(?:bearer|basic|digest)?\s*[^,\s;}]+"#,
+        options: []
+    )
+    nonisolated(unsafe) private static let bearerBasicTokenRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b(bearer|basic)\s+[a-z0-9._~+/\-=]{4,}"#,
+        options: []
+    )
+    nonisolated(unsafe) private static let uncPathRegex = try! NSRegularExpression(
+        pattern: #"\\\\[^\\\s]+(?:\\[^\s\\]+)*"#,
+        options: []
+    )
+    nonisolated(unsafe) private static let knownTokenShapeRegex = try! NSRegularExpression(
+        pattern: #"\b(?:sk|pk|gh[pousr]?|xox[baprs])[-_][a-zA-Z0-9._-]{12,}\b"#,
+        options: []
+    )
+    nonisolated(unsafe) private static let emailRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b"#,
+        options: []
+    )
+    nonisolated(unsafe) private static let ipv4Regex = try! NSRegularExpression(
+        pattern: #"(?<![\w])(?:\d{1,3}\.){3}\d{1,3}(?![\w])"#,
+        options: []
+    )
+    nonisolated(unsafe) private static let ipv6Regex = try! NSRegularExpression(
+        pattern: #"\[[0-9a-fA-F:]{2,}\]"#,
+        options: []
+    )
+    nonisolated(unsafe) private static let hostNameRegex = try! NSRegularExpression(
+        pattern: #"(?i)(?<![@\w-])(?:[a-z0-9-]{1,63}\.)+(?:local|lan|home|internal|home\.arpa|example|invalid|test|com|net|org|io|dev|app)(?![\w-])"#,
+        options: []
+    )
+
+    nonisolated(unsafe) private static let secretAssignmentRegexes = AssignmentRegexes(keys: secretAssignmentKeys)
+    nonisolated(unsafe) private static let usernameAssignmentRegexes = AssignmentRegexes(keys: usernameAssignmentKeys)
+    nonisolated(unsafe) private static let hostAssignmentRegexes = AssignmentRegexes(keys: hostAssignmentKeys)
+    nonisolated(unsafe) private static let pathAssignmentRegexes = AssignmentRegexes(keys: pathAssignmentKeys)
 
     private static let secretMetadataKeys: Set<String> = [
         "password",

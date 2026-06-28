@@ -322,9 +322,17 @@ public actor PlaybackController: PlaybackControlling {
         state = .preparing
         emit(.stateChanged(state))
 
-        if let renderer = try await prepareRenderer(for: item) {
-            await renderer.play()
+        guard let renderer = try await prepareRenderer(for: item) else {
+            // No renderer was available/prepared for this item. Do not report a
+            // fake `.playing` state with zero renderers: surface the failure.
+            let error = PlaybackError.sourceUnavailable(item.mediaItemID)
+            state = .failed
+            emit(.stateChanged(state))
+            emit(.failed(item.mediaItemID, error))
+            throw error
         }
+
+        await renderer.play()
 
         state = .playing
         emit(.stateChanged(state))

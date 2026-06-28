@@ -16,14 +16,12 @@ let package = Package(
                 "AppFoundation",
                 "RemoteFileSystem",
                 "SMBRemote",
+                "WebDAVRemote",
                 "BetterStreamingSources",
                 "MediaStore",
                 "LibraryIndexer",
                 "CacheManager",
-                "StreamBridge",
                 "PlaybackCore",
-                "PlaylistCore",
-                "MetadataCore",
                 "Diagnostics"
             ]
         ),
@@ -31,14 +29,12 @@ let package = Package(
         .library(name: "AppFoundation", targets: ["AppFoundation"]),
         .library(name: "RemoteFileSystem", targets: ["RemoteFileSystem"]),
         .library(name: "SMBRemote", targets: ["SMBRemote"]),
+        .library(name: "WebDAVRemote", targets: ["WebDAVRemote"]),
         .library(name: "BetterStreamingSources", targets: ["BetterStreamingSources"]),
         .library(name: "MediaStore", targets: ["MediaStore"]),
         .library(name: "LibraryIndexer", targets: ["LibraryIndexer"]),
         .library(name: "CacheManager", targets: ["CacheManager"]),
-        .library(name: "StreamBridge", targets: ["StreamBridge"]),
         .library(name: "PlaybackCore", targets: ["PlaybackCore"]),
-        .library(name: "PlaylistCore", targets: ["PlaylistCore"]),
-        .library(name: "MetadataCore", targets: ["MetadataCore"]),
         .library(name: "Diagnostics", targets: ["Diagnostics"]),
         .library(name: "TestSupport", targets: ["TestSupport"]),
         .executable(name: "LiveSMBProbe", targets: ["LiveSMBProbe"])
@@ -64,6 +60,14 @@ let package = Package(
                 "AppFoundation",
                 "RemoteFileSystem",
                 .product(name: "SMBClient", package: "SMBClient")
+            ]
+        ),
+        .target(
+            name: "WebDAVRemote",
+            dependencies: [
+                "BetterStreamingDomain",
+                "AppFoundation",
+                "RemoteFileSystem"
             ]
         ),
         .target(
@@ -102,36 +106,11 @@ let package = Package(
             ]
         ),
         .target(
-            name: "StreamBridge",
-            dependencies: [
-                "BetterStreamingDomain",
-                "AppFoundation",
-                "RemoteFileSystem",
-                "CacheManager"
-            ]
-        ),
-        .target(
             name: "PlaybackCore",
             dependencies: [
                 "BetterStreamingDomain",
                 "AppFoundation",
                 "CacheManager",
-                "MediaStore"
-            ]
-        ),
-        .target(
-            name: "PlaylistCore",
-            dependencies: [
-                "BetterStreamingDomain",
-                "AppFoundation",
-                "MediaStore"
-            ]
-        ),
-        .target(
-            name: "MetadataCore",
-            dependencies: [
-                "BetterStreamingDomain",
-                "AppFoundation",
                 "MediaStore"
             ]
         ),
@@ -167,6 +146,10 @@ let package = Package(
         .testTarget(
             name: "SMBRemoteIntegrationTests",
             dependencies: ["SMBRemote"]
+        ),
+        .testTarget(
+            name: "WebDAVRemoteTests",
+            dependencies: ["WebDAVRemote"]
         ),
         .testTarget(
             name: "MediaStoreTests",

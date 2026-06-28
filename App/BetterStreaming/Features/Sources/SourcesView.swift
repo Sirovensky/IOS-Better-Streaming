@@ -1,149 +1,86 @@
 import SwiftUI
 
 struct SourcesView: View {
-    @EnvironmentObject private var environment: AppEnvironment
+    @Environment(AppModel.self) private var model
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Sources")
-                                .font(.largeTitle.weight(.semibold))
-                                .foregroundStyle(DesignTokens.textPrimary)
-                            Text("Library roots, health, scan state, and repair actions.")
-                                .font(.subheadline)
-                                .foregroundStyle(DesignTokens.textSecondary)
-                        }
-                        Spacer()
-                        NavigationLink {
-                            SourceSetupView()
-                        } label: {
-                            Label("Add", systemImage: "plus")
-                        }
-                        .buttonStyle(PrimaryActionButtonStyle())
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                if model.sources.isEmpty {
+                    NavigationLink { SourceSetupView() } label: {
+                        AppEmptyState(
+                            title: "No sources yet",
+                            detail: "Add an SMB, WebDAV, FTP, or SFTP server to start building your library.",
+                            systemImage: "externaldrive.badge.plus"
+                        )
                     }
-
-                    ForEach(environment.sources) { source in
-                        SourceCard(source: source)
+                    .buttonStyle(.plain)
+                } else {
+                    ForEach(model.sources) { source in
+                        sourceCard(source)
                     }
-
-                    DiagnosticsPrivacyCard()
                 }
-                .padding(DesignTokens.phonePadding)
-                .padding(.bottom, 24)
             }
-            .appScreenBackground()
-            .navigationTitle("Sources")
-            .navigationBarTitleDisplayMode(.inline)
+            .padding(DesignTokens.phonePadding)
+            .padding(.bottom, 120)
+        }
+        .appScreenBackground()
+        .navigationTitle("Sources")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink { SourceSetupView() } label: {
+                    Image(systemName: "plus")
+                }
+            }
         }
     }
-}
 
-private struct SourceCard: View {
-    var source: LibrarySource
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "server.rack")
-                    .font(.title2)
-                    .foregroundStyle(DesignTokens.connectionTeal)
+    private func sourceCard(_ source: LibrarySource) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: source.proto.glyph)
+                    .font(.title3)
+                    .foregroundStyle(DesignTokens.brandPrimary)
                     .frame(width: 44, height: 44)
                     .background(DesignTokens.surfaceRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(source.name)
-                        .font(.headline)
-                        .foregroundStyle(DesignTokens.textPrimary)
-                    Text(source.detail)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(DesignTokens.textSecondary)
-                        .lineLimit(1)
-                    HStack(spacing: 8) {
-                        SourceHealthPill(health: source.health)
-                        StatusPill(label: source.recommendation, systemImage: "speedometer", tint: recommendationTint)
-                    }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(source.name).font(.headline).foregroundStyle(DesignTokens.textPrimary).lineLimit(1)
+                    Text(source.detail).font(.caption).foregroundStyle(DesignTokens.textSecondary).lineLimit(1)
                 }
+                Spacer()
+                SourceHealthPill(health: source.health)
+            }
 
-                Spacer(minLength: 8)
+            HStack {
+                metric("\(source.trackCount)", "songs")
+                Divider().frame(height: 28).overlay(DesignTokens.borderSubtle.opacity(0.1))
+                metric("\(source.folderCount)", "folders")
+                Divider().frame(height: 28).overlay(DesignTokens.borderSubtle.opacity(0.1))
+                metric(source.speedLabel, "read")
+            }
 
+            HStack {
+                Text(source.lastScanLabel).font(.caption).foregroundStyle(DesignTokens.textTertiary)
+                Spacer()
                 Menu {
-                    Button("Rescan Roots", systemImage: "arrow.triangle.2.circlepath") {}
-                    Button("Update Credentials", systemImage: "key") {}
-                    Button("Repair Path", systemImage: "wrench.and.screwdriver") {}
-                    Button("Copy Redacted Diagnostics", systemImage: "doc.on.doc") {}
-                    Button("Remove Source", systemImage: "trash", role: .destructive) {}
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.title3)
-                        .foregroundStyle(DesignTokens.textSecondary)
-                        .frame(width: 44, height: 44)
-                }
-            }
-
-            HStack(spacing: 10) {
-                MetricTile(value: source.lastScan, label: "Last scan", systemImage: "clock.arrow.circlepath")
-                MetricTile(value: source.speed, label: "Read sample", systemImage: "gauge.with.dots.needle.67percent")
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(source.indexedItems)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(DesignTokens.textTertiary)
-
-                ForEach(source.roots) { root in
-                    HStack(spacing: 10) {
-                        Image(systemName: root.kind == "Video" ? "film" : "folder")
-                            .foregroundStyle(DesignTokens.brandPrimary)
-                            .frame(width: 28)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(root.name)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(DesignTokens.textPrimary)
-                            Text(root.path.middleTruncated(maxLength: 52))
-                                .font(.caption.monospaced())
-                                .foregroundStyle(DesignTokens.textTertiary)
-                        }
-                        Spacer()
-                        StatusPill(label: root.kind, systemImage: "tag", tint: DesignTokens.textSecondary)
+                    Button("Rescan", systemImage: "arrow.triangle.2.circlepath") {}
+                    Button("Remove source", systemImage: "trash", role: .destructive) {
+                        model.removeSource(source.id)
                     }
-                    .padding(10)
-                    .background(DesignTokens.surfaceRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                } label: {
+                    Image(systemName: "ellipsis").foregroundStyle(DesignTokens.textSecondary).frame(width: 30, height: 30)
                 }
             }
         }
         .padding(14)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(source.health == .online ? DesignTokens.connectionTeal : DesignTokens.warning)
-                .frame(width: 3)
-                .clipShape(Capsule())
-                .padding(.vertical, 12)
-        }
         .surfaceCard(fill: DesignTokens.surfaceCard)
     }
 
-    private var recommendationTint: Color {
-        source.health == .online ? DesignTokens.connectionTeal : DesignTokens.warning
-    }
-}
-
-private struct DiagnosticsPrivacyCard: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            StatusPill(label: "Redacted diagnostics", systemImage: "lock.shield", tint: DesignTokens.connectionTeal)
-            Text("Exports should describe reachability, scan counts, speed samples, and source state without raw credentials, usernames, tokens, or credential-bearing URLs.")
-                .font(.footnote)
-                .foregroundStyle(DesignTokens.textSecondary)
+    private func metric(_ value: String, _ label: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(value).font(.subheadline.weight(.semibold).monospacedDigit()).foregroundStyle(DesignTokens.textPrimary)
+            Text(label).font(.caption2).foregroundStyle(DesignTokens.textTertiary)
         }
-        .padding(14)
-        .surfaceCard(fill: DesignTokens.surfaceRaised)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
-}
-
-#Preview {
-    SourcesView()
-        .environmentObject(AppEnvironment())
 }

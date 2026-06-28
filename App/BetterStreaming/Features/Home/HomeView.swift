@@ -1,184 +1,243 @@
 import SwiftUI
 
 struct HomeView: View {
-    @EnvironmentObject private var environment: AppEnvironment
+    @Environment(AppModel.self) private var model
+    @State private var path: [LibraryRoute] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    statsGrid
-                    serverSection
-                    activePlaybackSection
-                    quickActions
+                LazyVStack(alignment: .leading, spacing: 26) {
+                    if model.hasLibrary {
+                        heroSection
+                        if !model.recentlyPlayed.isEmpty { recentlyPlayedRail }
+                        heavyRotationRail
+                        madeForYouRail
+                        recentlyAddedGrid
+                        sourceThread
+                    } else {
+                        emptyState
+                    }
                 }
                 .padding(DesignTokens.phonePadding)
-                .padding(.bottom, 24)
+                .padding(.bottom, 120)
             }
             .appScreenBackground()
-            .navigationTitle("Home")
+            .navigationTitle(greeting)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        NavigationLink {
-                            SettingsView()
-                        } label: {
-                            Label("Settings", systemImage: "gearshape")
-                        }
-
-                        NavigationLink {
-                            SourceSetupView()
-                        } label: {
-                            Label("Add Source", systemImage: "plus")
-                        }
-                    } label: {
-                        Label("More", systemImage: "ellipsis.circle")
+                    NavigationLink(value: LibraryRoute.settings) {
+                        Image(systemName: "gearshape")
                     }
                 }
             }
+            .libraryDestinations()
         }
     }
 
-    private var statsGrid: some View {
-        let summary = environment.librarySummary
-        return LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-            MetricTile(value: "\(summary.sourceCount)", label: "servers", systemImage: "externaldrive.connected.to.line.below")
-            MetricTile(value: "\(summary.trackCount)", label: "songs", systemImage: "music.note.list")
-            MetricTile(value: "\(summary.folderCount)", label: "folders", systemImage: "folder")
-            MetricTile(value: "\(environment.playableOfflineCount)", label: "offline ready", systemImage: "checkmark.circle")
+    private var greeting: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: "Good morning"
+        case 12..<17: "Good afternoon"
+        case 17..<22: "Good evening"
+        default: "Late night"
         }
     }
 
-    private var serverSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(
-                title: "Servers",
-                detail: "\(environment.sources.filter { $0.health == .online }.count) online - \(environment.activeDownloadCount) active transfer"
-            )
+    // MARK: Empty state (no library yet)
 
-            if environment.sources.isEmpty {
-                NavigationLink {
-                    SourceSetupView()
-                } label: {
-                    AppEmptyState(
-                        title: "No sources added",
-                        detail: "Add an SMB server to start indexing and playing your library.",
-                        systemImage: "externaldrive.badge.plus"
-                    )
-                }
-                .buttonStyle(.plain)
-            } else {
-                VStack(spacing: 10) {
-                    ForEach(environment.sources) { source in
-                    NavigationLink {
-                        SourcesView()
-                    } label: {
-                        HStack(spacing: 12) {
-                            MediaArtwork(symbol: "externaldrive.connected.to.line.below", status: source.health.cacheStatus, size: 48)
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(source.name)
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(DesignTokens.textPrimary)
-                                    Spacer()
-                                    SourceHealthPill(health: source.health)
-                                }
-                                Text(source.detail)
-                                    .font(.caption)
-                                    .foregroundStyle(DesignTokens.textSecondary)
-                                    .lineLimit(1)
-                                HStack {
-                                    Text(source.indexedItems)
-                                    Spacer()
-                                    Text(source.speed)
-                                }
-                                .font(.caption2.monospacedDigit())
-                                .foregroundStyle(DesignTokens.textTertiary)
-                            }
-                        }
-                        .padding(12)
-                        .surfaceCard(fill: DesignTokens.surfaceCard)
-                    }
-                    .buttonStyle(.plain)
-                    }
-                }
-            }
-        }
-    }
-
-    private var activePlaybackSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(title: "Now Playing", detail: "Current queue and cache state")
-
-            HStack(spacing: 12) {
-                MediaArtwork(symbol: environment.nowPlaying.artworkSymbol, status: environment.nowPlaying.status, size: 56)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(environment.nowPlaying.title)
-                        .font(.headline)
-                        .foregroundStyle(DesignTokens.textPrimary)
-                        .lineLimit(1)
-                    Text("\(environment.nowPlaying.artist) - \(environment.nowPlaying.album)")
-                        .font(.caption)
-                        .foregroundStyle(DesignTokens.textSecondary)
-                        .lineLimit(1)
-                    HStack(spacing: 8) {
-                        CacheStatusPill(status: environment.nowPlaying.status)
-                        Text("\(environment.queue.count) queued")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(DesignTokens.textTertiary)
-                    }
-                }
-                Spacer()
-                Button(action: environment.togglePlayback) {
-                    Image(systemName: environment.nowPlaying.isPlaying ? "pause.fill" : "play.fill")
-                        .frame(width: 44, height: 44)
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Spacer(minLength: 40)
+            Image(systemName: "music.note.house")
+                .font(.system(size: 52))
+                .foregroundStyle(DesignTokens.brandPrimary)
+            Text(model.hasSources ? "Scanning your library…" : "Add your music")
+                .font(.title2.weight(.bold))
+                .foregroundStyle(DesignTokens.textPrimary)
+            Text(model.hasSources
+                 ? "Your songs will appear here as the scan finds them. Folders are playable before it finishes."
+                 : "Connect your NAS or server to start listening to your own library.")
+                .font(.subheadline)
+                .foregroundStyle(DesignTokens.textSecondary)
+            if !model.hasSources {
+                NavigationLink(value: LibraryRoute.sources) {
+                    Label("Add a source", systemImage: "externaldrive.badge.plus").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
+                .padding(.top, 4)
             }
-            .padding(12)
-            .surfaceCard(fill: DesignTokens.surfaceCard)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: Hero — pick up where you left off
+
+    @ViewBuilder
+    private var heroSection: some View {
+        if let track = model.engine.currentTrack ?? model.recentlyPlayed.first ?? model.audioTracks.first {
+            Button {
+                if model.engine.currentTrack == nil {
+                    model.play(track, in: model.tracks(forAlbum: track.albumID))
+                }
+                model.isNowPlayingPresented = true
+            } label: {
+                HStack(spacing: 16) {
+                    ArtworkView(url: track.artworkURL, artworkKey: track.albumID, cornerRadius: 12)
+                        .frame(width: 96, height: 96)
+                        .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(model.engine.currentTrack == nil ? "PICK UP WHERE YOU LEFT OFF" : "NOW PLAYING")
+                            .font(.caption2.weight(.bold))
+                            .tracking(1.1)
+                            .foregroundStyle(DesignTokens.brandPrimary)
+                        Text(track.title)
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(DesignTokens.textPrimary)
+                            .lineLimit(1)
+                        Text(track.artist)
+                            .font(.subheadline)
+                            .foregroundStyle(DesignTokens.textSecondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    Image(systemName: model.engine.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 44))
+                        .foregroundStyle(DesignTokens.brandPrimary)
+                }
+                .padding(14)
+                .surfaceCard(fill: DesignTokens.surfaceCard)
+            }
+            .buttonStyle(.plain)
         }
     }
 
-    private var quickActions: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(title: "Quick Actions")
+    // MARK: Recently played
 
-            HStack(spacing: 10) {
-                NavigationLink {
-                    DownloadsView()
-                } label: {
-                    Label("Downloads", systemImage: "arrow.down.circle")
-                        .frame(maxWidth: .infinity)
+    private var recentlyPlayedRail: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeader(title: "Recently Played")
+            ScrollView(.horizontal) {
+                HStack(spacing: 14) {
+                    ForEach(model.recentlyPlayed.prefix(12)) { track in
+                        SquareArtTile(
+                            artworkKey: track.albumID,
+                            url: track.artworkURL,
+                            title: track.title,
+                            subtitle: track.artist
+                        ) {
+                            path.append(.album(track.albumID))
+                        }
+                    }
                 }
-                .buttonStyle(SecondaryActionButtonStyle())
+            }
+            .scrollIndicators(.hidden)
+        }
+    }
 
-                NavigationLink {
-                    SearchView()
-                } label: {
-                    Label("Search", systemImage: "magnifyingglass")
-                        .frame(maxWidth: .infinity)
+    // MARK: Heavy rotation (signature — driven by play counts)
+
+    @ViewBuilder
+    private var heavyRotationRail: some View {
+        let top = heavyRotation
+        if !top.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                SectionHeader(title: "Heavy Rotation", detail: "The songs you keep coming back to")
+                ScrollView(.horizontal) {
+                    HStack(spacing: 14) {
+                        ForEach(top) { track in
+                            SquareArtTile(
+                                artworkKey: track.albumID,
+                                url: track.artworkURL,
+                                title: track.title,
+                                subtitle: "\(model.autoCache.stat(for: track.id).playCount) plays",
+                                size: 140
+                            ) {
+                                model.play(track, in: top)
+                            }
+                        }
+                    }
                 }
-                .buttonStyle(SecondaryActionButtonStyle())
+                .scrollIndicators(.hidden)
             }
         }
     }
-}
 
-private extension SourceHealth {
-    var cacheStatus: CacheStatus {
-        switch self {
-        case .online:
-            return .cached
-        case .asleep, .degraded:
-            return .stale
-        case .authFailed, .localNetworkBlocked, .unreachable:
-            return .missingSource
+    private var heavyRotation: [Track] {
+        model.audioTracks
+            .map { ($0, model.autoCache.score(for: $0.id)) }
+            .filter { $0.1 > 0 }
+            .sorted { $0.1 > $1.1 }
+            .prefix(10)
+            .map(\.0)
+    }
+
+    // MARK: Made for you
+
+    private var madeForYouRail: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeader(title: "Made for You", actionTitle: "All") { path.append(.allPlaylists) }
+            ScrollView(.horizontal) {
+                HStack(spacing: 14) {
+                    ForEach(model.playlists) { playlist in
+                        SquareArtTile(
+                            artworkKey: playlist.id,
+                            url: playlist.artworkURLs.first,
+                            title: playlist.name,
+                            subtitle: playlist.subtitle,
+                            glyph: playlist.isLiveFolder ? "folder.fill" : "music.note.list"
+                        ) {
+                            path.append(.playlist(playlist.id))
+                        }
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
         }
     }
-}
 
-#Preview {
-    HomeView()
-        .environmentObject(AppEnvironment())
+    // MARK: Recently added
+
+    private var recentlyAddedGrid: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeader(title: "Recently Added", actionTitle: "All") { path.append(.allAlbums) }
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 18) {
+                ForEach(model.recentlyAddedAlbums) { album in
+                    Button { path.append(.album(album.id)) } label: {
+                        AlbumGridCellStatic(album: album)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    // MARK: Quiet source thread (not a dashboard)
+
+    @ViewBuilder
+    private var sourceThread: some View {
+        if let source = model.sources.first {
+            Button { path.append(.sources) } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: source.health.systemImage)
+                        .foregroundStyle(source.health.tint)
+                    Text(source.name)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(DesignTokens.textPrimary)
+                    Text("· \(model.offlineTracks.count) ready offline")
+                        .font(.caption)
+                        .foregroundStyle(DesignTokens.textSecondary)
+                    Spacer()
+                    Text("Sources")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(DesignTokens.brandPrimary)
+                }
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
 }
