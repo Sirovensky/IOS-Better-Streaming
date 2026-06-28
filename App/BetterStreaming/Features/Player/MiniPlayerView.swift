@@ -92,6 +92,7 @@ struct NowPlayingView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var showQueue = false
+    @State private var detail: NowPlayingDetail?
 
     private var engine: PlaybackEngine { model.engine }
 
@@ -156,6 +157,16 @@ struct NowPlayingView: View {
                 .environment(model)
                 .presentationDetents([.large, .medium])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $detail) { item in
+            NavigationStack {
+                switch item {
+                case .album(let id): AlbumDetailView(albumID: id)
+                case .artist(let id): ArtistDetailView(artistID: id)
+                }
+            }
+            .libraryDestinations()
+            .environment(model)
         }
     }
 
@@ -253,8 +264,8 @@ struct NowPlayingView: View {
         } else {
             Button("Download", systemImage: "arrow.down.circle") { model.download(track.id) }
         }
-        Button("Go to Album", systemImage: "square.stack") {}
-        Button("Go to Artist", systemImage: "music.mic") {}
+        Button("Go to Album", systemImage: "square.stack") { detail = .album(track.albumID) }
+        Button("Go to Artist", systemImage: "music.mic") { detail = .artist(track.artistID) }
         Button("View Queue", systemImage: "list.bullet") { showQueue = true }
     }
 
@@ -330,6 +341,17 @@ struct NowPlayingView: View {
 }
 
 // MARK: - Playing Next (queue) sheet
+
+enum NowPlayingDetail: Identifiable {
+    case album(String)
+    case artist(String)
+    var id: String {
+        switch self {
+        case .album(let s): "album-\(s)"
+        case .artist(let s): "artist-\(s)"
+        }
+    }
+}
 
 struct NowPlayingQueueView: View {
     @Environment(AppModel.self) private var model
