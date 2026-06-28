@@ -281,6 +281,22 @@ final class PlaybackEngine {
 
     private func loadPlayerItem(url: URL, autoPlay: Bool, generation: Int) {
         let item = AVPlayerItem(url: url)
+
+        // AVPlayerItem.duration is often `.indefinite` until well after
+        // readyToPlay for these files, which left the scrubber/timer at 0:00.
+        // Load it directly from the asset, which is reliable.
+        let durationAsset = AVURLAsset(url: url)
+        Task { @MainActor in
+            guard generation == self.resolveGeneration else { return }
+            if let cmDuration = try? await durationAsset.load(.duration) {
+                let seconds = cmDuration.seconds
+                if seconds.isFinite, seconds > 0 {
+                    self.duration = seconds
+                    self.updateNowPlayingInfo()
+                }
+            }
+        }
+
         statusObservation?.invalidate()
         // Read only Sendable values out of the KVO callback (status enum); never
         // capture the non-Sendable AVPlayerItem into the MainActor task.

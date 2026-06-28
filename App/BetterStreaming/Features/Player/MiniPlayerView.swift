@@ -246,11 +246,7 @@ struct NowPlayingView: View {
     }
 
     private var scrubber: some View {
-        Scrubber(
-            elapsed: engine.elapsed,
-            duration: engine.duration,
-            onCommit: { engine.seek(toSeconds: $0) }
-        )
+        Scrubber()   // reads the engine itself; keeps per-tick redraw off this view
     }
 
     @ViewBuilder
@@ -412,25 +408,30 @@ private struct QueueRow: View {
 // MARK: - Interactive scrubber
 
 struct Scrubber: View {
-    var elapsed: Double
-    var duration: Double
-    var onCommit: (Double) -> Void
-
+    @Environment(AppModel.self) private var model
     @State private var dragFraction: Double?
 
+    private var engine: PlaybackEngine { model.engine }
+
+    // Reading engine.elapsed/duration HERE (not in the parent) keeps the
+    // per-tick re-render scoped to the scrubber, so the Now Playing menu and
+    // the rest of the screen don't pulse every 0.5s.
     private var liveFraction: Double {
         if let dragFraction { return dragFraction }
-        guard duration > 0 else { return 0 }
-        return min(max(elapsed / duration, 0), 1)
+        guard engine.duration > 0 else { return 0 }
+        return min(max(engine.elapsed / engine.duration, 0), 1)
     }
 
-    private var elapsedLabel: String {
-        TimeFormat.clock((dragFraction ?? (duration > 0 ? elapsed / duration : 0)) * duration)
+    private var elapsedSeconds: Double {
+        if let dragFraction { return dragFraction * engine.duration }
+        return engine.elapsed
     }
+
+    private var elapsedLabel: String { TimeFormat.clock(elapsedSeconds) }
 
     private var remainingLabel: String {
-        let frac = dragFraction ?? (duration > 0 ? elapsed / duration : 0)
-        return TimeFormat.clock(-(duration - frac * duration))
+        guard engine.duration > 0 else { return "-0:00" }
+        return "-" + TimeFormat.clock(max(engine.duration - elapsedSeconds, 0))
     }
 
     var body: some View {
@@ -456,7 +457,7 @@ struct Scrubber: View {
                         .onEnded { value in
                             let frac = min(max(value.location.x / width, 0), 1)
                             dragFraction = nil
-                            onCommit(frac * duration)
+                            engine.seek(toSeconds: frac * engine.duration)
                         }
                 )
             }
