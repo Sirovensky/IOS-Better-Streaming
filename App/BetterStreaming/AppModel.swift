@@ -33,6 +33,7 @@ final class AppModel {
     private var trackIndex: [String: Int] = [:]
     private var sourceConfigs: [SourceConfig] = []
     private var sourceHealth: [String: SourceHealth] = [:]
+    private var sourceMessages: [String: String] = [:]
     private var startupMaintenanceTask: Task<Void, Never>?
 
     var hasSources: Bool { !sources.isEmpty }
@@ -93,8 +94,13 @@ final class AppModel {
             tracks = updated
             rebuildIndex()
             sourceHealth[sourceID] = .online
+            sourceMessages[sourceID] = nil
+        } catch let error as LibraryError {
+            sourceHealth[sourceID] = (error.kind == .auth) ? .authFailed : .unreachable
+            sourceMessages[sourceID] = error.message
         } catch {
             sourceHealth[sourceID] = .unreachable
+            sourceMessages[sourceID] = error.localizedDescription
         }
         rebuildSources()
         reconcileAutoCache()
@@ -160,7 +166,7 @@ final class AppModel {
                 health: health,
                 trackCount: count,
                 folderCount: 0,
-                lastScanLabel: count > 0 ? "\(count) songs" : (health == .unreachable ? "Couldn’t connect" : "Not scanned"),
+                lastScanLabel: count > 0 ? "\(count) songs" : (sourceMessages[cfg.id] ?? (health == .unreachable ? "Couldn’t connect" : "Not scanned")),
                 speedLabel: "—"
             )
         }

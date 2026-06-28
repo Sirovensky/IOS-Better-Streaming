@@ -49,15 +49,9 @@ final class AutoCacheController {
         didSet { defaults.set(wifiOnly, forKey: Keys.wifiOnly) }
     }
 
-    /// Budget presets offered in Settings, in bytes.
-    static let budgetPresets: [Int64] = [
-        1 << 30,        // 1 GB
-        2 << 30,        // 2 GB
-        5 << 30,        // 5 GB
-        10 << 30,       // 10 GB
-        20 << 30,       // 20 GB
-        50 << 30        // 50 GB
-    ]
+    /// Budget presets offered in Settings, in bytes. Decimal GB so the labels
+    /// read clean ("5 GB"), matching how ByteCountFormatter(.file) divides.
+    static let budgetPresets: [Int64] = [1, 2, 5, 10, 20, 50].map { $0 * 1_000_000_000 }
 
     // MARK: Observed runtime state
 
@@ -88,7 +82,9 @@ final class AutoCacheController {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.isEnabled = defaults.object(forKey: Keys.enabled) as? Bool ?? true
-        self.budgetBytes = (defaults.object(forKey: Keys.budget) as? Int64) ?? (5 << 30)
+        // Snap any legacy/non-preset stored value (e.g. old GiB 5<<30) to a clean preset.
+        let storedBudget = defaults.object(forKey: Keys.budget) as? Int64
+        self.budgetBytes = (storedBudget.flatMap { Self.budgetPresets.contains($0) ? $0 : nil }) ?? 5_000_000_000
         self.protectFavorites = defaults.object(forKey: Keys.protectFavorites) as? Bool ?? true
         self.wifiOnly = defaults.object(forKey: Keys.wifiOnly) as? Bool ?? true
         if let data = defaults.data(forKey: Keys.stats),

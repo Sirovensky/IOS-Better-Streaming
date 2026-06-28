@@ -8,6 +8,14 @@ import SMBRemote
 import WebDAVRemote
 #endif
 
+/// App-level scan error so AppModel can surface a real reason (and not import
+/// Core's Domain types, which would clash with the app's own enums).
+struct LibraryError: Error, Sendable {
+    enum Kind: Sendable { case auth, notFound, unreachable, other }
+    let kind: Kind
+    let message: String
+}
+
 /// Persistable connection config for a source (no password — that's in Keychain).
 struct SourceConfig: Codable, Sendable, Identifiable {
     var id: String          // SourceID uuid string
@@ -34,6 +42,10 @@ actor LibraryService {
     private var configs: [SourceConfig] = []
     private var allTracks: [Track] = []
     private var didLoadFromDisk = false
+    /// In-memory passwords for this session, set on add. Lets the first
+    /// add→scan succeed even if the Keychain read lags/fails; Keychain remains
+    /// the durable store for relaunches.
+    private var sessionPasswords: [String: String] = [:]
 
     init() {
         let fm = FileManager.default
@@ -76,6 +88,7 @@ actor LibraryService {
         loadFromDiskIfNeeded()
         let id = UUID().uuidString
         KeychainStore.set(password, account: id)
+        if let password, !password.isEmpty { sessionPasswords[id] = password }
         let cfg = SourceConfig(
             id: id,
             shareID: UUID().uuidString,
@@ -116,21 +129,100 @@ actor LibraryService {
         guard let cfg = configs.first(where: { $0.id == sourceID }),
               let client = makeClient(cfg) else { return allTracks }
 
-        let request = ScanRequest(
-            sourceID: SourceID(rawValue: UUID(uuidString: cfg.id) ?? UUID()),
-            shareID: ShareID(rawValue: UUID(uuidString: cfg.shareID) ?? UUID()),
-            rootPath: RemotePath(displayPath: cfg.rootPath),
-            mode: .pathOnly
-        )
-        let scanner = RemoteLibraryScanner(fileSystem: client)
-        let report = try await scanner.scan(request)
-        let scanned = report.mediaFiles.map { track(from: $0, cfg: cfg) }
+        // Tolerant recursive walk. The Core RemoteLibraryScanner aborts the whole
+        // scan if any single folder fails to list (perms/system dirs), which made
+        // real shares show as Unavailable. Here a deep folder failure is skipped;
+        // only a failure on the FIRST (root) list is treated as a real connection
+        // error and surfaced.
+        let classifier = MediaFileClassifier()
+        var scanned: [Track] = []
+        var pending: [RemotePath] = [RemotePath(displayPath: cfg.rootPath)]
+        var visited = Set<String>()
+        var listedAnyFolder = false
+
+        while let dir = pending.popLast() {
+            if Task.isCancelled { break }
+            if visited.contains(dir.normalizedPath) { continue }
+            visited.insert(dir.normalizedPath)
+
+            let entries: [RemoteEntry]
+            do {
+                entries = try await client.list(dir)
+                listedAnyFolder = true
+            } catch {
+                if !listedAnyFolder { throw Self.libraryError(from: error) }
+                continue
+            }
+
+            for entry in entries {
+                switch entry.kind {
+                case .directory:
+                    if visited.count + pending.count < 50_000 { pending.append(entry.path) }
+                case .file:
+                    if let kind = classifier.classify(entry), scanned.count < 100_000 {
+                        scanned.append(track(fromEntry: entry, kind: kind, cfg: cfg))
+                    }
+                default:
+                    break
+                }
+            }
+        }
 
         allTracks.removeAll { $0.sourceID == sourceID }
         allTracks.append(contentsOf: scanned)
         refreshCacheStates()
         persistLibrary()
         return allTracks
+    }
+
+    private func track(fromEntry entry: RemoteEntry, kind: IndexedMediaKind, cfg: SourceConfig) -> Track {
+        let identity = RemoteItemIdentity(
+            sourceID: SourceID(rawValue: UUID(uuidString: cfg.id) ?? UUID()),
+            shareID: ShareID(rawValue: UUID(uuidString: cfg.shareID) ?? UUID()),
+            path: entry.path,
+            remoteFileID: entry.fileID,
+            size: entry.size,
+            modifiedAt: entry.modifiedAt
+        )
+        let components = entry.path.remotePathComponents
+        let title = (entry.name as NSString).deletingPathExtension
+        let album = components.count >= 2 ? components[components.count - 2] : cfg.name
+        let artist = components.count >= 3 ? components[components.count - 3] : "Unknown Artist"
+        return Track(
+            id: identity.stableKey,
+            title: title.isEmpty ? entry.name : title,
+            artist: artist,
+            album: album,
+            albumID: "\(artist)::\(album)".lowercased(),
+            artistID: artist.lowercased(),
+            genre: "Unknown",
+            durationSeconds: 0,
+            kind: kind == .audio ? .audio : .video,
+            cacheState: .remoteOnly,
+            sourceID: cfg.id,
+            sourceName: cfg.name,
+            folderPath: entry.path.displayPath,
+            shareID: cfg.shareID,
+            remotePath: entry.path.displayPath,
+            sizeBytes: entry.size,
+            modifiedAtEpoch: entry.modifiedAt?.timeIntervalSince1970
+        )
+    }
+
+    private static func libraryError(from error: Error) -> LibraryError {
+        if let rfs = error as? RemoteFileSystemError {
+            switch rfs {
+            case .authenticationExpired, .permissionDenied:
+                return LibraryError(kind: .auth, message: "Sign-in failed. Check the username and password.")
+            case .notFound:
+                return LibraryError(kind: .notFound, message: "The share or folder wasn’t found.")
+            case .timeout, .serverDisconnected:
+                return LibraryError(kind: .unreachable, message: rfs.userMessage)
+            default:
+                return LibraryError(kind: .other, message: rfs.userMessage)
+            }
+        }
+        return LibraryError(kind: .other, message: error.localizedDescription)
     }
 
     // MARK: Playback resolution (cache-first)
@@ -211,7 +303,7 @@ actor LibraryService {
     }
 
     private func makeClient(_ cfg: SourceConfig) -> (any RemoteFileSystemClient)? {
-        let password = KeychainStore.get(account: cfg.id)
+        let password = sessionPasswords[cfg.id] ?? KeychainStore.get(account: cfg.id)
         switch cfg.proto {
         case SourceProtocol.smb.rawValue:
             let configuration = SMBConnectionConfiguration(
@@ -232,41 +324,6 @@ actor LibraryService {
             // FTP / SFTP adapters not built yet.
             return nil
         }
-    }
-
-    private func track(from file: ScannedMediaFile, cfg: SourceConfig) -> Track {
-        let identity = RemoteItemIdentity(
-            sourceID: SourceID(rawValue: UUID(uuidString: cfg.id) ?? UUID()),
-            shareID: ShareID(rawValue: UUID(uuidString: cfg.shareID) ?? UUID()),
-            path: file.path,
-            remoteFileID: file.remoteFileID,
-            size: file.size,
-            modifiedAt: file.modifiedAt
-        )
-        let components = file.path.remotePathComponents
-        let title = (file.name as NSString).deletingPathExtension
-        let album = components.count >= 2 ? components[components.count - 2] : cfg.name
-        let artist = components.count >= 3 ? components[components.count - 3] : "Unknown Artist"
-
-        return Track(
-            id: identity.stableKey,
-            title: title.isEmpty ? file.name : title,
-            artist: artist,
-            album: album,
-            albumID: "\(artist)::\(album)".lowercased(),
-            artistID: artist.lowercased(),
-            genre: "Unknown",
-            durationSeconds: 0,
-            kind: file.mediaKind == .audio ? .audio : .video,
-            cacheState: .remoteOnly,
-            sourceID: cfg.id,
-            sourceName: cfg.name,
-            folderPath: file.path.displayPath,
-            shareID: cfg.shareID,
-            remotePath: file.path.displayPath,
-            sizeBytes: file.size,
-            modifiedAtEpoch: file.modifiedAt?.timeIntervalSince1970
-        )
     }
 
     private func remoteIdentity(for track: Track, cfg: SourceConfig) -> RemoteItemIdentity {
