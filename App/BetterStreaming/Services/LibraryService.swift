@@ -49,7 +49,8 @@ actor LibraryService {
 
     private var configs: [SourceConfig] = []
     private var allTracks: [Track] = []
-    private var didLoadFromDisk = false
+    private var didLoadConfigsFromDisk = false
+    private var didLoadLibraryFromDisk = false
     /// In-memory passwords for this session, set on add. Lets the first
     /// add→scan succeed even if the Keychain read lags/fails; Keychain remains
     /// the durable store for relaunches.
@@ -72,12 +73,17 @@ actor LibraryService {
     // MARK: Load
 
     func bootstrap() -> (configs: [SourceConfig], tracks: [Track]) {
-        loadFromDiskIfNeeded()
-        return (configs, allTracks)
+        loadConfigsFromDiskIfNeeded()
+        return (configs, [])
+    }
+
+    func loadSavedLibrary() -> [Track] {
+        loadLibraryFromDiskIfNeeded()
+        return allTracks
     }
 
     func refreshCacheSnapshot() -> [Track] {
-        loadFromDiskIfNeeded()
+        loadLibraryFromDiskIfNeeded()
         refreshCacheStates()
         return allTracks
     }
@@ -95,7 +101,7 @@ actor LibraryService {
         password: String?,
         rootPath: String
     ) -> SourceConfig {
-        loadFromDiskIfNeeded()
+        loadConfigsFromDiskIfNeeded()
         let id = UUID().uuidString
         KeychainStore.set(password, account: id)
         if let password, !password.isEmpty { sessionPasswords[id] = password }
@@ -119,7 +125,7 @@ actor LibraryService {
     /// Add an on-device / Files / iCloud folder as a source. `bookmark` is a
     /// base64 security-scoped bookmark created by the caller from the picked URL.
     func addLocalSource(name: String, bookmark: String, displayPath: String) -> SourceConfig {
-        loadFromDiskIfNeeded()
+        loadConfigsFromDiskIfNeeded()
         let cfg = SourceConfig(
             id: UUID().uuidString,
             shareID: UUID().uuidString,
@@ -139,7 +145,7 @@ actor LibraryService {
     }
 
     func removeSource(_ id: String) {
-        loadFromDiskIfNeeded()
+        loadLibraryFromDiskIfNeeded()
         if let url = localRoots[id] {
             url.stopAccessingSecurityScopedResource()
             localRoots[id] = nil
@@ -152,7 +158,7 @@ actor LibraryService {
     }
 
     func configList() -> [SourceConfig] {
-        loadFromDiskIfNeeded()
+        loadConfigsFromDiskIfNeeded()
         return configs
     }
 
@@ -161,7 +167,7 @@ actor LibraryService {
     /// Recursively scan a source into tracks (path-first). Returns the full
     /// merged library so the caller can replace its state.
     func scan(sourceID: String) async throws -> [Track] {
-        loadFromDiskIfNeeded()
+        loadLibraryFromDiskIfNeeded()
         guard let cfg = configs.first(where: { $0.id == sourceID }) else { return allTracks }
 
         if cfg.proto == SourceProtocol.local.rawValue {
@@ -274,7 +280,7 @@ actor LibraryService {
     // MARK: Playback resolution (cache-first)
 
     func playableURL(for track: Track, offline: Bool) async -> URL? {
-        loadFromDiskIfNeeded()
+        loadConfigsFromDiskIfNeeded()
         if let localURL = localFileURL(for: track) { return localURL }   // local source: play in place
         let local = cacheFileURL(for: track)
         if FileManager.default.fileExists(atPath: local.path) { return local }
@@ -312,7 +318,6 @@ actor LibraryService {
     }
 
     func cachedBytes() -> Int64 {
-        loadFromDiskIfNeeded()
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: cacheDir, includingPropertiesForKeys: [.fileSizeKey]
         ) else { return 0 }
@@ -336,13 +341,19 @@ actor LibraryService {
 
     // MARK: Internals
 
-    private func loadFromDiskIfNeeded() {
-        guard !didLoadFromDisk else { return }
-        didLoadFromDisk = true
+    private func loadConfigsFromDiskIfNeeded() {
+        guard !didLoadConfigsFromDisk else { return }
+        didLoadConfigsFromDisk = true
         if let data = try? Data(contentsOf: configsURL),
            let decoded = try? JSONDecoder().decode([SourceConfig].self, from: data) {
             configs = decoded
         }
+    }
+
+    private func loadLibraryFromDiskIfNeeded() {
+        loadConfigsFromDiskIfNeeded()
+        guard !didLoadLibraryFromDisk else { return }
+        didLoadLibraryFromDisk = true
         if let data = try? Data(contentsOf: libraryURL),
            let decoded = try? JSONDecoder().decode([Track].self, from: data) {
             allTracks = decoded

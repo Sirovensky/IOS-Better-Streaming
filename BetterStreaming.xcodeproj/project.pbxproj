@@ -27,11 +27,13 @@
 		A0492B51E450CBEC029BD4BE /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED4EC0B8A6A19AE086BC54A4 /* SearchView.swift */; };
 		AA0AA5C8BC4671757B47D993 /* BetterStreamingApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA220FF41926FF26E0FBD844 /* BetterStreamingApp.swift */; };
 		AF692CF969F07A6B64577410 /* DesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2300EBA8131EE6AF7617A1F /* DesignTokens.swift */; };
+		B2B7B0DB65F0764A38B82548 /* RemoteFolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00A7302EDD3F93DA32911E53 /* RemoteFolderPicker.swift */; };
 		B5EF5E4C1F9FD30C4AFC38FE /* OfflineLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B85309C80C8120BB0FA8C25C /* OfflineLibraryView.swift */; };
 		E48911A655044AA9A1559265 /* SourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCDF8CD62C0F29867A2D1AED /* SourcesView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		00A7302EDD3F93DA32911E53 /* RemoteFolderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFolderPicker.swift; sourceTree = "<group>"; };
 		12E89289617B809FA95582A3 /* Artwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Artwork.swift; sourceTree = "<group>"; };
 		46FFD8508D86BB73EEB8878B /* BetterStreaming.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BetterStreaming.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4C690EE398FFC66BC3A5A3DF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -145,6 +147,7 @@
 		5691373A13D5901C4A1BEAE0 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				00A7302EDD3F93DA32911E53 /* RemoteFolderPicker.swift */,
 				C015E25AF1FC6DB33905132F /* SourceSetupView.swift */,
 				CCDF8CD62C0F29867A2D1AED /* SourcesView.swift */,
 			);
@@ -295,6 +298,7 @@
 				B5EF5E4C1F9FD30C4AFC38FE /* OfflineLibraryView.swift in Sources */,
 				64A40EC9D5D6E532D7798D5E /* OnboardingView.swift in Sources */,
 				0C2915DAA2525F4DC783977C /* PlaybackEngine.swift in Sources */,
+				B2B7B0DB65F0764A38B82548 /* RemoteFolderPicker.swift in Sources */,
 				4A1CB58C63D7D548EDD339CB /* RootTabView.swift in Sources */,
 				A0492B51E450CBEC029BD4BE /* SearchView.swift in Sources */,
 				2A1D01B9DDF371E2E9F977E4 /* SettingsView.swift in Sources */,

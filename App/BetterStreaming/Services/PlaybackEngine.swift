@@ -468,9 +468,13 @@ final class PlaybackEngine {
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
         ]
         if let art = currentArtwork {
-            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: art.size) { _ in art }
+            info[MPMediaItemPropertyArtwork] = Self.nowPlayingArtwork(from: art)
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    nonisolated private static func nowPlayingArtwork(from image: UIImage) -> MPMediaItemArtwork {
+        MPMediaItemArtwork(boundsSize: image.size) { _ in image }
     }
 
     private func configureRemoteCommands() {

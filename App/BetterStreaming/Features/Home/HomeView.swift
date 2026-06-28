@@ -53,13 +53,13 @@ struct HomeView: View {
             Image(systemName: "music.note.house")
                 .font(.system(size: 52))
                 .foregroundStyle(DesignTokens.brandPrimary)
-            Text(model.isBootstrapping ? "Loading your library…" : (model.hasSources ? "Scanning your library…" : "Add your music"))
+            Text(model.isBootstrapping || model.isLoadingSavedLibrary ? "Loading your library…" : (model.hasSources ? "Library is empty" : "Add your music"))
                 .font(.title2.weight(.bold))
                 .foregroundStyle(DesignTokens.textPrimary)
-            Text(model.isBootstrapping
+            Text(model.isBootstrapping || model.isLoadingSavedLibrary
                  ? "Opening your saved library on this device."
                  : (model.hasSources
-                    ? "Your songs will appear here as the scan finds them. Folders are playable before it finishes."
+                    ? "Use Sources to scan or refresh your server."
                     : "Connect your NAS or server to start listening to your own library."))
                 .font(.subheadline)
                 .foregroundStyle(DesignTokens.textSecondary)
@@ -168,7 +168,8 @@ struct HomeView: View {
     }
 
     private var heavyRotation: [Track] {
-        model.audioTracks
+        guard !model.recentlyPlayed.isEmpty else { return [] }
+        return model.audioTracks
             .map { ($0, model.autoCache.score(for: $0.id)) }
             .filter { $0.1 > 0 }
             .sorted { $0.1 > $1.1 }
@@ -228,7 +229,7 @@ struct HomeView: View {
                     Text(source.name)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(DesignTokens.textPrimary)
-                    Text("· \(model.offlineTracks.count) ready offline")
+                    Text("· \(source.trackCount) songs")
                         .font(.caption)
                         .foregroundStyle(DesignTokens.textSecondary)
                     Spacer()

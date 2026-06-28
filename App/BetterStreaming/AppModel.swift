@@ -18,6 +18,7 @@ final class AppModel {
     private(set) var playlists: [Playlist] = []
     private(set) var recentlyPlayedIDs: [String] = []
     private(set) var isBootstrapping = true
+    private(set) var isLoadingSavedLibrary = false
     private(set) var isScanning = false
 
     var offlineMode: Bool {
@@ -58,7 +59,7 @@ final class AppModel {
         for cfg in sourceConfigs where sourceHealth[cfg.id] == nil { sourceHealth[cfg.id] = .asleep }
         rebuildSources()
         isBootstrapping = false
-        reconcileAutoCache()
+        isLoadingSavedLibrary = !sourceConfigs.isEmpty
         schedulePostLaunchMaintenance()
     }
 
@@ -67,22 +68,24 @@ final class AppModel {
         guard !sourceConfigs.isEmpty else { return }
 
         startupMaintenanceTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 700_000_000)
+            try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled, let self else { return }
 
+            let saved = await self.library.loadSavedLibrary()
+            guard !Task.isCancelled else { return }
+            self.tracks = saved
+            self.rebuildIndex()
+            self.rebuildSources()
+            self.isLoadingSavedLibrary = false
+            self.reconcileAutoCache()
+
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
             let refreshed = await self.library.refreshCacheSnapshot()
             guard !Task.isCancelled else { return }
             self.tracks = refreshed
             self.rebuildIndex()
             self.rebuildSources()
-            self.reconcileAutoCache()
-
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            guard !Task.isCancelled else { return }
-            for cfg in self.sourceConfigs {
-                guard !Task.isCancelled else { return }
-                await self.rescan(cfg.id)
-            }
         }
     }
 
@@ -249,7 +252,25 @@ final class AppModel {
     func tracks(forArtist artistID: String) -> [Track] { tracks.filter { $0.artistID == artistID } }
 
     var recentlyPlayed: [Track] { recentlyPlayedIDs.compactMap(track) }
-    var recentlyAddedAlbums: [Album] { Array(albums.prefix(8)) }
+    var recentlyAddedAlbums: [Album] {
+        var seen = Set<String>()
+        var result: [Album] = []
+        for track in tracks where track.kind == .audio {
+            guard seen.insert(track.albumID).inserted else { continue }
+            result.append(Album(
+                id: track.albumID,
+                title: track.album,
+                artist: track.artist,
+                artistID: track.artistID,
+                year: nil,
+                trackCount: 0,
+                cacheState: track.cacheState.isPlayableOffline ? .cached : .remoteOnly,
+                artworkURL: track.artworkURL
+            ))
+            if result.count == 8 { break }
+        }
+        return result
+    }
 
     // MARK: Playback intents
 
