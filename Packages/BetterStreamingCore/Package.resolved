@@ -1,0 +1,24 @@
+{
+  "originHash" : "63d63f5426716fa0fc54a8825f46403619499737325d988229b6e14bede0a47b",
+  "pins" : [
+    {
+      "identity" : "grdb.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/groue/GRDB.swift.git",
+      "state" : {
+        "revision" : "b83108d10f42680d78f23fe4d4d80fc88dab3212",
+        "version" : "7.11.1"
+      }
+    },
+    {
+      "identity" : "smbclient",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/kishikawakatsumi/SMBClient.git",
+      "state" : {
+        "revision" : "e636c2b2458930770932a36d311ec9d478575b90",
+        "version" : "0.3.1"
+      }
+    }
+  ],
+  "version" : 3
+}

@@ -1,0 +1,54 @@
+# Recon and generated local output
+docs/
+recon/
+tmp/
+DerivedData/
+.build/
+build/
+
+# macOS and Xcode local state
+.DS_Store
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.moved-aside
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+.swiftpm/
+
+# Logs, screenshots, recordings, and reports
+*.log
+*.trace
+*.xcresult
+Screenshots/
+screenshots/
+Recordings/
+recordings/
+
+# Local secrets and machine-specific config
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+*.secrets
+secrets/
+credentials/
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.cer
+*.key
+*.pem
+.netrc
+.npmrc
+.pypirc
+
+# Agent/tool local state
+.codex/
+.claude/
