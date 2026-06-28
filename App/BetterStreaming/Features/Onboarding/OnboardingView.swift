@@ -15,6 +15,8 @@ struct OnboardingView: View {
     @State private var username = ""
     @State private var password = ""
     @State private var domain = ""
+    @State private var rootPath = "/"
+    @State private var showFolderPicker = false
     @State private var testState: TestState = .idle
     @State private var isTesting = false
 
@@ -39,6 +41,20 @@ struct OnboardingView: View {
                 }
                 footer
             }
+        }
+        .sheet(isPresented: $showFolderPicker) {
+            RemoteFolderPicker(
+                proto: proto,
+                host: host.trimmed,
+                port: proto.defaultPort,
+                share: share.trimmed,
+                username: username.trimmed.isEmpty ? nil : username.trimmed,
+                domain: domain.trimmed.isEmpty ? nil : domain.trimmed,
+                password: password.isEmpty ? nil : password
+            ) { selected in
+                rootPath = selected
+            }
+            .environment(model)
         }
     }
 
@@ -124,6 +140,19 @@ struct OnboardingView: View {
             } else {
                 Text("\(proto.rawValue) support is coming soon — you can still save it now.")
                     .font(.caption).foregroundStyle(DesignTokens.textSecondary)
+            }
+
+            if proto.hasAdapter {
+                HStack(spacing: 10) {
+                    Image(systemName: "folder").foregroundStyle(DesignTokens.brandPrimary)
+                    Text(rootPath == "/" ? "Whole share" : rootPath)
+                        .font(.caption).foregroundStyle(DesignTokens.textPrimary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button("Browse…") { showFolderPicker = true }
+                        .font(.caption.weight(.semibold)).foregroundStyle(DesignTokens.brandPrimary)
+                        .disabled(host.trimmed.isEmpty || share.trimmed.isEmpty)
+                }
             }
 
             Text("Local Network access lets Better Streaming find and connect to your server.")
@@ -215,7 +244,8 @@ struct OnboardingView: View {
                 share: share.trimmed,
                 username: username.trimmed.isEmpty ? nil : username.trimmed,
                 password: password.isEmpty ? nil : password,
-                domain: domain.trimmed.isEmpty ? nil : domain.trimmed
+                domain: domain.trimmed.isEmpty ? nil : domain.trimmed,
+                rootPath: rootPath
             )
             dismiss()
         }

@@ -16,6 +16,8 @@ struct SourceSetupView: View {
     @State private var username = ""
     @State private var password = ""
     @State private var domain = ""
+    @State private var rootPath = "/"
+    @State private var showFolderPicker = false
     @State private var testState: TestState = .idle
     @State private var isTesting = false
 
@@ -31,6 +33,7 @@ struct SourceSetupView: View {
             VStack(alignment: .leading, spacing: 18) {
                 protocolPicker
                 connectionForm
+                folderRow
                 testRow
                 Button { addSource() } label: {
                     Label("Add source", systemImage: "externaldrive.badge.plus").frame(maxWidth: .infinity)
@@ -44,6 +47,44 @@ struct SourceSetupView: View {
         .appScreenBackground()
         .navigationTitle("Add Source")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showFolderPicker) {
+            RemoteFolderPicker(
+                proto: proto,
+                host: host.trimmed,
+                port: Int(port.trimmed),
+                share: path.trimmed,
+                username: username.trimmed.isEmpty ? nil : username.trimmed,
+                domain: domain.trimmed.isEmpty ? nil : domain.trimmed,
+                password: password.isEmpty ? nil : password
+            ) { selected in
+                rootPath = selected
+            }
+            .environment(model)
+        }
+    }
+
+    @ViewBuilder
+    private var folderRow: some View {
+        if proto.hasAdapter {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeader(title: "Folder to scan")
+                HStack(spacing: 12) {
+                    Image(systemName: "folder").foregroundStyle(DesignTokens.brandPrimary).frame(width: 24)
+                    Text(rootPath == "/" ? "Whole share" : rootPath)
+                        .font(.subheadline).foregroundStyle(DesignTokens.textPrimary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button("Browse…") { showFolderPicker = true }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(DesignTokens.brandPrimary)
+                        .disabled(!canAdd)
+                }
+                .padding(12)
+                .surfaceCard(fill: DesignTokens.surfaceCard)
+                Text("Pick the folder that holds your music (e.g. a “Music” sub-folder) for a faster, focused scan.")
+                    .font(.caption2).foregroundStyle(DesignTokens.textTertiary)
+            }
+        }
     }
 
     private var protocolPicker: some View {
@@ -144,7 +185,8 @@ struct SourceSetupView: View {
             share: path.trimmed,
             username: username.trimmed.isEmpty ? nil : username.trimmed,
             password: password.isEmpty ? nil : password,
-            domain: domain.trimmed.isEmpty ? nil : domain.trimmed
+            domain: domain.trimmed.isEmpty ? nil : domain.trimmed,
+            rootPath: rootPath
         )
         dismiss()
     }

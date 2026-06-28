@@ -16,6 +16,13 @@ struct LibraryError: Error, Sendable {
     let message: String
 }
 
+/// A directory entry for the interactive folder picker (App-facing, no Core types).
+struct RemoteFolder: Identifiable, Sendable, Hashable {
+    let name: String
+    let path: String
+    var id: String { path }
+}
+
 /// Persistable connection config for a source (no password — that's in Keychain).
 struct SourceConfig: Codable, Sendable, Identifiable {
     var id: String          // SourceID uuid string
@@ -304,25 +311,59 @@ actor LibraryService {
 
     private func makeClient(_ cfg: SourceConfig) -> (any RemoteFileSystemClient)? {
         let password = sessionPasswords[cfg.id] ?? KeychainStore.get(account: cfg.id)
-        switch cfg.proto {
+        return Self.buildClient(
+            proto: cfg.proto, host: cfg.host, port: cfg.port, share: cfg.share,
+            username: cfg.username, domain: cfg.domain, password: password
+        )
+    }
+
+    /// Pure client factory shared by scanning and the transient folder browser.
+    nonisolated static func buildClient(
+        proto: String, host: String, port: Int, share: String,
+        username: String?, domain: String?, password: String?
+    ) -> (any RemoteFileSystemClient)? {
+        switch proto {
         case SourceProtocol.smb.rawValue:
             let configuration = SMBConnectionConfiguration(
-                host: cfg.host, port: cfg.port, share: cfg.share,
-                username: cfg.username, domain: cfg.domain
+                host: host, port: port, share: share, username: username, domain: domain
             )
-            let auth = SMBAuthentication(username: cfg.username, domain: cfg.domain) { password }
+            let auth = SMBAuthentication(username: username, domain: domain) { password }
             return SMBRemoteClient(configuration: configuration, authentication: auth)
         case SourceProtocol.webDAV.rawValue:
             #if canImport(WebDAVRemote)
-            let scheme = cfg.port == 80 ? "http" : "https"
-            guard let base = URL(string: "\(scheme)://\(cfg.host):\(cfg.port)/\(cfg.share)") else { return nil }
-            return WebDAVRemoteClient(baseURL: base, username: cfg.username, password: password)
+            let scheme = port == 80 ? "http" : "https"
+            guard let base = URL(string: "\(scheme)://\(host):\(port)/\(share)") else { return nil }
+            return WebDAVRemoteClient(baseURL: base, username: username, password: password)
             #else
             return nil
             #endif
         default:
             // FTP / SFTP adapters not built yet.
             return nil
+        }
+    }
+
+    /// List the directories under `path` using transient credentials (for the
+    /// folder picker, before a source is saved).
+    func listFolders(
+        proto: String, host: String, port: Int, share: String,
+        username: String?, domain: String?, password: String?, path: String
+    ) async -> Result<[RemoteFolder], LibraryError> {
+        guard let client = Self.buildClient(
+            proto: proto, host: host, port: port, share: share,
+            username: username, domain: domain, password: password
+        ) else {
+            return .failure(LibraryError(kind: .other, message: "This protocol can’t be browsed yet."))
+        }
+        do {
+            let entries = try await client.list(RemotePath(displayPath: path.isEmpty ? "/" : path))
+            let folders = entries
+                .filter { $0.kind == .directory }
+                .map { RemoteFolder(name: $0.name, path: $0.path.displayPath) }
+                .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            return .success(folders)
+        } catch {
+            return .failure(Self.libraryError(from: error))
         }
     }
 

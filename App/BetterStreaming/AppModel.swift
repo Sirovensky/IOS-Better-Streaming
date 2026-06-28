@@ -144,6 +144,17 @@ final class AppModel {
         }
     }
 
+    /// Browse a server's folders with transient credentials (folder picker).
+    func browseFolders(
+        proto: SourceProtocol, host: String, port: Int?, share: String,
+        username: String?, domain: String?, password: String?, path: String
+    ) async -> Result<[RemoteFolder], LibraryError> {
+        await library.listFolders(
+            proto: proto.rawValue, host: host, port: port ?? proto.defaultPort, share: share,
+            username: username, domain: domain, password: password, path: path
+        )
+    }
+
     func removeSource(_ id: String) {
         Task { await library.removeSource(id) }
         sourceConfigs.removeAll { $0.id == id }
