@@ -32,6 +32,7 @@ struct HomeView: View {
                 }
             }
             .libraryDestinations()
+            .libraryNavigation($path)
         }
     }
 

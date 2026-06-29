@@ -15,6 +15,28 @@ enum LibraryRoute: Hashable {
     case settings
 }
 
+/// A push action injected by each NavigationStack host so deep views (e.g. an
+/// album cell's context menu) can navigate without owning the path. A
+/// `NavigationLink` inside `.contextMenu` doesn't work on iOS (detached platter),
+/// so menu items mutate the host path through this instead.
+private struct LibraryNavigateKey: EnvironmentKey {
+    static let defaultValue: ((LibraryRoute) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var libraryNavigate: ((LibraryRoute) -> Void)? {
+        get { self[LibraryNavigateKey.self] }
+        set { self[LibraryNavigateKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// Wire `libraryNavigate` to push onto a host's NavigationStack path.
+    func libraryNavigation(_ path: Binding<[LibraryRoute]>) -> some View {
+        environment(\.libraryNavigate, { route in path.wrappedValue.append(route) })
+    }
+}
+
 extension View {
     /// Shared destination table so Home and Library navigate identically.
     func libraryDestinations() -> some View {
@@ -404,13 +426,8 @@ struct AllPlaylistsView: View {
 /// Non-button album cell for NavigationLink.
 struct AlbumGridCellStatic: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.libraryNavigate) private var libraryNavigate
     var album: Album
-    /// Hosts that own a navigation path pass this so "Go to Artist" can push the
-    /// Artist screen. A `NavigationLink` inside `.contextMenu` does NOT navigate
-    /// on iOS (the menu renders in a detached platter outside the NavigationStack),
-    /// so we mutate the host's path from a plain Button instead. Omitted (nil) →
-    /// the item is hidden.
-    var goToArtist: ((String) -> Void)? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             ArtworkView(url: album.artworkURL, artworkKey: album.id, cornerRadius: 10)
@@ -443,9 +460,9 @@ struct AlbumGridCellStatic: View {
             Label(fav ? "Unfavorite" : "Favorite", systemImage: fav ? "star.fill" : "star")
         }
 
-        if let goToArtist {
+        if let libraryNavigate {
             Divider()
-            Button("Go to Artist", systemImage: "music.mic") { goToArtist(album.artistID) }
+            Button("Go to Artist", systemImage: "music.mic") { libraryNavigate(.artist(album.artistID)) }
         }
     }
 }

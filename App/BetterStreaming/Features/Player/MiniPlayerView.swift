@@ -147,6 +147,7 @@ struct NowPlayingView: View {
             playerContent
                 .toolbar(.hidden, for: .navigationBar)
                 .libraryDestinations()
+                .libraryNavigation($path)
         }
     }
 

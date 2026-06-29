@@ -19,6 +19,7 @@ struct LibraryView: View {
             .navigationTitle("Library")
             // No SMB setup buttons here (moved to Sources / Home settings).
             .libraryDestinations()
+            .libraryNavigation($path)
         }
     }
 
@@ -53,7 +54,7 @@ struct LibraryView: View {
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 18) {
                 ForEach(model.recentlyAddedAlbums) { album in
                     NavigationLink(value: LibraryRoute.album(album.id)) {
-                        AlbumGridCellStatic(album: album, goToArtist: { path.append(.artist($0)) })
+                        AlbumGridCellStatic(album: album)
                     }
                     .buttonStyle(.plain)
                 }
