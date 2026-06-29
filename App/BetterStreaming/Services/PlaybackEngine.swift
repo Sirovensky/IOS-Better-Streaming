@@ -670,7 +670,12 @@ final class PlaybackEngine {
     private func applyVolume() {
         let cf = enhancements.crossfadeSeconds
         var envelope: Float = 1
-        if cf > 0.1, duration > cf * 2 {
+        // Only shape volume INSIDE the known track bounds. Once `elapsed` reaches
+        // the reported `duration`, snap back to full — many files (esp. VBR MP3
+        // whose header duration is an underestimate) keep decoding real audio past
+        // it, and holding the fade-out at silence made that tail inaudible until
+        // the actual EOF ("fades out then plays silently forever").
+        if cf > 0.1, duration > cf * 2, elapsed < duration {
             let inGain = min(elapsed / cf, 1)
             let outGain = min((duration - elapsed) / cf, 1)
             envelope = Float(max(0, min(inGain, outGain)))
