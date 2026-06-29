@@ -599,7 +599,13 @@ enum FTPDateParser {
             time = "00:00"
         }
         formatter.dateFormat = "MMM d yyyy HH:mm"
-        return formatter.date(from: "\(month) \(day) \(year) \(time)")
+        guard let parsed = formatter.date(from: "\(month) \(day) \(year) \(time)") else { return nil }
+        // `ls` omits the year for recent files. If we assumed the current year but
+        // the date lands in the future (a Dec file listed in Jan), it's last year.
+        if timeOrYear.contains(":"), parsed.timeIntervalSinceNow > 86_400 {
+            return Calendar.current.date(byAdding: .year, value: -1, to: parsed) ?? parsed
+        }
+        return parsed
     }
 
     static func parseDOSDate(date: String, time: String) -> Date? {
