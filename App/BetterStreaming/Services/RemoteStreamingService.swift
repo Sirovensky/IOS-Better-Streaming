@@ -145,7 +145,9 @@ private actor RemoteStreamSession {
     private let completeCacheURL: URL
     private let onComplete: (@Sendable () async -> Void)?
     private var cachedRanges: [Range<Int64>] = []
-    private var writeHandle: FileHandle?
+    /// True once the partial cache file has been created+sized, so we only
+    /// truncate to the full logical length once.
+    private var didSizeCacheFile = false
     /// Set once the partial file has been copied into the regular media cache.
     private var promoted = false
     #if DEBUG
@@ -172,17 +174,27 @@ private actor RemoteStreamSession {
         self.onComplete = onComplete
     }
 
-    /// Release the write handle and delete the session's partial scratch file.
-    /// Safe even after promotion — the complete copy lives in the media cache.
+    /// Delete the session's partial scratch file. Safe even after promotion —
+    /// the complete copy lives in the media cache.
     func teardown() {
-        try? writeHandle?.close()
-        writeHandle = nil
         try? FileManager.default.removeItem(at: partialCacheURL)
     }
 
     func respond(to box: LoadingRequestBox) async {
         let request = box.request
-        fillContentInfo(request.contentInformationRequest)
+
+        // Answer the content-information request on its OWN and finish it without
+        // serving any of its (often 2-byte) dataRequest. This is what lets
+        // AVPlayer learn the resource supports byte-range access and switch to
+        // random-access mode, after which it issues bounded ranged requests and
+        // proper seek requests. Serving the stream on this request instead keeps
+        // AVPlayer in sequential mode — seeks then fail and playback stalls when
+        // it needs data it hasn't streamed yet.
+        if let contentInfo = request.contentInformationRequest {
+            fillContentInfo(contentInfo)
+            request.finishLoading()
+            return
+        }
 
         guard let dataRequest = request.dataRequest else {
             request.finishLoading()
@@ -301,27 +313,29 @@ private actor RemoteStreamSession {
         return try handle.read(upToCount: Int(range.count))
     }
 
+    /// Write one fetched chunk to the partial cache. Opens its own handle for
+    /// the write (no shared long-lived handle), so AVPlayer's concurrent loading
+    /// requests — which interleave on this actor at await points — can't corrupt
+    /// each other's file position. The file is sized to its full logical length
+    /// once, then writes go to absolute offsets.
     private func writeCache(_ data: Data, at offset: Int64, totalLength: Int64) throws {
         guard !promoted else { return }
-        let handle = try writeHandleCreatingIfNeeded(totalLength: totalLength)
+        let fm = FileManager.default
+        if !didSizeCacheFile {
+            try fm.createDirectory(at: partialCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !fm.fileExists(atPath: partialCacheURL.path) {
+                fm.createFile(atPath: partialCacheURL.path, contents: nil)
+            }
+            let sizing = try FileHandle(forWritingTo: partialCacheURL)
+            try sizing.truncate(atOffset: UInt64(max(totalLength, 0)))
+            try? sizing.close()
+            didSizeCacheFile = true
+        }
+        let handle = try FileHandle(forWritingTo: partialCacheURL)
+        defer { try? handle.close() }
         try handle.seek(toOffset: UInt64(offset))
         try handle.write(contentsOf: data)
         mergeCachedRange(offset..<(offset + Int64(data.count)))
-    }
-
-    /// One long-lived write handle per session; the file is sized to its full
-    /// logical length exactly once (sparse), not on every chunk write.
-    private func writeHandleCreatingIfNeeded(totalLength: Int64) throws -> FileHandle {
-        if let writeHandle { return writeHandle }
-        let directory = partialCacheURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: partialCacheURL.path) {
-            FileManager.default.createFile(atPath: partialCacheURL.path, contents: nil)
-        }
-        let handle = try FileHandle(forWritingTo: partialCacheURL)
-        try handle.truncate(atOffset: UInt64(max(totalLength, 0)))
-        writeHandle = handle
-        return handle
     }
 
     /// When the whole file [0, length) has been fetched, copy the partial file
@@ -333,9 +347,6 @@ private actor RemoteStreamSession {
               let only = cachedRanges.first,
               only.lowerBound <= 0,
               only.upperBound >= totalLength else { return }
-
-        try? writeHandle?.close()
-        writeHandle = nil
 
         let fm = FileManager.default
         do {
