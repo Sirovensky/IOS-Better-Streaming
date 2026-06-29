@@ -90,9 +90,9 @@ final class PlaybackEngine {
     private var itemEndObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
-    private var currentItemObservation: NSKeyValueObservation?
-    /// The item WE made current (via load/skip), so the `currentItem` KVO can tell
-    /// our own change from a gapless auto-advance.
+    /// The item WE made current (via load/skip). Lets the end-of-track handler
+    /// tell a gapless auto-advance (currentItem already moved to our preload) from
+    /// a normal end.
     private var currentPlayerItem: AVPlayerItem?
     /// The lookahead item enqueued after the current one for gapless transition,
     /// and the queue index it represents. Cleared on any queue mutation.
@@ -224,13 +224,16 @@ final class PlaybackEngine {
         let insertAt = min(currentIndex + 1, queue.count)
         queue.insert(track, at: insertAt)
         unshuffledQueue.append(track)
+        clearPreload()   // the immediate-next track changed
         if queue.count == 1 { startCurrentItem(autoPlay: true) }
+        else { preloadNextIfGapless() }
     }
 
     func addToQueue(_ track: Track) {
         queue.append(track)
         unshuffledQueue.append(track)
         if queue.count == 1 { startCurrentItem(autoPlay: true) }
+        else { clearPreload(); preloadNextIfGapless() }
     }
 
     func removeFromQueue(at offsets: IndexSet) {
@@ -244,6 +247,7 @@ final class PlaybackEngine {
         // Keep the shuffle-source in sync, else toggling shuffle off resurrects
         // the removed tracks.
         unshuffledQueue.removeAll { removedIDs.contains($0.id) }
+        clearPreload(); preloadNextIfGapless()   // next may have changed
     }
 
     func moveQueueItem(fromOffsets source: IndexSet, toOffset destination: Int) {
@@ -254,6 +258,7 @@ final class PlaybackEngine {
         if let current, let newIndex = queue.firstIndex(where: { $0.id == current.id }) {
             currentIndex = newIndex
         }
+        clearPreload(); preloadNextIfGapless()   // next may have changed
     }
 
     func clearQueue() {
@@ -442,6 +447,7 @@ final class PlaybackEngine {
                 currentIndex = idx
             }
         }
+        clearPreload(); preloadNextIfGapless()   // play order changed
     }
 
     func cycleRepeat() {
@@ -450,6 +456,9 @@ final class PlaybackEngine {
         case .all: repeatMode = .one
         case .one: repeatMode = .off
         }
+        // The preloaded "next" depends on repeat mode (esp. repeat-one / wrap).
+        clearPreload()
+        preloadNextIfGapless()
     }
 
     // MARK: Gapless lookahead
@@ -460,6 +469,95 @@ final class PlaybackEngine {
         if let preloadedNextItem { player.remove(preloadedNextItem) }
         preloadedNextItem = nil
         preloadedNextIndex = nil
+    }
+
+    private func fetchArtwork(for track: Track, generation: Int) {
+        guard let loadArtwork else { return }
+        Task { [weak self] in
+            let image = await loadArtwork(track)
+            guard let self, generation == self.resolveGeneration else { return }
+            self.currentArtwork = image
+            self.updateNowPlayingInfo()
+        }
+    }
+
+    /// The index that follows the current one in play order (with repeat-all wrap).
+    private var gaplessNextIndex: Int? {
+        if currentIndex + 1 < queue.count { return currentIndex + 1 }
+        if repeatMode == .all, !queue.isEmpty { return 0 }
+        return nil
+    }
+
+    /// Preload the next track so it plays with no gap. Only when gapless is on,
+    /// we're playing, not repeat-one, and the next track is already local/cached
+    /// (so it adds NO streaming contention with the live track). Builds the item,
+    /// sets its EQ + buffer, and enqueues it after the current item.
+    private func preloadNextIfGapless() {
+        guard enhancements.gaplessEnabled, isPlaying, repeatMode != .one, !stopAtTrackEnd,
+              let nextIndex = gaplessNextIndex, queue.indices.contains(nextIndex),
+              let current = currentPlayerItem, player.currentItem === current else { return }
+        let next = queue[nextIndex]
+        guard next.kind == .audio else { return }
+        // Only preload an already-on-device track (cached / prefetched / local).
+        guard next.cacheState == .cached || next.cacheState == .prefetched else { return }
+        // Already preloaded this index? Skip.
+        if preloadedNextIndex == nextIndex, preloadedNextItem != nil { return }
+        clearPreload()
+        let generation = resolveGeneration
+        Task { [weak self] in
+            guard let self, let resolve = self.resolvePlayerItem else { return }
+            guard let item = await resolve(next) else { return }
+            // Bail if anything changed while resolving.
+            guard generation == self.resolveGeneration,
+                  self.enhancements.gaplessEnabled,
+                  self.gaplessNextIndex == nextIndex,
+                  let current = self.currentPlayerItem,
+                  self.player.currentItem === current,
+                  self.player.canInsert(item, after: current) else { return }
+            item.preferredForwardBufferDuration = Self.preferredForwardBufferSeconds
+            self.configureItemAudio(item)
+            self.player.insert(item, after: current)
+            self.preloadedNextItem = item
+            self.preloadedNextIndex = nextIndex
+        }
+    }
+
+    /// AVQueuePlayer transitioned gaplessly to our preloaded item — do the
+    /// bookkeeping a normal load would (index, observers, started, volume, art),
+    /// without replacing the item (which would interrupt the audio).
+    private func gaplessAdvanced(to item: AVPlayerItem, index: Int) {
+        cancelStallWatchdog()
+        cancelPreroll()
+        preloadedNextItem = nil
+        preloadedNextIndex = nil
+        currentPlayerItem = item
+        currentIndex = index
+        resolveGeneration += 1
+        let generation = resolveGeneration
+        recoveryAttempts = 0
+        isSeeking = false
+        pendingSeekSeconds = nil
+        resumeSeekTarget = 0
+        isBuffering = false
+        isPlaying = (player.timeControlStatus != .paused)
+        elapsed = 0
+        let track = currentTrack
+        duration = track?.durationSeconds ?? 0
+        lastErrorMessage = nil
+        currentArtwork = nil
+        attachItemObservers(item, generation: generation)
+        // The item is already playing (it was preloaded past readyToPlay), so the
+        // status observer won't re-fire — count the play directly here.
+        if let track {
+            if notedPlayGeneration != generation {
+                notedPlayGeneration = generation
+                onTrackStarted?(track)
+            }
+            fetchArtwork(for: track, generation: generation)
+        }
+        applyReplayGainVolume(for: item, generation: generation)   // EQ mix was set at preload
+        updateNowPlayingInfo()
+        preloadNextIfGapless()
     }
 
     // MARK: Item lifecycle
@@ -484,14 +582,7 @@ final class PlaybackEngine {
 
         // Load artwork in parallel with asset resolution.
         currentArtwork = nil
-        if let loadArtwork {
-            Task { [weak self] in
-                let image = await loadArtwork(track)
-                guard let self, generation == self.resolveGeneration else { return }
-                self.currentArtwork = image
-                self.updateNowPlayingInfo()
-            }
-        }
+        fetchArtwork(for: track, generation: generation)
 
         Task { [weak self] in
             guard let self else { return }
@@ -537,10 +628,23 @@ final class PlaybackEngine {
     private var baseVolume: Float = 1.0
 
     private func applyEnhancements(to item: AVPlayerItem, generation: Int) {
+        configureItemAudio(item)                                   // per-item EQ
+        applyReplayGainVolume(for: item, generation: generation)   // player-wide volume
+    }
+
+    /// Per-item EQ audio mix. Safe to set on a not-yet-current (preloaded) item.
+    private func configureItemAudio(_ item: AVPlayerItem) {
         let e = enhancements
         item.audioMix = e.eqEnabled
             ? AudioEQTap.makeAudioMix(bandsDB: e.eqBandsDB, preampDB: e.preampDB)
             : nil
+    }
+
+    /// ReplayGain/preamp via the player-wide `volume`. Only call for the CURRENT
+    /// item (volume is global, so applying it for a preloaded item would wrongly
+    /// change the track that's actually playing).
+    private func applyReplayGainVolume(for item: AVPlayerItem, generation: Int) {
+        let e = enhancements
         baseVolume = 1.0
         applyVolume()
         guard e.replayGainEnabled || (!e.eqEnabled && abs(e.preampDB) > 0.01) else { return }
@@ -574,10 +678,10 @@ final class PlaybackEngine {
         player.volume = baseVolume * envelope
     }
 
-    private func loadPlayerItem(item: AVPlayerItem, autoPlay: Bool, generation: Int) {
-        // AVPlayerItem.duration is often `.indefinite` until well after
-        // readyToPlay for these files, which left the scrubber/timer at 0:00.
-        // Load it directly from the asset, which is reliable.
+    /// Attach duration / status / end-of-item observers to the item that is (or
+    /// is becoming) current. Reused by the normal load path and by the gapless
+    /// hand-off, so a gaplessly-advanced item gets the same wiring.
+    private func attachItemObservers(_ item: AVPlayerItem, generation: Int) {
         let durationAsset = item.asset
         Task { @MainActor in
             guard generation == self.resolveGeneration else { return }
@@ -623,6 +727,7 @@ final class PlaybackEngine {
                         self.notedPlayGeneration = generation
                         self.onTrackStarted?(self.queue[self.currentIndex])
                     }
+                    self.preloadNextIfGapless()
                     self.updateNowPlayingInfo()
                 case .failed:
                     self.isBuffering = false
@@ -647,7 +752,10 @@ final class PlaybackEngine {
                 self?.handlePlaybackEnded()
             }
         }
+    }
 
+    private func loadPlayerItem(item: AVPlayerItem, autoPlay: Bool, generation: Int) {
+        attachItemObservers(item, generation: generation)
         item.preferredForwardBufferDuration = Self.preferredForwardBufferSeconds
         applyEnhancements(to: item, generation: generation)
         // Replace the whole queue with this one item. (AVQueuePlayer's
@@ -672,10 +780,27 @@ final class PlaybackEngine {
     }
 
     /// When set (sleep timer "end of track"), playback pauses at the end of the
-    /// current track instead of advancing.
-    var stopAtTrackEnd = false
+    /// current track instead of advancing — so drop any gapless preload that
+    /// would otherwise carry it straight into the next track.
+    var stopAtTrackEnd = false {
+        didSet { if stopAtTrackEnd { clearPreload() } }
+    }
 
     private func handlePlaybackEnded() {
+        // Gapless: AVQueuePlayer already advanced to the preloaded next item. Do
+        // the bookkeeping instead of a fresh resolve (which would re-gap it).
+        if let next = preloadedNextItem, let idx = preloadedNextIndex, player.currentItem === next {
+            if stopAtTrackEnd {
+                // Sleep "end of track": the preload shouldn't have happened, but if
+                // it did, stop on the new item's first frame.
+                stopAtTrackEnd = false
+                clearPreload()
+                pause()
+                return
+            }
+            gaplessAdvanced(to: next, index: idx)
+            return
+        }
         if stopAtTrackEnd {
             stopAtTrackEnd = false
             pause()

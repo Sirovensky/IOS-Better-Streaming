@@ -89,6 +89,14 @@ struct SettingsView: View {
         return VStack(alignment: .leading, spacing: 10) {
             SectionHeader(title: "Audio", detail: "Volume levelling and a 5-band EQ (off by default)")
             VStack(spacing: 0) {
+                Toggle(isOn: $enhancements.gaplessEnabled) {
+                    settingsLabel("Gapless playback", "No silence between downloaded tracks", icon: "arrow.right.to.line")
+                }
+                .tint(DesignTokens.brandPrimary)
+                .padding(12)
+
+                rowDivider
+
                 Toggle(isOn: $enhancements.replayGainEnabled) {
                     settingsLabel("ReplayGain", "Even out loudness between tracks", icon: "speaker.wave.2")
                 }

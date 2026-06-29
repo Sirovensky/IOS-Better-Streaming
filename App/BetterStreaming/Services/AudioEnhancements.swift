@@ -19,6 +19,7 @@ final class AudioEnhancements {
         static let eqEnabled = "audio.eq.enabled"
         static let eqBands = "audio.eq.bands"
         static let crossfade = "audio.crossfadeSeconds"
+        static let gapless = "audio.gapless.enabled"
     }
 
     /// Centre frequencies for the EQ bands (Hz). `nonisolated` so the EQ tap's
@@ -33,6 +34,10 @@ final class AudioEnhancements {
     var eqBandsDB: [Double] { didSet { defaults.set(eqBandsDB, forKey: Keys.eqBands) } }
     /// Crossfade duration in seconds (0 = off / hard cut).
     var crossfadeSeconds: Double { didSet { defaults.set(crossfadeSeconds, forKey: Keys.crossfade) } }
+    /// Gapless playback: preload the next track so it transitions with no gap.
+    /// On by default. Only the next track when it's already local/cached is
+    /// preloaded, so it never adds streaming contention.
+    var gaplessEnabled: Bool { didSet { defaults.set(gaplessEnabled, forKey: Keys.gapless) } }
 
     var isActive: Bool { replayGainEnabled || eqEnabled || abs(preampDB) > 0.01 }
 
@@ -47,6 +52,8 @@ final class AudioEnhancements {
             eqBandsDB = Array(repeating: 0, count: Self.eqFrequencies.count)
         }
         crossfadeSeconds = defaults.double(forKey: Keys.crossfade)
+        // Default ON (no stored value yet → true).
+        gaplessEnabled = defaults.object(forKey: Keys.gapless) == nil ? true : defaults.bool(forKey: Keys.gapless)
     }
 
     /// dB → linear amplitude. `nonisolated` (pure) for the real-time tap.
