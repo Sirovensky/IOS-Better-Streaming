@@ -5,9 +5,7 @@ Two agents edit this (this one + a "Codex" agent on another PC) — `git pull --
 
 ## Open (priority order)
 
-1. **Pre-cache next queue track (when online)** — when reachable, prefetch the next track in the play queue so advance is instant/gapless. Trigger on track-start (or current track ~halfway); warm the streaming range cache / fetch into the on-disk cache. Wi-Fi-only honored; cancel/replace on queue change or skip; respect auto-cache budget (don't evict pinned/favorites). Now that streaming + promotion exist, this is "prime the next track's bytes ahead of the player asking".
-
-2. **FTP robustness round 2** — (a) per-operation timeouts + task-cancellation: every NWConnection await (connect/send/receive) should race a deadline and `withTaskCancellationHandler { connection.cancel() }` so a silent server can't hang playback forever; (b) reuse a pooled logged-in control connection across range reads instead of reconnecting per read (big streaming latency win) + send `ABOR` when discarding a partial RETR; (c) LIST/MSDOS dates parsed in server TZ (prefer MDTM/UTC; handle Dec→Jan year rollover); (d) `parseUnix` trim filename field. Needs device testing.
+1. **FTP robustness round 2** — (a) per-operation timeouts + task-cancellation: every NWConnection await (connect/send/receive) should race a deadline and `withTaskCancellationHandler { connection.cancel() }` so a silent server can't hang playback forever; (b) reuse a pooled logged-in control connection across range reads instead of reconnecting per read (big streaming latency win) + send `ABOR` when discarding a partial RETR; (c) LIST/MSDOS dates parsed in server TZ (prefer MDTM/UTC; handle Dec→Jan year rollover); (d) `parseUnix` trim filename field. Needs device testing.
 
 3. **SFTP polish** — (a) `resolvedPath` forces every path filesystem-absolute, so a relative `basePath` like `Music` becomes `/Music` instead of `~/Music` (breaks the common NAS-home setup) — resolve relative bases against the SFTP home (don't prepend `/` unless the base starts with `/`); (b) error mapping uses fragile substring matching (EACCES → authenticationExpired) — map on Citadel's typed SFTP status codes instead; (c) list() vs stat() disagree on symlinks (lstat vs follow) — make consistent. Plus: surface a "host key changed" recovery action in Settings (clear `ssh_known_hosts.json`).
 
@@ -26,6 +24,7 @@ Two agents edit this (this one + a "Codex" agent on another PC) — `git pull --
 
 ## Done (pushed to main)
 
+- **Pre-cache next queue track** — on track start, the next queued remote track is downloaded into the (evictable) auto-cache when reachable, so skip/advance plays from disk instantly. Skips local/video/already-cached; cancels+replaces on track change; honors offline + auto-cache-enabled. (Follow-up: cancel the in-flight download on rapid skip — `client.download` has no cancel token yet.)
 - **Streaming stall fixed** — removed the 12MB `finishLoading()` cap that faked EOF (the "plays ~9s then stalls" bug). Now serves the full requested range incrementally and lets AVPlayer drive backpressure via `didCancel`. Partial-range caching preserved; truncate-once (no per-chunk truncate); fully-streamed tracks promoted into the media cache (instant next play / offline); bounded session map; stale partials reclaimed on launch; content-type fallbacks for flac/mp3/m4a/wav/aiff.
 - **Data-loss fixed (critical)** — a failed/unreadable `sources.json` no longer reads as "no sources" and wipes the SQLite library / discards `library.json`; config-load outcome is tracked and destructive prune/migration is skipped unless configs are authoritative.
 - **Metadata crash fixed** — MP4 64-bit atom size no longer integer-overflow-traps on crafted/truncated files (overflow-free remaining-space check).

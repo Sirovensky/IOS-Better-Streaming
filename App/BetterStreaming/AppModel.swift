@@ -36,6 +36,9 @@ final class AppModel {
     private var sourceHealth: [String: SourceHealth] = [:]
     private var sourceMessages: [String: String] = [:]
     private var startupMaintenanceTask: Task<Void, Never>?
+    /// Warms the next queued track so advancing/skip is instant. Cancelled and
+    /// replaced whenever the current track changes.
+    private var prefetchTask: Task<Void, Never>?
 
     var hasSources: Bool { !sources.isEmpty }
     var hasLibrary: Bool { !tracks.isEmpty }
@@ -467,6 +470,7 @@ final class AppModel {
         engine.onTrackStarted = { [weak self] track in
             guard let self else { return }
             self.notePlayed(track.id)
+            self.prefetchNextIfNeeded()
             Task {
                 let cached = await self.library.isCached(track)
                 if cached, let i = self.trackIndex[track.id] {
@@ -522,6 +526,31 @@ final class AppModel {
         if recentlyPlayedIDs.count > 40 { recentlyPlayedIDs.removeLast() }
         autoCache.recordPlay(id)
         reconcileAutoCache()
+    }
+
+    /// Warm the next queued track so advancing/skip starts instantly. Downloads
+    /// it into the (evictable) auto-cache when reachable and not a local file
+    /// already on disk. Cancels any prior prefetch when the track changes.
+    private func prefetchNextIfNeeded() {
+        prefetchTask?.cancel()
+        guard autoCache.isEnabled, !offlineMode else { return }
+        let queue = engine.queue
+        let nextIndex = engine.currentIndex + 1
+        guard queue.indices.contains(nextIndex) else { return }
+        let next = queue[nextIndex]
+        guard next.kind != .video else { return }   // don't pre-pull large video
+        let localIDs = Set(sourceConfigs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
+        guard !localIDs.contains(next.sourceID) else { return }
+        guard next.cacheState == .remoteOnly else { return }
+        guard sourceHealth.values.contains(where: { $0.isReachable }) else { return }
+        prefetchTask = Task { [weak self] in
+            guard let self else { return }
+            let ok = await self.library.ensureCached(next, auto: true)
+            if Task.isCancelled { return }
+            if ok, let i = self.trackIndex[next.id], self.tracks[i].cacheState == .remoteOnly {
+                self.tracks[i].cacheState = .prefetched
+            }
+        }
     }
 
     private func reconcileAutoCache() {
