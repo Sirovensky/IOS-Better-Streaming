@@ -19,6 +19,22 @@ Two agents edit this (this one + a "Codex" agent on another PC) — `git pull --
 
 8. **Embedded artwork at scan for remote** — already implemented by Codex; verify on device (folder cover + ranged embedded probe) and that it doesn't full-download.
 
+## Proposed — new features (ASK before building)
+
+Brainstormed high-value additions for a self-hosted, audiophile-leaning NAS music app aiming for Apple-Music/Spotify quality. Not started — awaiting go/no-go.
+
+- **User playlists + `.m3u`/`.m3u8` import** — create/rename/reorder/delete playlists, persist (MediaStore already has `playlist_entries`). Plus parse `.m3u`/`.m3u8` files found on the NAS into playlists (NAS users already curate these). Likely the single biggest gap — a music app without playlists feels incomplete.
+- **Gapless playback + crossfade** — switch to `AVQueuePlayer` (or preroll the next item) for true gapless album/live-set playback; optional crossfade slider. Pairs with the pre-cache-next work already done. Big audiophile draw.
+- **Synced lyrics** — show embedded lyrics (ID3 `USLT`/`SYLT`) and `.lrc` sidecar files from the NAS, with time-synced highlighting in Now Playing. NAS libraries commonly ship `.lrc`.
+- **Online artwork fallback** — when a track/album has no embedded or folder art, fetch from Cover Art Archive / MusicBrainz (cached locally). Fixes ugly grey-tile libraries; opt-in (privacy: leaves the LAN).
+- **CarPlay** — `CPNowPlayingTemplate` + browse templates. Music apps live in the car; high real-world listening value.
+- **Sleep timer** — stop playback after N minutes / end of track. Cheap, expected.
+- **Equalizer + Replay Gain** — `AVAudioEngine`/`AVAudioUnitEQ` presets + volume normalization from gain tags. Audiophile appeal (note: moving off `AVPlayer` to `AVAudioEngine` is a bigger architectural change — scope carefully).
+- **Library sort/filter + resume-on-launch** — sort albums/songs by artist/title/year/recently-added/play-count; filter by genre; persist the play queue + position and offer "resume" on next launch.
+- **Offline/download manager screen** — see what's cached (auto vs pinned), total size, evict, "download this album for offline".
+- **Incremental scan** — only re-scan folders whose mtime changed since last scan (faster rescans on big libraries); background scan on app launch.
+- **Last.fm scrobbling** — optional, for the listening-stats crowd.
+
 ## Supply-chain note
 `swift-nio-ssh` resolves to a **fork** `github.com/Wellz26/swift-nio-ssh` (Citadel 0.12.1 points there, range 0.3.4..<0.4.0). We now declare it directly too (to import NIOSSH for host-key TOFU). Worth auditing the fork or pinning to a trusted source / upstream when Citadel moves back.
 
