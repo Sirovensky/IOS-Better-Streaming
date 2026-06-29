@@ -125,6 +125,22 @@ Pulled `library.sqlite` (860 items). Findings + status:
 - **Remove "Recently Added"** from Home.
 - Add **fun read-only stats** (total listened time, library info, counts) — NOT settings, no setup prompts; just delightful info.
 
+## "COMPLETE ALL" SWEEP — 2026-06-29 (continued, UNBUILT — needs Mac build + test)
+
+Goal: clear the whole backlog. Landed this sweep (each pushed to main):
+- **Batch 1** (`fbdcf1a`): repeat-one `hasNext`; prefetch wrap on repeat-all; `downloadAlbum` one-task throttle; no double-count play on stall-recovery; removed dead `toggleFavoriteOnCurrent`.
+- **Batch 2** (`1b1e06e`): connect-timeout transport leak (orphaned late connect now disconnected); keep the scan's connection alive on app-background; stop playback when the playing source is removed.
+- **Batch 3** (`ec06afd`): ID3 extended-header skip + global unsync (v2.2/2.3) + "ID3" marker search (AIFF/AAC tags-in-chunk); TPE1/ARTIST beats TPE2/ALBUMARTIST; ID3 genre table extended 80–191; non-feature parenthetical artist-split fix.
+- **Batch 4** (`f826d08`): `MediaStore.replaceMediaItems` now non-destructive — diff by identity_key, preserves PKs + cache_entries (#33).
+- **Batch 5** (`1068a44`): FTP LIST Dec→Jan year rollover. *(Deferred, low-EV for an SMB user: FTP per-op timeout/pooling, SFTP path-resolution + typed errors + known-hosts UI — rewrites of working secondary-protocol code with no FTP/SFTP source to validate.)*
+- **Batch 6 (partial)** (`41d025b`): "Go to Artist" from the album context menu now works in every grid (Library/AllAlbums/Search/Player) via an env nav-action (the old in-contextMenu NavigationLink was dead on iOS).
+
+**Still open after this sweep:**
+- Batch 6 rest: library sort/filter (year/date-added/play-count/genre); Home "Made For You" populate-or-remove; auto-cache stats write debounce.
+- Batch 7 (#3): genre canonicalization + progressive genre-expansion radio — **best done against the fully-synced library** (design/test on the real ~2000-track genre spread).
+- Batch 8 features: playlists + .m3u; gapless/crossfade; synced lyrics; online artwork fallback; EQ/ReplayGain (moves off AVPlayer). **Large untested additions — want a build/test loop.**
+- Can't-do-here: CarPlay (entitlement + hardware); interactive finger-driven player transition (needs sim/device iteration); device-verify of artwork backfill + metadata rescans.
+
 ## BUGHUNT 2026-06-29 (3 Opus agents, whole-app re-verify of #2–#7)
 
 Verdict: #2–#7 confirmed correct as written (no Swift-6/actor/deadlock/reentrancy errors; #6 seed-pin provably lands at index 0; #3 nav restructure sound). Real bugs found → **FIXED this session (unbuilt):**
