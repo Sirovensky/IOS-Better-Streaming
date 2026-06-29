@@ -308,6 +308,15 @@ struct NowPlayingView: View {
         }
         Button("Go to Album", systemImage: "square.stack") { detail = .album(track.albumID) }
         Button("View Queue", systemImage: "list.bullet") { showQueue = true }
+        Menu("Sleep Timer", systemImage: model.sleepTimerArmed ? "moon.zzz.fill" : "moon.zzz") {
+            if model.sleepTimerArmed {
+                Button("Turn Off", systemImage: "xmark") { model.cancelSleepTimer() }
+            }
+            Button("End of Track") { model.sleepAtEndOfTrack() }
+            ForEach([5, 15, 30, 45, 60], id: \.self) { minutes in
+                Button("\(minutes) minutes") { model.startSleepTimer(minutes: minutes) }
+            }
+        }
     }
 
     private var scrubber: some View {

@@ -15,13 +15,19 @@ Goal: Apple-Music/Spotify-quality player over the user's own SMB/WebDAV/FTP/SFTP
 
 ## ACTIVE BUGS (priority order)
 
-### 1. Streaming stall — HARD STALLS FIXED; minor jank remains
-Hard "plays then permanent silence" stalls are **fixed** (user-confirmed). Root cause was the "latest-data-request-wins" epoch added earlier: AVPlayer keeps several loading requests alive at once (one long `allToEnd` stream + small bounded probe/seek reads — confirmed on-device, FLAC streams as `allToEnd=true`), and the epoch aborted every request except the newest, killing the active playback stream → `FigByteStream_Remote err=-12871` / `FigFilePlayer err=-12864`. Fix: serve every request independently (cancel only via `didCancel`), per-chunk retry, and an SMB per-read timeout (12s) that resets a wedged connection. Reader pooling kept.
+### 1. Streaming stall — FIXED (verified live in Simulator over Tailscale)
+History: (a) the original "latest-wins epoch" aborted ALL but the newest loading request, killing the active playback stream when AVPlayer issued a bounded probe (`FigByteStream_Remote -12871` / `FigFilePlayer -12864`) — stall at 0:38. (b) The SMB per-read **timeout** I then added CAUSED CRASHES: it abandoned an NWConnection read mid-response, desyncing the TCP buffer → `EXC_BREAKPOINT` in `ByteReader.read` (SMBClient), and left the `send` semaphore locked → next op hung forever ("scanning forever"). `SMBClient` exposes no way to cancel the connection, so a safe timeout isn't possible there.
+
+**Current fix (committed):**
+- No per-op timeout. Recovery instead via: per-chunk **retry** on transient read errors, and `handleFailure` resets the cached transport on a genuine disconnect so the next op reconnects.
+- Serve every request; **scoped supersession**: an `allToEnd` fill loop yields only when a NEWER `allToEnd` request supersedes it (handles orphaned loops when `didCancel` is unreliable). Bounded probe/seek requests never bump or check the epoch — so a probe never kills a fill (no 0:38 regression).
+- Pooled `FileReader` per path; `os.Logger` streaming diagnostics (category `streaming`, capture with `log stream`/`idevicesyslog`).
+- Verified in the Simulator streaming the real NAS over Tailscale: ~13–25 MB/s, tracks play and auto-advance; orphan-loop contention no longer stalls.
 
 **Remaining minor (not hard stalls):**
-- Rapid song-switch can semi-stall ~10s: the single SMB connection (one-request mutex) is busy with prefetch/cache downloads of the previous track; recovers on scrub. → cancel the in-flight prefetch download on track change (`RemoteFileSystemClient.download` has no cancel token yet — add one).
-- Scrub to an un-cached position is janky: brief stop, jumps back, then 1–2s stall while it caches the target. Functional but ugly. → improve seek responsiveness / surface buffering at the scrub target.
-- **Caching speed / activity indicator** (still wanted): show download speed + buffered-ahead while caching so a buffering pause reads as progress, not a freeze.
+- Rapid song-switch can briefly contend (prefetch/cache download of the previous track on the single SMB connection). → cancel the in-flight prefetch download on track change (`RemoteFileSystemClient.download` has no cancel token yet).
+- Scrub to an un-cached position: brief stop then 1–2s to cache the target. → surface buffering at the scrub target / **caching speed indicator** (show MB/s + buffered-ahead).
+- Bigger throughput win if needed: a small SMB **connection pool** (multiple TCP connections) so concurrent reads parallelize instead of serializing on one mutex.
 
 ### 2. Album artwork — remote backfill added (VERIFY on device)
 Covers were blank because the whole art pipeline only read from a **local** file (so streamed/un-rescanned tracks got nothing). Added: remote artwork extraction (folder cover + embedded ranged read) that works without downloading the track; a throttled library-wide backfill of missing covers (persisted via upsert, no full rescan needed); now-playing/lock-screen art for streamed tracks. Verify covers populate on device.
@@ -61,23 +67,33 @@ Pulled `library.sqlite` (860 items). Findings + status:
 - **Offline view cache usage** — FIXED (refreshes real on-disk bytes on appear).
 - **Lows:** artist-radio tiles always nil artwork; `LibraryService.stableHash` FNV basis differs from probe's (cosmetic).
 
-## FEATURE BACKLOG (user approved earlier — build after active bugs)
+## OPEN QoL / UX (next)
+
+- **Interactive player transition (REQUESTED).** Mini→full and full→mini should follow the finger live (dynamic), not snap after the gesture. Currently a `fullScreenCover` (system transition) + tap to open + chevron/threshold-drag to close. Needs a custom offset-driven container (replace the cover) — deferred this session because it needs visual iteration and the Simulator can't be tapped headlessly (computer-use needs the absent user's approval). Build + iterate when a tappable device/sim is available.
+- **Track durations missing.** The metadata reader parses tags but not audio-frame duration, so `durationSeconds` is 0 → song rows show no time and the Home "in your library" total is hidden. Extract duration via `AVAsset.load(.duration)` when a track is cached, or parse frame headers; persist it.
+- **Resume queue on launch** + **sort/filter** (year / date-added / play-count; filter by genre).
+- **Kaidalov server cleanup tool** — the mojibake is in the on-disk filenames (bad soulseek import); needs a server-side rename/retag utility (out of app scope) OR rely on embedded tags (Win-1251 fix) where present.
+- **Filename pattern robustness** — `splitArtistTitle` assumes `Artist - Title`; artist may be after the title or vary per folder. A sub-agent designed a per-folder pattern-inference approach (sample multiple files, infer the constant=album-artist slot, confidence ladder) — fold it in. Design notes from this session.
+
+## FEATURE BACKLOG (user approved earlier)
 
 1. **Playlists + .m3u import** — biggest gap.
 2. **Gapless + crossfade** (`AVQueuePlayer` / preroll). Coordinate with streaming work.
 3. **Synced lyrics** (`.lrc` + ID3 `USLT`/`SYLT`).
 4. **Online artwork fallback** (Cover Art Archive / MusicBrainz) — opt-in.
-5. **CarPlay.**
-6. **Sleep timer.**
-7. **Sort/filter + resume queue** on launch.
-8. **Equalizer + Replay Gain** (moves off `AVPlayer` — scope carefully).
+5. **CarPlay** (`CPNowPlayingTemplate` + browse templates) — needs the CarPlay entitlement; can't be tested without CarPlay sim/hardware.
+6. **Sleep timer** — DONE (Now Playing menu: 5/15/30/45/60 min + end-of-track).
+7. **Equalizer + Replay Gain** (moves off `AVPlayer` — scope carefully).
 
-## DONE (this session — not yet committed/pushed unless noted)
+## DEV / TEST NOTES
 
-- Streaming hard-stall fix (remove epoch, per-chunk retry, SMB read timeout+reset; diagnosed from device logs).
-- Album/artist grouping: folder-keyed albumID, multi-artist credits, Various-Artists display, date-ordered recently-added.
-- Remote album-art backfill + now-playing art for streamed tracks.
-- Metadata: filename `Artist - Title` parse for untagged; ID3 Win-1251 fallback.
-- Offline view real cache-usage readout.
-- Album-detail artist tap-through.
-- (Earlier pushed) `66e26ef` hi-res FLAC embedded cover; `0adcbc3` content-info separate request; `e448f49` pre-cache next; `8e6f287` stall/data-loss/MP4/SFTP/FTP/auto-cache wave; Codex `cc9b753` FTP/SFTP/GRDB/metadata-at-scan/Radio/folder-picker/local-files.
+- **Headless Simulator testing:** the build box reaches the NAS over Tailscale (`100.83.121.63:445`). DEBUG-only launch env hooks (inert without the var): `BETTERSTREAMING_TEST_SMB_PASSWORD` injects the SMB password in-memory (no Keychain in the sim); `BETTERSTREAMING_TEST_AUTOPLAY=<title>` auto-plays a track. Pass via `SIMCTL_CHILD_…`. Inject a real library by copying the device's `library.sqlite`+`sources.json` into the sim app's Application Support and set `onboarded.v1`. Pull the device DB with `devicectl device copy from … --source "Library/Application Support/library.sqlite"`.
+
+## DONE (this session — committed locally `a4b282e`, NOT pushed; user builds from this Mac)
+
+- Streaming: removed the crashing per-read timeout; scoped allToEnd supersession + per-chunk retry + transport-reset-on-disconnect; pooled reader; os.Logger. Crash (`ByteReader` EXC_BREAKPOINT) + "scanning forever" both fixed. Verified live in sim.
+- Metadata/grouping: folder-keyed albumID; multi-artist credits (cross-listed); Various-Artists display; filename `Artist - Title` parse; ID3 Win-1251 (Cyrillic) decode; genre canonicalization + per-artist consensus.
+- Scan: incremental (reuse unchanged by stableKey) + progress + artwork deferred to backfill (fixes "forever").
+- Artwork: remote backfill (folder cover + embedded ranged) + now-playing art for streamed tracks.
+- UX: A-Z fast-scroll index (Songs/Albums/Artists, Latin+Cyrillic); unified Offline list+filter; Home read-only stats (Recently-Added removed, empty Made-For-You hidden); tappable artist (album detail + Now Playing); Sources folder count + total size + full base path; Songs Play/Shuffle restored; **sleep timer**.
+- (Earlier pushed) `66e26ef`/`0adcbc3`/`e448f49`/`8e6f287` + Codex `cc9b753`.

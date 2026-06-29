@@ -390,7 +390,16 @@ final class PlaybackEngine {
         updateNowPlayingInfo()
     }
 
+    /// When set (sleep timer "end of track"), playback pauses at the end of the
+    /// current track instead of advancing.
+    var stopAtTrackEnd = false
+
     private func handlePlaybackEnded() {
+        if stopAtTrackEnd {
+            stopAtTrackEnd = false
+            pause()
+            return
+        }
         if repeatMode == .one {
             seek(toSeconds: 0)
             player.play()

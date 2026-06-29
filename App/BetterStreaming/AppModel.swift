@@ -542,6 +542,38 @@ final class AppModel {
         engine.playShuffled(list)
     }
 
+    // MARK: Sleep timer
+
+    /// When the running minute-based sleep timer will pause playback (nil if off).
+    private(set) var sleepTimerEnd: Date?
+    private var sleepTimerTask: Task<Void, Never>?
+
+    var sleepTimerArmed: Bool { sleepTimerEnd != nil || engine.stopAtTrackEnd }
+
+    func startSleepTimer(minutes: Int) {
+        cancelSleepTimer()
+        sleepTimerEnd = Date().addingTimeInterval(Double(minutes) * 60)
+        sleepTimerTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.engine.pause()
+            self.sleepTimerEnd = nil
+        }
+    }
+
+    /// Pause when the current track finishes.
+    func sleepAtEndOfTrack() {
+        cancelSleepTimer()
+        engine.stopAtTrackEnd = true
+    }
+
+    func cancelSleepTimer() {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        sleepTimerEnd = nil
+        engine.stopAtTrackEnd = false
+    }
+
     private func playableContext(_ context: [Track]) -> [Track] {
         guard offlineMode else { return context }
         return context.filter { $0.cacheState.isPlayableOffline }
