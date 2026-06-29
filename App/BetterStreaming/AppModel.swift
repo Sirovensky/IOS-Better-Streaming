@@ -220,7 +220,13 @@ final class AppModel {
             rebuildIndex()
             sourceHealth[sourceID] = .online
             let sourceCount = updated.filter { $0.sourceID == sourceID }.count
-            sourceMessages[sourceID] = sourceCount == 0 ? "No supported media found" : nil
+            if await library.lastScanIncomplete {
+                // Some folders couldn't be listed — we kept the existing tracks
+                // rather than pruning. Tell the user so they rescan when stable.
+                sourceMessages[sourceID] = "Some folders couldn’t be read — library kept. Rescan on a stable connection."
+            } else {
+                sourceMessages[sourceID] = sourceCount == 0 ? "No supported media found" : nil
+            }
         } catch let error as LibraryError {
             sourceHealth[sourceID] = (error.kind == .auth) ? .authFailed : .unreachable
             sourceMessages[sourceID] = error.message

@@ -74,6 +74,10 @@ actor LibraryService {
     /// session, so the artwork backfill doesn't re-hit the server for covers that
     /// aren't there. Cleared on a fresh scan (files may have changed).
     private var attemptedArtworkAlbumIDs: Set<String> = []
+    /// True when the most recent scan couldn't list one or more folders (so it
+    /// merged rather than pruned). Lets the UI warn the user to rescan on a
+    /// stable connection instead of trusting a shrunken count.
+    private(set) var lastScanIncomplete = false
     /// In-memory passwords for this session, set on add. Lets the first
     /// add→scan succeed even if the Keychain read lags/fails; Keychain remains
     /// the durable store for relaunches.
@@ -276,6 +280,12 @@ actor LibraryService {
         var pending: [RemotePath] = [RemotePath(displayPath: cfg.rootPath)]
         var visited = Set<String>()
         var listedAnyFolder = false
+        // Number of folders we COULD NOT list this pass (after a retry). While
+        // >0 the walk is incomplete, so we must NOT prune un-seen tracks below —
+        // doing so silently wipes folders we simply failed to read (a flaky
+        // connection or an unlistable folder), which is how a rescan can shrink
+        // the library from 20 GB to 10 GB.
+        var listFailures = 0
         var filesSeen = 0
 
         while let dir = pending.popLast() {
@@ -289,7 +299,21 @@ actor LibraryService {
                 listedAnyFolder = true
             } catch {
                 if !listedAnyFolder { throw Self.libraryError(from: error) }
-                continue
+                // Retry a couple of times: a wedged op tears down + reconnects the
+                // client, so a transient stall usually clears within a retry or
+                // two. Only count a failure (→ suppress pruning) if all retries
+                // fail, so a flaky connection can't drop a folder's tracks.
+                var recovered: [RemoteEntry]?
+                for _ in 0..<2 {
+                    if let r = try? await client.list(dir) { recovered = r; break }
+                }
+                if let recovered {
+                    listedAnyFolder = true
+                    entries = recovered
+                } else {
+                    listFailures += 1
+                    continue
+                }
             }
 
             for entry in entries {
@@ -320,10 +344,26 @@ actor LibraryService {
         }
 
         progress?(filesSeen)
+
+        // Only a CLEAN walk (every folder listed) may prune: replacing with
+        // `scanned` deletes any prior track not re-seen. On a partial walk, merge
+        // instead — keep prior tracks we didn't re-scan so skipped folders survive.
+        // (Genuinely-deleted files are pruned on the next clean scan.)
+        lastScanIncomplete = listFailures > 0
+        let merged: [Track]
+        if listFailures == 0 {
+            merged = scanned
+        } else {
+            let scannedIDs = Set(scanned.map(\.id))
+            let priorKept = allTracks.filter { $0.sourceID == sourceID && !scannedIDs.contains($0.id) }
+            merged = scanned + priorKept
+            streamLog.error("scan partial sourceID=\(sourceID, privacy: .public) listFailures=\(listFailures) scanned=\(scanned.count) kept=\(priorKept.count)")
+        }
+
         allTracks.removeAll { $0.sourceID == sourceID }
-        allTracks.append(contentsOf: scanned)
+        allTracks.append(contentsOf: merged)
         refreshCacheStates()
-        await persistLibrary(sourceID: sourceID, tracks: scanned)
+        await persistLibrary(sourceID: sourceID, tracks: merged)
         return allTracks
     }
 
