@@ -38,7 +38,7 @@ struct MiniPlayerBar: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .playerGlassBackground(cornerRadius: 14)
             .overlay {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .stroke(DesignTokens.borderSubtle.opacity(0.12), lineWidth: 1)
@@ -103,29 +103,32 @@ struct MiniPlayerBar: View {
                     .padding(.horizontal, 10)
                     .padding(.bottom, 6)
             }
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .playerGlassBackground(cornerRadius: 14)
             .overlay {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .stroke(DesignTokens.borderSubtle.opacity(0.12), lineWidth: 1)
             }
             .shadow(color: .black.opacity(0.22), radius: 14, y: 6)
             .contentShape(Rectangle())
-            .onTapGesture { model.isNowPlayingPresented = true }
-            .highPriorityGesture(
-                DragGesture(minimumDistance: 24)
-                    .onEnded { value in
-                        if value.translation.height < -30 {
-                            model.isNowPlayingPresented = true
-                        } else if value.translation.width < -40 {
-                            engine.next()
-                        } else if value.translation.width > 40 {
-                            engine.previous()
-                        }
-                    }
-            )
+            // Tap opens (reliable); the interactive up-drag-to-expand is owned by
+            // the host container (RootTabView) so it can track the finger live.
+            .onTapGesture { withAnimation(.interpolatingSpring(stiffness: 320, damping: 30)) { model.isNowPlayingPresented = true } }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Now playing \(track.title) by \(track.artist)")
             .accessibilityAddTraits(.isButton)
+        }
+    }
+}
+
+extension View {
+    /// Liquid Glass (iOS 26+) container background, falling back to the system
+    /// thin material on earlier OSes. Used for the floating player surfaces.
+    @ViewBuilder
+    func playerGlassBackground(cornerRadius: CGFloat) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        } else {
+            self.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         }
     }
 }
@@ -134,12 +137,20 @@ struct MiniPlayerBar: View {
 
 struct NowPlayingView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
     @State private var showQueue = false
     @State private var showLyrics = false
     /// Pushes the artist/album screen ON TOP of Now Playing (like Apple Music),
     /// reusing the shared `LibraryRoute` destinations — not a modal sheet.
     @State private var path: [LibraryRoute] = []
+
+    /// Live downward-drag fraction (1 = full, 0 = mini); nil when settled. Owned
+    /// by the host (RootTabView), which positions this view by it for a
+    /// finger-tracking collapse. Defaulted so previews/other callers still work.
+    var dragFraction: Binding<CGFloat?> = .constant(nil)
+    /// Settled presentation flag, flipped to false on a completed collapse.
+    var presented: Binding<Bool> = .constant(true)
+    /// Full container height, to translate a downward drag into a fraction.
+    var containerHeight: CGFloat = 1
 
     private var engine: PlaybackEngine { model.engine }
 
@@ -169,14 +180,14 @@ struct NowPlayingView: View {
                             .shadow(color: .black.opacity(0.4), radius: 24, y: 14)
                             .scaleEffect(engine.isPlaying ? 1.0 : 0.84)
                             .animation(.spring(response: 0.45, dampingFraction: 0.7), value: engine.isPlaying)
-                            .gesture(dismissDrag)
+                            .gesture(collapseDrag)
 
                         Spacer(minLength: 16)
 
                         trackHeader(track)
                             .padding(.horizontal, 28)
                             .contentShape(Rectangle())
-                            .gesture(dismissDrag)
+                            .gesture(collapseDrag)
 
                         scrubber
                             .padding(.horizontal, 28)
@@ -236,13 +247,32 @@ struct NowPlayingView: View {
     }
 
     /// Swipe down anywhere in the top area (artwork / title) to dismiss.
-    private var dismissDrag: some Gesture {
-        DragGesture(minimumDistance: 24, coordinateSpace: .local)
+    /// Finger-tracking collapse: a downward drag lowers the presentation fraction
+    /// live (the host offsets the whole view by it), and on release it snaps to
+    /// full or mini by position + fling velocity.
+    private var collapseDrag: some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .local)
+            .onChanged { value in
+                guard value.translation.height > 0 else { return }
+                let f = 1 - (value.translation.height / max(containerHeight, 1))
+                dragFraction.wrappedValue = min(max(f, 0), 1)
+            }
             .onEnded { value in
-                if value.translation.height > 60, abs(value.translation.width) < value.translation.height {
-                    dismiss()
+                let f = 1 - (max(value.translation.height, 0) / max(containerHeight, 1))
+                let flungDown = value.predictedEndTranslation.height > 280
+                let stayOpen = f > 0.72 && !flungDown
+                withAnimation(.interpolatingSpring(stiffness: 320, damping: 30)) {
+                    presented.wrappedValue = stayOpen
+                    dragFraction.wrappedValue = nil
                 }
             }
+    }
+
+    private func collapse() {
+        withAnimation(.interpolatingSpring(stiffness: 320, damping: 30)) {
+            presented.wrappedValue = false
+            dragFraction.wrappedValue = nil
+        }
     }
 
     private var grabber: some View {
@@ -252,7 +282,7 @@ struct NowPlayingView: View {
                 .frame(width: 40, height: 5)
                 .padding(.top, 10)
             HStack {
-                Button { dismiss() } label: {
+                Button { collapse() } label: {
                     Image(systemName: "chevron.down")
                         .font(.headline)
                         .foregroundStyle(.white.opacity(0.85))
@@ -268,11 +298,7 @@ struct NowPlayingView: View {
             .padding(.horizontal, 12)
         }
         .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 20).onEnded { value in
-                if value.translation.height > 60 { dismiss() }
-            }
-        )
+        .gesture(collapseDrag)
     }
 
     private func trackHeader(_ track: Track) -> some View {
