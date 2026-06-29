@@ -214,8 +214,15 @@ public actor MediaStore {
     public func replaceMediaItems(_ items: [MediaItem], for sourceID: SourceID) async throws -> [MediaItem] {
         try migrateIfNeededLocked()
         return try await database().write { db in
-            try MediaStorePersistence.deleteMediaItems(sourceID: sourceID, in: db)
-            return try items.map { try MediaStorePersistence.upsertMediaItem($0, in: db) }
+            // Non-destructive: upsert the new set (identity_key match preserves the
+            // existing PK, so a surviving track keeps its cache_entries), then
+            // delete only the source's items whose identity_key is gone. The old
+            // delete-all-then-reinsert reassigned every PK and cascade-wiped valid
+            // cache_entries on every rescan.
+            let persisted = try items.map { try MediaStorePersistence.upsertMediaItem($0, in: db) }
+            let keep = Set(items.map { $0.identity.stableKey })
+            try MediaStorePersistence.deleteMediaItems(sourceID: sourceID, keeping: keep, in: db)
+            return persisted
         }
     }
 
@@ -1208,6 +1215,32 @@ private enum MediaStorePersistence {
         )
         try db.execute(sql: "DELETE FROM media_items WHERE source_id = ?", arguments: [source])
         try db.execute(sql: "DELETE FROM folders WHERE source_id = ?", arguments: [source])
+    }
+
+    /// Delete only the source's media items whose identity_key is NOT in `keep`
+    /// (plus their media_search + cache_entries rows), leaving surviving rows —
+    /// and their PKs/cache_entries — intact. A temp table holds the keep set so
+    /// we don't blow the SQLite bound-variable limit on a large library. Folders
+    /// are left untouched (a now-empty folder is harmless; upsert maintains the
+    /// live ones). An empty keep set deletes all of the source's items.
+    static func deleteMediaItems(sourceID: SourceID, keeping keep: Set<String>, in db: Database) throws {
+        let source = uuidString(sourceID.rawValue)
+        try db.execute(sql: "CREATE TEMP TABLE IF NOT EXISTS _keep_identity_keys (k TEXT PRIMARY KEY)")
+        try db.execute(sql: "DELETE FROM _keep_identity_keys")
+        for key in keep {
+            try db.execute(sql: "INSERT OR IGNORE INTO _keep_identity_keys (k) VALUES (?)", arguments: [key])
+        }
+        let absent = "source_id = ? AND identity_key NOT IN (SELECT k FROM _keep_identity_keys)"
+        try db.execute(
+            sql: "DELETE FROM media_search WHERE media_id IN (SELECT id FROM media_items WHERE \(absent))",
+            arguments: [source]
+        )
+        try db.execute(
+            sql: "DELETE FROM cache_entries WHERE media_item_id IN (SELECT id FROM media_items WHERE \(absent))",
+            arguments: [source]
+        )
+        try db.execute(sql: "DELETE FROM media_items WHERE \(absent)", arguments: [source])
+        try db.execute(sql: "DROP TABLE _keep_identity_keys")
     }
 
     static func deleteAllMediaItems(in db: Database) throws {
