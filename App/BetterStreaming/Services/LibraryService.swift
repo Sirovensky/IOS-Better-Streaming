@@ -255,12 +255,17 @@ actor LibraryService {
                     if visited.count + pending.count < 50_000 { pending.append(entry.path) }
                 case .file:
                     if let kind = classifier.classify(entry), scanned.count < 100_000 {
-                        let embedded = await embeddedMetadata(for: entry, client: client)
+                        let ext = (entry.name as NSString).pathExtension
+                        let probe = await embeddedProbe(for: entry, client: client)
+                        let embedded = probe.flatMap { data -> EmbeddedMediaMetadata? in
+                            let parsed = EmbeddedMetadataReader.parse(data, fileExtension: ext)
+                            return parsed.isEmpty ? nil : parsed
+                        }
                         var track = track(fromEntry: entry, kind: kind, cfg: cfg, embedded: embedded)
                         if coverEntry == nil {
                             if let artworkURL = embeddedArtworkByAlbum[track.albumID] {
                                 track.artworkURL = artworkURL
-                            } else if let artwork = embedded?.artwork,
+                            } else if let artwork = await remoteArtwork(entry: entry, client: client, probe: probe, ext: ext),
                                       let artworkURL = cacheEmbeddedArtwork(artwork, key: "\(cfg.id)::\(track.albumID)") {
                                 embeddedArtworkByAlbum[track.albumID] = artworkURL
                                 track.artworkURL = artworkURL
@@ -339,7 +344,9 @@ actor LibraryService {
         )
     }
 
-    private func embeddedMetadata(for entry: RemoteEntry, client: any RemoteFileSystemClient) async -> EmbeddedMediaMetadata? {
+    /// Small ranged read from the start of a remote file, for tag + artwork
+    /// parsing during scan (256KB by default).
+    private func embeddedProbe(for entry: RemoteEntry, client: any RemoteFileSystemClient) async -> Data? {
         guard client.capabilities.supportsByteRangeRead else { return nil }
         var size = entry.size
         if size == nil {
@@ -348,13 +355,46 @@ actor LibraryService {
         guard let size, size > 0 else { return nil }
         let readLength = min(size, Int64(EmbeddedMetadataReader.defaultProbeLength))
         guard readLength > 0 else { return nil }
-        do {
-            let data = try await client.read(entry.path, range: 0..<readLength)
-            let metadata = EmbeddedMetadataReader.parse(data, fileExtension: (entry.name as NSString).pathExtension)
-            return metadata.isEmpty ? nil : metadata
-        } catch {
-            return nil
+        return try? await client.read(entry.path, range: 0..<readLength)
+    }
+
+    /// Extract embedded album art from a remote file. The 256KB probe often does
+    /// NOT contain a hi-res cover (e.g. FLAC PICTURE blocks can be 0.5–2MB), so:
+    ///  1. use art already present in the probe, else
+    ///  2. for FLAC, read the PICTURE block's exact byte range (from its header), else
+    ///  3. fall back to one larger bounded read (ID3 APIC / MP4 covr past the probe).
+    private func remoteArtwork(
+        entry: RemoteEntry,
+        client: any RemoteFileSystemClient,
+        probe: Data?,
+        ext: String
+    ) async -> EmbeddedArtwork? {
+        if let probe, let art = EmbeddedMetadataReader.parse(probe, fileExtension: ext).artwork {
+            return art
         }
+        guard client.capabilities.supportsByteRangeRead else { return nil }
+        let probeBytes = probe.map { [UInt8]($0) } ?? []
+
+        if let range = EmbeddedMetadataReader.artworkByteRange(probe: probeBytes, fileExtension: ext) {
+            let lower = Int64(range.lowerBound)
+            let upper = Int64(range.upperBound)
+            if upper > lower, upper - lower <= 12 * 1_024 * 1_024,
+               let data = try? await client.read(entry.path, range: lower..<upper) {
+                return EmbeddedMetadataReader.parseFLACPicture([UInt8](data))
+            }
+        }
+
+        // Other containers: a larger bounded read from the start.
+        var size = entry.size
+        if size == nil { size = (try? await client.stat(entry.path))?.size }
+        if let size {
+            let bigLen = min(size, 4 * 1_024 * 1_024)
+            if bigLen > Int64(probe?.count ?? 0),
+               let data = try? await client.read(entry.path, range: 0..<bigLen) {
+                return EmbeddedMetadataReader.parse(data, fileExtension: ext).artwork
+            }
+        }
+        return nil
     }
 
     private struct ResolvedTrackMetadata {

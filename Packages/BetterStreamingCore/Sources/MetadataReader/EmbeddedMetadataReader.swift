@@ -255,6 +255,39 @@ private extension EmbeddedMetadataReader {
         return result.isEmpty ? nil : result
     }
 
+    /// Locate the FLAC PICTURE metadata block from the (small) block headers in a
+    /// probe, returning its absolute file byte range — even when the block data
+    /// extends past the probe. Lets the caller ranged-read just the cover image
+    /// for hi-res embedded art that doesn't fit a small header probe.
+    public static func artworkByteRange(probe: [UInt8], fileExtension: String) -> Range<Int>? {
+        switch fileExtension.lowercased() {
+        case "flac": return flacPictureBlockRange(probe)
+        default: return nil
+        }
+    }
+
+    /// Public wrapper so callers can parse a separately-fetched FLAC PICTURE block.
+    public static func parseFLACPicture(_ bytes: [UInt8]) -> EmbeddedArtwork? {
+        parseFLACPictureBlock(bytes)
+    }
+
+    static func flacPictureBlockRange(_ bytes: [UInt8]) -> Range<Int>? {
+        guard let flacOffset = flacStart(in: bytes), flacOffset + 4 <= bytes.count else { return nil }
+        var offset = flacOffset + 4
+        while offset + 4 <= bytes.count {
+            let header = bytes[offset]
+            let isLast = (header & 0x80) != 0
+            let type = header & 0x7f
+            guard let length = readUInt24BE(bytes, offset + 1) else { return nil }
+            let blockStart = offset + 4
+            let blockEnd = blockStart + length
+            if type == 6 { return blockStart..<blockEnd }   // absolute file offsets
+            if isLast { return nil }
+            offset = blockEnd   // next header must still fall within the probe
+        }
+        return nil
+    }
+
     static func parseFLACPictureBlock(_ bytes: [UInt8]) -> EmbeddedArtwork? {
         var offset = 0
         guard offset + 8 <= bytes.count else { return nil }
