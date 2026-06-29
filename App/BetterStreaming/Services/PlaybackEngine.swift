@@ -81,6 +81,8 @@ final class PlaybackEngine {
     // MARK: Private
 
     private let player = AVPlayer()
+    /// Opt-in audio tweaks (ReplayGain / preamp / EQ). All default off.
+    let enhancements = AudioEnhancements()
     private var timeObserver: Any?
     private var itemEndObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
@@ -503,6 +505,31 @@ final class PlaybackEngine {
     /// then resumes skipping the gap"). ≈0.5 MB for MP3, ~1–2 MB for FLAC at 10s.
     private static let preferredForwardBufferSeconds: TimeInterval = 10
 
+    /// Apply opt-in audio enhancements to a freshly-built item. EQ (and its
+    /// preamp) goes through an `MTAudioProcessingTap` audio mix; ReplayGain (and
+    /// preamp when the EQ is off) is applied via `player.volume`, read from the
+    /// asset's gain tags. Default-off → no audio mix, volume 1.0.
+    private func applyEnhancements(to item: AVPlayerItem, generation: Int) {
+        let e = enhancements
+        item.audioMix = e.eqEnabled
+            ? AudioEQTap.makeAudioMix(bandsDB: e.eqBandsDB, preampDB: e.preampDB)
+            : nil
+        player.volume = 1.0
+        guard e.replayGainEnabled || (!e.eqEnabled && abs(e.preampDB) > 0.01) else { return }
+        let assetToRead = item.asset
+        Task { @MainActor in
+            var db = 0.0
+            if !e.eqEnabled { db += e.preampDB }   // preamp via volume only when EQ isn't carrying it
+            if e.replayGainEnabled,
+               let metadata = try? await assetToRead.load(.metadata),
+               let rg = await AudioEnhancements.replayGainDB(from: metadata) {
+                db += rg
+            }
+            guard generation == self.resolveGeneration else { return }
+            self.player.volume = min(1.0, AudioEnhancements.linear(fromDB: db))
+        }
+    }
+
     private func loadPlayerItem(item: AVPlayerItem, autoPlay: Bool, generation: Int) {
         // AVPlayerItem.duration is often `.indefinite` until well after
         // readyToPlay for these files, which left the scrubber/timer at 0:00.
@@ -578,6 +605,7 @@ final class PlaybackEngine {
         }
 
         item.preferredForwardBufferDuration = Self.preferredForwardBufferSeconds
+        applyEnhancements(to: item, generation: generation)
         player.replaceCurrentItem(with: item)
         if autoPlay {
             configureAudioSessionIfNeeded()

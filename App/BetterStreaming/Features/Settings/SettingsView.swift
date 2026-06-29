@@ -8,6 +8,7 @@ struct SettingsView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 autoCacheSection
+                audioSection
                 artworkSection
                 sourcesSection
                 aboutSection
@@ -78,6 +79,66 @@ struct SettingsView: View {
             }
             .padding(.horizontal, 4)
         }
+    }
+
+    // MARK: Audio (ReplayGain / preamp / EQ)
+
+    private var audioSection: some View {
+        @Bindable var enhancements = model.engine.enhancements
+
+        return VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "Audio", detail: "Volume levelling and a 5-band EQ (off by default)")
+            VStack(spacing: 0) {
+                Toggle(isOn: $enhancements.replayGainEnabled) {
+                    settingsLabel("ReplayGain", "Even out loudness between tracks", icon: "speaker.wave.2")
+                }
+                .tint(DesignTokens.brandPrimary)
+                .padding(12)
+
+                rowDivider
+
+                Toggle(isOn: $enhancements.eqEnabled) {
+                    settingsLabel("Equalizer", "5-band graphic EQ", icon: "slider.vertical.3")
+                }
+                .tint(DesignTokens.brandPrimary)
+                .padding(12)
+
+                if enhancements.eqEnabled {
+                    rowDivider
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Preamp").font(.subheadline).foregroundStyle(DesignTokens.textPrimary)
+                            Spacer()
+                            Text("\(enhancements.preampDB, specifier: "%+.0f") dB")
+                                .font(.caption.monospacedDigit()).foregroundStyle(DesignTokens.textSecondary)
+                        }
+                        Slider(value: $enhancements.preampDB, in: -12...12, step: 1)
+                            .tint(DesignTokens.brandPrimary)
+
+                        ForEach(Array(AudioEnhancements.eqFrequencies.enumerated()), id: \.offset) { index, freq in
+                            HStack(spacing: 12) {
+                                Text(Self.bandLabel(freq))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(DesignTokens.textSecondary)
+                                    .frame(width: 44, alignment: .leading)
+                                Slider(value: $enhancements.eqBandsDB[index], in: -12...12, step: 1)
+                                    .tint(DesignTokens.brandPrimary)
+                            }
+                        }
+                    }
+                    .padding(12)
+                }
+            }
+            .surfaceCard(fill: DesignTokens.surfaceCard)
+
+            Text("EQ uses an audio processor on playback; toggle off if you notice issues.")
+                .font(.caption).foregroundStyle(DesignTokens.textTertiary)
+                .padding(.horizontal, 4)
+        }
+    }
+
+    private static func bandLabel(_ freq: Double) -> String {
+        freq >= 1000 ? "\(Int(freq / 1000))k" : "\(Int(freq))"
     }
 
     // MARK: Artwork
