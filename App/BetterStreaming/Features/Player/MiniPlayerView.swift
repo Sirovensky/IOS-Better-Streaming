@@ -51,6 +51,15 @@ struct MiniPlayerBar: View {
                 HStack(spacing: 12) {
                     ArtworkView(url: track.artworkURL, artworkKey: track.albumID, cornerRadius: 6)
                         .frame(width: 40, height: 40)
+                        .overlay {
+                            if engine.isBuffering {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                                    .frame(width: 40, height: 40)
+                                    .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            }
+                        }
 
                     VStack(alignment: .leading, spacing: 1) {
                         Text(track.title)
@@ -325,7 +334,14 @@ struct NowPlayingView: View {
 
     @ViewBuilder
     private func formatChip(_ track: Track) -> some View {
-        if !track.formatLabel.isEmpty {
+        if engine.isBuffering {
+            // Show activity while waiting on the network so it never looks frozen.
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini).tint(.white)
+                Text("Buffering…").font(.caption2.weight(.semibold))
+            }
+            .foregroundStyle(.white.opacity(0.8))
+        } else if !track.formatLabel.isEmpty {
             HStack(spacing: 6) {
                 Image(systemName: track.isLossless ? "seal.fill" : "waveform")
                     .font(.caption2)

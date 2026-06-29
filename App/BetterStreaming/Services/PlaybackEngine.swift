@@ -472,13 +472,33 @@ final class PlaybackEngine {
 
     private func observeTimeControlStatus() {
         timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
-            let status = player.timeControlStatus.rawValue
+            let status = player.timeControlStatus
             let reason = player.reasonForWaitingToPlay?.rawValue ?? "none"
             Task { @MainActor in
                 guard let self else { return }
-                streamLog.info("timeControl=\(status) reason=\(reason, privacy: .public) elapsed=\(self.elapsed)")
+                // Buffering = waiting to play (initial fill or a mid-track stall),
+                // so the UI can show activity instead of looking frozen.
+                self.isBuffering = (status == .waitingToPlayAtSpecifiedRate)
+                streamLog.info("timeControl=\(status.rawValue) reason=\(reason, privacy: .public) elapsed=\(self.elapsed)")
             }
         }
+    }
+
+    /// Seconds of audio buffered ahead of the playhead (from the player's loaded
+    /// ranges), so the UI can show "buffering N s" progress while waiting.
+    var bufferedAheadSeconds: Double {
+        guard let item = player.currentItem else { return 0 }
+        let now = item.currentTime().seconds
+        guard now.isFinite else { return 0 }
+        for value in item.loadedTimeRanges {
+            let range = value.timeRangeValue
+            let start = range.start.seconds
+            let end = (range.start + range.duration).seconds
+            if start.isFinite, end.isFinite, now >= start - 0.5, now <= end {
+                return max(0, end - now)
+            }
+        }
+        return 0
     }
 
     // MARK: Audio session
