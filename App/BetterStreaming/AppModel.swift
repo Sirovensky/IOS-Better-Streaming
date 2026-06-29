@@ -352,6 +352,7 @@ final class AppModel {
     /// background client reconnect lazily on next use.
     func enteredBackground() {
         savePlaybackSnapshot(throttled: false)   // survive an OS-kill while suspended
+        autoCache.flushStats()                   // flush debounced listening stats
         Task { await library.handleEnteredBackground() }
     }
 
@@ -506,6 +507,11 @@ final class AppModel {
             if let best = byGenre.max(by: { $0.value < $1.value })?.key { result[artist] = best }
         }
         return result
+    }
+
+    /// Canonical genres present in the library (sorted), for the Songs filter.
+    var availableGenres: [String] {
+        Set(audioTracks.compactMap { MetadataGrouping.canonicalGenre($0.genre) }).sorted()
     }
 
     func tracks(forGenre genre: String) -> [Track] {

@@ -105,6 +105,25 @@ final class AutoCacheController {
         stat.lastPlayedAtEpoch = epoch
         if stat.firstPlayedAtEpoch == 0 { stat.firstPlayedAtEpoch = epoch }
         stats[trackID] = stat
+        persistStatsSoon()
+    }
+
+    /// Coalesce stats writes — a play used to JSON-encode + write the whole stats
+    /// dict synchronously every track. Flushed on app background (see flushStats).
+    private var persistTask: Task<Void, Never>?
+    private func persistStatsSoon() {
+        persistTask?.cancel()
+        persistTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.persistStats()
+        }
+    }
+
+    /// Flush a pending debounced stats write now (call when backgrounding so an
+    /// OS-kill while suspended doesn't drop the last few plays).
+    func flushStats() {
+        persistTask?.cancel()
         persistStats()
     }
 

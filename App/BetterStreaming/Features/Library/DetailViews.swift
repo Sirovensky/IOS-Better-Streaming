@@ -293,31 +293,119 @@ struct PlaylistDetailView: View {
 
 // MARK: - "All" list screens
 
+enum SongSort: String, CaseIterable, Identifiable {
+    case title = "Title"
+    case artist = "Artist"
+    case recentlyAdded = "Recently Added"
+    case mostPlayed = "Most Played"
+    var id: String { rawValue }
+    var systemImage: String {
+        switch self {
+        case .title: "textformat"
+        case .artist: "music.mic"
+        case .recentlyAdded: "clock"
+        case .mostPlayed: "flame"
+        }
+    }
+    /// Alphabetical sorts keep the A-Z fast-scroll index; the others use a plain list.
+    var isAlphabetical: Bool { self == .title || self == .artist }
+}
+
 struct AllSongsView: View {
     @Environment(AppModel.self) private var model
+    @State private var sort: SongSort = .title
+    @State private var genreFilter: String? = nil
+    @State private var genres: [String] = []
 
-    private var sortedSongs: [Track] {
-        model.audioTracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    private var songs: [Track] {
+        var base = model.audioTracks
+        if let genreFilter {
+            base = base.filter { MetadataGrouping.canonicalGenre($0.genre) == genreFilter }
+        }
+        switch sort {
+        case .title:
+            return base.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        case .artist:
+            return base.sorted {
+                let c = $0.artist.localizedStandardCompare($1.artist)
+                return c == .orderedSame
+                    ? $0.title.localizedStandardCompare($1.title) == .orderedAscending
+                    : c == .orderedAscending
+            }
+        case .recentlyAdded:
+            return base.sorted { ($0.modifiedAtEpoch ?? 0) > ($1.modifiedAtEpoch ?? 0) }
+        case .mostPlayed:
+            return base.sorted { model.autoCache.stat(for: $0.id).playCount > model.autoCache.stat(for: $1.id).playCount }
+        }
     }
 
     var body: some View {
-        let songs = sortedSongs
-        let sections = LibraryIndex.sections(songs) { $0.title }
-        AlphabetIndexedScroll(sections: sections) {
-            PlayShuffleBar(
-                play: { model.engine.setShuffle(false); model.engine.play(songs) },
-                shuffle: { model.engine.playShuffled(songs) }
-            )
-            .disabled(songs.isEmpty)
-            .padding(.bottom, 6)
-        } sectionContent: { section in
-            ForEach(section.items) { track in
-                TrackRowView(track: track, context: songs)
-                Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+        let list = songs
+        Group {
+            if sort.isAlphabetical {
+                let sections = LibraryIndex.sections(list) { sort == .artist ? $0.artist : $0.title }
+                AlphabetIndexedScroll(sections: sections) {
+                    header(list)
+                } sectionContent: { section in
+                    ForEach(section.items) { track in
+                        TrackRowView(track: track, context: list)
+                        Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                    }
+                }
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        header(list)
+                        ForEach(list) { track in
+                            TrackRowView(track: track, context: list)
+                            Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                        }
+                    }
+                    .padding(.horizontal, DesignTokens.phonePadding)
+                    .padding(.bottom, 120)
+                }
             }
         }
         .appScreenBackground()
         .navigationTitle("Songs")
+        .toolbar { sortMenu }
+        .task { if genres.isEmpty { genres = model.availableGenres } }
+    }
+
+    @ViewBuilder private func header(_ list: [Track]) -> some View {
+        PlayShuffleBar(
+            play: { model.engine.setShuffle(false); model.engine.play(list) },
+            shuffle: { model.engine.playShuffled(list) }
+        )
+        .disabled(list.isEmpty)
+        .padding(.bottom, 6)
+    }
+
+    private var sortMenu: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Picker("Sort", selection: $sort) {
+                    ForEach(SongSort.allCases) { option in
+                        Label(option.rawValue, systemImage: option.systemImage).tag(option)
+                    }
+                }
+                if !genres.isEmpty {
+                    Divider()
+                    Menu("Filter by Genre") {
+                        Button("All Genres") { genreFilter = nil }
+                        ForEach(genres, id: \.self) { genre in
+                            Button {
+                                genreFilter = (genreFilter == genre) ? nil : genre
+                            } label: {
+                                Label(genre, systemImage: genreFilter == genre ? "checkmark" : "")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: genreFilter == nil ? "arrow.up.arrow.down" : "line.3.horizontal.decrease.circle.fill")
+            }
+        }
     }
 }
 
@@ -340,23 +428,90 @@ struct PlayShuffleBar: View {
     }
 }
 
+enum AlbumSort: String, CaseIterable, Identifiable {
+    case title = "Title"
+    case artist = "Artist"
+    case recentlyAdded = "Recently Added"
+    case year = "Year"
+    var id: String { rawValue }
+    var systemImage: String {
+        switch self {
+        case .title: "textformat"
+        case .artist: "music.mic"
+        case .recentlyAdded: "clock"
+        case .year: "calendar"
+        }
+    }
+    var isAlphabetical: Bool { self == .title || self == .artist }
+}
+
 struct AllAlbumsView: View {
     @Environment(AppModel.self) private var model
+    @State private var sort: AlbumSort = .title
     private let columns = [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)]
+
+    /// Alphabetical ordering (used only when `sort.isAlphabetical`).
+    private var albums: [Album] {
+        if sort == .artist {
+            return model.albums.sorted {
+                let c = $0.artist.localizedStandardCompare($1.artist)
+                return c == .orderedSame
+                    ? $0.title.localizedStandardCompare($1.title) == .orderedAscending
+                    : c == .orderedAscending
+            }
+        }
+        return model.albums.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
     var body: some View {
-        let sections = LibraryIndex.sections(model.albums) { $0.title }
-        AlphabetIndexedScroll(sections: sections) { section in
-            LazyVGrid(columns: columns, spacing: 18) {
-                ForEach(section.items) { album in
-                    NavigationLink(value: LibraryRoute.album(album.id)) {
-                        AlbumGridCellStatic(album: album)
-                    }
-                    .buttonStyle(.plain)
+        Group {
+            if sort.isAlphabetical {
+                let sections = LibraryIndex.sections(albums) { sort == .artist ? $0.artist : $0.title }
+                AlphabetIndexedScroll(sections: sections) { section in
+                    grid(section.items)
+                }
+            } else {
+                ScrollView {
+                    grid(orderedAlbums)
+                        .padding(.horizontal, DesignTokens.phonePadding)
+                        .padding(.bottom, 120)
                 }
             }
         }
         .appScreenBackground()
         .navigationTitle("Albums")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Picker("Sort", selection: $sort) {
+                        ForEach(AlbumSort.allCases) { option in
+                            Label(option.rawValue, systemImage: option.systemImage).tag(option)
+                        }
+                    }
+                } label: { Image(systemName: "arrow.up.arrow.down") }
+            }
+        }
+    }
+
+    /// Albums in the active non-alphabetical order (recently-added uses the
+    /// model's date-ordered list; year sorts newest first).
+    private var orderedAlbums: [Album] {
+        switch sort {
+        case .recentlyAdded: return model.recentlyAddedAlbums
+        case .year: return model.albums.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
+        default: return albums
+        }
+    }
+
+    private func grid(_ items: [Album]) -> some View {
+        LazyVGrid(columns: columns, spacing: 18) {
+            ForEach(items) { album in
+                NavigationLink(value: LibraryRoute.album(album.id)) {
+                    AlbumGridCellStatic(album: album)
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 }
 
