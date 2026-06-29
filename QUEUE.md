@@ -26,8 +26,9 @@ History: (a) the original "latest-wins epoch" aborted ALL but the newest loading
 
 **Remaining minor (not hard stalls):**
 - Rapid song-switch can briefly contend (prefetch/cache download of the previous track on the single SMB connection). → cancel the in-flight prefetch download on track change (`RemoteFileSystemClient.download` has no cancel token yet).
-- Scrub to an un-cached position: brief stop then 1–2s to cache the target. → surface buffering at the scrub target / **caching speed indicator** (show MB/s + buffered-ahead).
+- Scrub to an un-cached position: brief stop then 1–2s to cache the target. (Buffering indicator now shows during the wait — DONE.)
 - Bigger throughput win if needed: a small SMB **connection pool** (multiple TCP connections) so concurrent reads parallelize instead of serializing on one mutex.
+- **Buffering activity indicator — DONE** (spinner + "Buffering…" in Now Playing, spinner on the mini-player artwork; `isBuffering` tracks mid-track waiting). A live MB/s number would need session→UI throughput plumbing — optional follow-up.
 
 ### 2. Album artwork — remote backfill added (VERIFY on device)
 Covers were blank because the whole art pipeline only read from a **local** file (so streamed/un-rescanned tracks got nothing). Added: remote artwork extraction (folder cover + embedded ranged read) that works without downloading the track; a throttled library-wide backfill of missing covers (persisted via upsert, no full rescan needed); now-playing/lock-screen art for streamed tracks. Verify covers populate on device.
@@ -69,7 +70,8 @@ Pulled `library.sqlite` (860 items). Findings + status:
 
 ## OPEN QoL / UX (next)
 
-- **Interactive player transition (REQUESTED).** Mini→full and full→mini should follow the finger live (dynamic), not snap after the gesture. Currently a `fullScreenCover` (system transition) + tap to open + chevron/threshold-drag to close. Needs a custom offset-driven container (replace the cover) — deferred this session because it needs visual iteration and the Simulator can't be tapped headlessly (computer-use needs the absent user's approval). Build + iterate when a tappable device/sim is available.
+- **Interactive player transition (REQUESTED — STILL OPEN).** Mini→full and full→mini should follow the finger live (dynamic), not snap after the gesture. Currently a `fullScreenCover` (system transition) + tap to open + chevron/threshold-drag to close. Needs a custom offset-driven container (replace the cover). Deliberately deferred: it's a gesture-heavy change that needs visual iteration, and the Simulator can't be driven headlessly (computer-use needs the user's approval). Shipping it untested risks making the player hard to open/close. Build + iterate when a tappable device/sim is available.
+- **A-Z index transliteration — DONE** (Cyrillic/Greek/accented-Latin fold into one Latin index; CJK keep own groups at the bottom).
 - **Track durations missing.** The metadata reader parses tags but not audio-frame duration, so `durationSeconds` is 0 → song rows show no time and the Home "in your library" total is hidden. Extract duration via `AVAsset.load(.duration)` when a track is cached, or parse frame headers; persist it.
 - **Resume queue on launch** + **sort/filter** (year / date-added / play-count; filter by genre).
 - **Kaidalov server cleanup tool** — the mojibake is in the on-disk filenames (bad soulseek import); needs a server-side rename/retag utility (out of app scope) OR rely on embedded tags (Win-1251 fix) where present.
