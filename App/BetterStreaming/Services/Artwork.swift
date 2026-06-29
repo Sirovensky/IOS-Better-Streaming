@@ -7,7 +7,9 @@ import UIKit
 /// `UIImage(contentsOfFile:)` in `body` did exactly that, per visible row, which
 /// caused the scroll lag on large result lists).
 enum ThumbnailLoader {
-    private static let cache: NSCache<NSString, UIImage> = {
+    // NSCache is internally thread-safe; nonisolated(unsafe) satisfies Swift 6
+    // (the type isn't marked Sendable) without a lock we don't need.
+    nonisolated(unsafe) private static let cache: NSCache<NSString, UIImage> = {
         let c = NSCache<NSString, UIImage>()
         c.countLimit = 400
         return c
