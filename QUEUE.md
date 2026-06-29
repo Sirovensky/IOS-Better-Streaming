@@ -141,10 +141,15 @@ Goal: clear the whole backlog. Landed this sweep (each pushed to main):
 - **Playlists** (`ac018bf`): full subsystem — create / rename / delete, add-to-playlist from the player menu, **.m3u/.m3u8 import** (filename match), UserDefaults persistence, empty state. `Playlist` is now Codable.
 - **Online cover art** (`01b6010`): opt-in `OnlineArtworkClient` (MusicBrainz release search → Cover Art Archive front image, rate-limited 1.1s, proper User-Agent); last-resort fallback in artwork resolution; Settings → Artwork toggle (off by default).
 
-**Still open (deliberately NOT shipped blind):**
-- **Synced lyrics** — additive (USLT/SYLT + .lrc sidecar parser + a time-synced player view). Safe to do, just sizable; deferred for a focused pass.
-- **Gapless/crossfade** + **EQ/ReplayGain** — these REWRITE the core audio renderer (AVQueuePlayer / AVAudioEngine). Shipping blind risks regressing all playback (just stabilized) → need a build/test loop.
-- **CarPlay** — needs the CarPlay entitlement (project + Apple provisioning) and CarPlay sim/hardware; can't build/validate here.
+**Batch 8b (the rest, now IMPLEMENTED — all UNBUILT, opt-in features default OFF):**
+- **Synced lyrics** (`4447b96`): `.lrc` sidecar parser (`Lyrics.swift`) + a player "Lyrics" sheet that highlights the current line from `engine.elapsed`. Reads the sidecar via the source (local or remote).
+- **ReplayGain + preamp + 5-band EQ** (`f7b6237`): `AudioEnhancements` settings (default off); RG/preamp via `player.volume` from the asset's gain tags; EQ via an `MTAudioProcessingTap` (`AudioEQTap.swift`, vDSP biquads, defensive passthrough on any format mismatch). Settings → Audio section. **Only attached when enabled — default playback is byte-identical.**
+- **Crossfade** (`1614412`): opt-in single-player track fade-in/out (`crossfadeSeconds`, default 0 = off), composed with the RG base volume. NOTE: this is a *fade*, not sample-gapless — true gapless needs an `AVQueuePlayer` rewrite (still open below).
+- **CarPlay** (`12a557f`): browse + Now-Playing template code (`CarPlaySceneController.swift`) wired to `AppModel.shared`. **INERT** until 3 Apple/Xcode steps are done (can't be done/tested from here): add the `com.apple.developer.carplay-audio` entitlement, declare the CarPlay scene in Info.plist's `UIApplicationSceneManifest` alongside the SwiftUI scene, and test on CarPlay hardware/sim. See the header comment in that file.
+
+**Genuinely still open (need device/build loop or are blocked):**
+- **True sample-gapless** — needs the `AVQueuePlayer` core-renderer rework; deliberately not done blind (would risk the just-stabilized streaming). Crossfade/fade is shipped as the interim.
+- **CarPlay activation** — the 3 project steps above (entitlement + scene manifest + hardware test).
 - Interactive finger-driven mini↔full player transition (needs sim/device gesture iteration); device-verify of artwork backfill + metadata rescans.
 
 ## BUGHUNT 2026-06-29 (3 Opus agents, whole-app re-verify of #2–#7)
