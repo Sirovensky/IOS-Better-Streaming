@@ -631,18 +631,48 @@ final class AppModel {
     }
 
     func playSimilarRadio(seed: Track) {
-        let list = playableContext(similarTracks(to: seed))
-        guard !list.isEmpty else { return }
-        // The tile shows `seed` as the preview — it must be the FIRST track played.
-        // Pin it to the head and let the rest play shuffled (radio feel): with
-        // shuffle on, `play(startAt: 0)` keeps index 0 and shuffles only the tail.
-        guard list.contains(where: { $0.id == seed.id }) else {
-            engine.playShuffled(list)   // seed not playable (offline + uncached)
-            return
+        let station = progressiveStation(seed: seed)
+        guard !station.isEmpty else { return }
+        // Station defines its own order (seed first, then widening genre bands);
+        // play in order, not reshuffled.
+        engine.setShuffle(false)
+        engine.play(station, startAt: 0)
+    }
+
+    /// Build a similar-station queue that starts on the exact seed, then the same
+    /// genre family, then progressively widens to ADJACENT families (Rock → Metal
+    /// → … but never EDM), shuffled within each distance band. Stops once no
+    /// in-family genres remain. Falls back to artist/album affinity for
+    /// unknown-genre tracks.
+    private func progressiveStation(seed: Track, maxDistance: Int = 2, limit: Int = 300) -> [Track] {
+        let consensus = genreConsensusByArtist
+        func family(_ t: Track) -> String? { consensus[t.artistID] ?? MetadataGrouping.canonicalGenre(t.genre) }
+        let seedFamily = family(seed)
+        var bands: [Int: [Track]] = [:]
+        for track in playableContext(audioTracks) where track.id != seed.id {
+            let distance: Int
+            if let sf = seedFamily, let tf = family(track) {
+                guard let d = MetadataGrouping.genreFamilyDistance(sf, tf, max: maxDistance) else { continue }
+                distance = d
+            } else {
+                // Unknown genre on seed or track → use only artist/album affinity.
+                if track.artistID == seed.artistID { distance = 0 }
+                else if track.albumID == seed.albumID { distance = 1 }
+                else { continue }
+            }
+            bands[distance, default: []].append(track)
         }
-        let rest = list.filter { $0.id != seed.id }
-        engine.setShuffle(true)
-        engine.play([seed] + rest, startAt: 0)
+        var ordered: [Track] = []
+        // Seed first only when it's actually playable (the tile's preview song).
+        if playableContext([seed]).isEmpty == false { ordered.append(seed) }
+        for distance in 0...maxDistance {
+            guard var band = bands[distance], !band.isEmpty else { continue }
+            band.removeAll { $0.id == seed.id }
+            band.shuffle()
+            ordered.append(contentsOf: band)
+        }
+        if ordered.isEmpty { return playableContext(audioTracks).shuffled() }
+        return Array(ordered.prefix(limit))
     }
 
     // MARK: Sleep timer

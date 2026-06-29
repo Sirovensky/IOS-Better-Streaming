@@ -281,6 +281,52 @@ enum MetadataGrouping {
         return raw.trimmingCharacters(in: .whitespacesAndNewlines).capitalized
     }
 
+    /// Adjacency between canonical genre families, for progressively widening a
+    /// station. Keys/values MUST match `canonicalGenre` output exactly. Used with
+    /// `genreFamilyDistance` so a Rock station reaches Metal/Punk (distance 1) and
+    /// Folk/Blues (1) but never EDM (Electronic is several hops away).
+    static let genreAdjacency: [String: Set<String>] = [
+        "Rock": ["Metal", "Punk", "Indie", "Pop", "Folk", "Blues"],
+        "Metal": ["Rock", "Punk"],
+        "Punk": ["Rock", "Metal", "Indie"],
+        "Indie": ["Rock", "Pop", "Folk"],
+        "Pop": ["Rock", "Indie", "Dance", "R&B / Soul"],
+        "Dance": ["Pop", "Electronic"],
+        "Electronic": ["Dance"],
+        "Hip-Hop": ["R&B / Soul"],
+        "R&B / Soul": ["Hip-Hop", "Pop", "Jazz", "Blues", "Reggae"],
+        "Jazz": ["Blues", "R&B / Soul", "Classical"],
+        "Blues": ["Jazz", "Rock", "R&B / Soul", "Country"],
+        "Classical": ["Soundtrack", "Jazz"],
+        "Soundtrack": ["Classical"],
+        "Country": ["Folk", "Blues", "Rock"],
+        "Folk": ["Country", "Rock", "Indie"],
+        "Reggae": ["R&B / Soul"]
+    ]
+
+    /// Hops between two genre families over `genreAdjacency` (0 = same), or nil if
+    /// further apart than `max` (treated as unrelated — keeps EDM off a Rock
+    /// station while still admitting Metal).
+    static func genreFamilyDistance(_ a: String, _ b: String, max maxDistance: Int) -> Int? {
+        if a == b { return 0 }
+        var visited: Set<String> = [a]
+        var frontier: [String] = [a]
+        var distance = 0
+        while !frontier.isEmpty, distance < maxDistance {
+            distance += 1
+            var next: [String] = []
+            for family in frontier {
+                for neighbour in genreAdjacency[family] ?? [] where !visited.contains(neighbour) {
+                    if neighbour == b { return distance }
+                    visited.insert(neighbour)
+                    next.append(neighbour)
+                }
+            }
+            frontier = next
+        }
+        return nil
+    }
+
     /// Album display artist from its tracks' artist tags: the shared primary
     /// artist, or "Various Artists" when the primaries genuinely differ.
     static func albumDisplayArtist(from artists: [String]) -> String {
