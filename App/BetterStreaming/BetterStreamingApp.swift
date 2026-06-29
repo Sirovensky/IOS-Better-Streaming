@@ -219,12 +219,14 @@ private final class DevicePlaybackProbe {
 
     private func test(_ candidate: RemoteProbeCandidate, client: SMBRemoteClient) async -> ProbeResult {
         let start = Date()
+        let probeKey = Self.stableHash(candidate.entry.path.normalizedPath)
         let item = streamingService.playerItem(
             client: client,
             path: candidate.entry.path,
             metadata: candidate.metadata,
             fallbackExtension: candidate.label,
-            cacheURL: streamCacheDir.appendingPathComponent(Self.stableHash(candidate.entry.path.normalizedPath) + ".part")
+            partialCacheURL: streamCacheDir.appendingPathComponent(probeKey + ".part"),
+            completeCacheURL: streamCacheDir.appendingPathComponent(probeKey + ".complete")
         )
 
         player.replaceCurrentItem(with: item)

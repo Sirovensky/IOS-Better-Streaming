@@ -52,13 +52,24 @@ actor LibraryService {
     private let streamCacheDir: URL
     private let configsURL: URL
     private let legacyLibraryURL: URL
+    private let autoCacheIndexURL: URL
     private let mediaStore: MediaStore
     private let streamingService = RemoteStreamingService()
 
     private var configs: [SourceConfig] = []
     private var allTracks: [Track] = []
-    private var didLoadConfigsFromDisk = false
+    /// Outcome of the last attempt to load `sources.json`. `.failed` (file
+    /// present but unreadable/undecodable) must NEVER be treated as "no sources",
+    /// because the orphan-prune / migration paths delete library data for
+    /// sources not in `configs`.
+    private enum ConfigLoadState { case notLoaded, loaded, failed }
+    private var configLoadState: ConfigLoadState = .notLoaded
     private var didLoadLibraryFromDisk = false
+    /// Track IDs whose on-disk cache file was produced by the auto-cache /
+    /// streaming-promotion path (evictable), as opposed to manual downloads
+    /// (pinned). Persisted so the distinction survives refresh/relaunch.
+    private var autoCachedIDs: Set<String> = []
+    private var didLoadAutoCacheIndex = false
     /// In-memory passwords for this session, set on add. Lets the first
     /// add→scan succeed even if the Keychain read lags/fails; Keychain remains
     /// the durable store for relaunches.
@@ -80,7 +91,13 @@ actor LibraryService {
         try? fm.createDirectory(at: streamCacheDir, withIntermediateDirectories: true)
         configsURL = support.appendingPathComponent("sources.json")
         legacyLibraryURL = support.appendingPathComponent("library.json")
+        autoCacheIndexURL = support.appendingPathComponent("autocache.json")
         mediaStore = MediaStore(configuration: MediaStoreConfiguration(databaseURL: support.appendingPathComponent("library.sqlite")))
+        // Partial streaming scratch is per-session and not reused across
+        // launches; reclaim any partials orphaned by a previous run.
+        if let stale = try? fm.contentsOfDirectory(at: streamCacheDir, includingPropertiesForKeys: nil) {
+            for url in stale { try? fm.removeItem(at: url) }
+        }
     }
 
     // MARK: Load
@@ -494,12 +511,15 @@ actor LibraryService {
                 contentType: metadata.contentType,
                 supportsRangeRead: metadata.supportsRangeRead
             )
+            let trackID = track.id
             return streamingService.playerItem(
                 client: client,
                 path: identity.path,
                 metadata: streamMetadata,
                 fallbackExtension: track.fileExtension,
-                cacheURL: streamCacheFileURL(for: track)
+                partialCacheURL: streamCacheFileURL(for: track),
+                completeCacheURL: cacheFileURL(for: track),
+                onComplete: { [weak self] in await self?.onStreamFullyCached(trackID) }
             )
         } catch {
             #if DEBUG
@@ -533,15 +553,68 @@ actor LibraryService {
         }
     }
 
-    /// Force-download (manual pin / auto-cache keep). Returns true if cached.
+    /// Force-download. `auto: true` for auto-cache/prefetch (evictable);
+    /// `auto: false` for a manual download/pin (kept until the user removes it).
+    /// Returns true if the file is on disk afterwards.
     @discardableResult
-    func ensureCached(_ track: Track) async -> Bool {
-        if isCached(track) { return true }
-        return await playableURL(for: track, offline: false) != nil
+    func ensureCached(_ track: Track, auto: Bool = false) async -> Bool {
+        if isCached(track) {
+            updateAutoCacheMembership(track.id, auto: auto)
+            return true
+        }
+        let ok = await playableURL(for: track, offline: false) != nil
+        if ok { updateAutoCacheMembership(track.id, auto: auto) }
+        return ok
     }
 
     func evict(_ track: Track) {
         try? FileManager.default.removeItem(at: cacheFileURL(for: track))
+        unmarkAutoCached(track.id)
+    }
+
+    /// Called by the streaming service once a track has been fully streamed and
+    /// copied into the media cache. Treated as an (evictable) auto-cache entry.
+    func onStreamFullyCached(_ id: String) {
+        markAutoCached(id)
+        applyPlaybackFileProtectionForCached(id)
+        refreshCacheStates()
+    }
+
+    // MARK: Auto-cache index (evictable vs pinned)
+
+    private func loadAutoCacheIndexIfNeeded() {
+        guard !didLoadAutoCacheIndex else { return }
+        didLoadAutoCacheIndex = true
+        if let data = try? Data(contentsOf: autoCacheIndexURL),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            autoCachedIDs = Set(decoded)
+        }
+    }
+
+    private func persistAutoCacheIndex() {
+        if let data = try? JSONEncoder().encode(Array(autoCachedIDs)) {
+            try? data.write(to: autoCacheIndexURL, options: .atomic)
+        }
+    }
+
+    private func markAutoCached(_ id: String) {
+        loadAutoCacheIndexIfNeeded()
+        if autoCachedIDs.insert(id).inserted { persistAutoCacheIndex() }
+    }
+
+    private func unmarkAutoCached(_ id: String) {
+        loadAutoCacheIndexIfNeeded()
+        if autoCachedIDs.remove(id) != nil { persistAutoCacheIndex() }
+    }
+
+    /// Manual download pins; auto-cache keeps stay evictable.
+    private func updateAutoCacheMembership(_ id: String, auto: Bool) {
+        if auto { markAutoCached(id) } else { unmarkAutoCached(id) }
+    }
+
+    private func applyPlaybackFileProtectionForCached(_ id: String) {
+        guard let track = allTracks.first(where: { $0.id == id }) else { return }
+        applyPlaybackFileProtection(cacheFileURL(for: track))
     }
 
     func isCached(_ track: Track) -> Bool {
@@ -556,6 +629,20 @@ actor LibraryService {
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             return sum + Int64(size)
         }
+    }
+
+    /// Bytes used by evictable auto-cache files only (excludes manual pins and
+    /// local sources), so the "X of Y" budget readout reflects the auto hot set.
+    func autoCachedBytes() -> Int64 {
+        loadAutoCacheIndexIfNeeded()
+        var total: Int64 = 0
+        for track in allTracks where autoCachedIDs.contains(track.id) {
+            let url = Self.cacheFileURL(for: track, cacheDir: cacheDir)
+            if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
     }
 
     /// Embedded artwork for a cached file, for Now Playing / lock screen.
@@ -626,22 +713,48 @@ actor LibraryService {
 
     // MARK: Internals
 
-    private func loadConfigsFromDiskIfNeeded() {
-        guard !didLoadConfigsFromDisk else { return }
-        didLoadConfigsFromDisk = true
-        if let data = try? Data(contentsOf: configsURL),
-           let decoded = try? JSONDecoder().decode([SourceConfig].self, from: data) {
-            configs = decoded
+    /// Loads `sources.json`. Returns true when `configs` is authoritative (file
+    /// absent = fresh install = legitimately empty, or file read+decoded). A
+    /// present-but-unreadable file leaves state `.failed` and returns false WITHOUT
+    /// marking loaded, so a later call retries and destructive prune/migration is
+    /// skipped in the meantime.
+    @discardableResult
+    private func loadConfigsFromDiskIfNeeded() -> Bool {
+        if case .loaded = configLoadState { return true }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: configsURL.path) else {
+            configs = []
+            configLoadState = .loaded   // genuinely no sources yet
+            return true
+        }
+        do {
+            let data = try Data(contentsOf: configsURL)
+            configs = try JSONDecoder().decode([SourceConfig].self, from: data)
+            configLoadState = .loaded
+            return true
+        } catch {
+            // Present but unreadable/undecodable: do NOT mark loaded, do NOT
+            // treat as empty (that would wipe the library).
+            configLoadState = .failed
+            #if DEBUG
+            print("BETTERSTREAMING_CONFIG load_failed error=\(error)")
+            #endif
+            return false
         }
     }
 
     private func loadLibraryFromDiskIfNeeded() async {
-        loadConfigsFromDiskIfNeeded()
+        let configsOK = loadConfigsFromDiskIfNeeded()
         guard !didLoadLibraryFromDisk else { return }
+        // If configs couldn't be read this launch, defer library loading rather
+        // than risk pruning/migrating against an empty source list.
+        guard configsOK else { return }
         didLoadLibraryFromDisk = true
         if let items = try? await mediaStore.listMediaItems(), !items.isEmpty {
             let knownSourceIDs = Set(configs.compactMap { UUID(uuidString: $0.id) })
             let filteredItems = items.filter { knownSourceIDs.contains($0.identity.sourceID.rawValue) }
+            // Only prune orphans when configs are authoritative (always true here
+            // because of the configsOK guard above).
             let orphanedSourceIDs = Set(items.map(\.identity.sourceID)).filter { !knownSourceIDs.contains($0.rawValue) }
             for sourceID in orphanedSourceIDs {
                 try? await mediaStore.deleteMediaItems(sourceID: sourceID)
@@ -904,19 +1017,30 @@ actor LibraryService {
     }
 
     private func refreshCacheStates() {
+        loadAutoCacheIndexIfNeeded()
         let localIDs = Set(configs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
+        var prunedIndex = false
         for index in allTracks.indices {
             if localIDs.contains(allTracks[index].sourceID) {
                 allTracks[index].cacheState = .cached   // local files are always on-device
                 continue
             }
+            let id = allTracks[index].id
             let isCached = FileManager.default.fileExists(atPath: Self.cacheFileURL(for: allTracks[index], cacheDir: cacheDir).path)
             if isCached {
-                if allTracks[index].cacheState != .cached { allTracks[index].cacheState = .cached }
-            } else if allTracks[index].cacheState == .cached {
-                allTracks[index].cacheState = .remoteOnly
+                // Auto-cached/streamed files are evictable (.prefetched); manual
+                // downloads are pinned (.cached).
+                let desired: CacheState = autoCachedIDs.contains(id) ? .prefetched : .cached
+                if allTracks[index].cacheState != desired { allTracks[index].cacheState = desired }
+            } else {
+                if allTracks[index].cacheState == .cached || allTracks[index].cacheState == .prefetched {
+                    allTracks[index].cacheState = .remoteOnly
+                }
+                // File gone but still flagged auto-cached → drop the stale flag.
+                if autoCachedIDs.contains(id) { autoCachedIDs.remove(id); prunedIndex = true }
             }
         }
+        if prunedIndex { persistAutoCacheIndex() }
     }
 
     private static func cacheFileURL(for track: Track, cacheDir: URL) -> URL {

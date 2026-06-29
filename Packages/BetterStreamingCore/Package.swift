@@ -48,7 +48,10 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.9.0"),
         .package(url: "https://github.com/kishikawakatsumi/SMBClient.git", from: "0.3.1"),
-        .package(url: "https://github.com/orlandos-nl/Citadel.git", from: "0.12.1")
+        .package(url: "https://github.com/orlandos-nl/Citadel.git", from: "0.12.1"),
+        // Mirrors Citadel's own swift-nio-ssh requirement so SFTPRemote can
+        // import NIOSSH (host-key validation) without changing resolution.
+        .package(url: "https://github.com/Wellz26/swift-nio-ssh.git", "0.3.4" ..< "0.4.0")
     ],
     targets: [
         .target(name: "BetterStreamingDomain"),
@@ -92,7 +95,8 @@ let package = Package(
                 "BetterStreamingDomain",
                 "AppFoundation",
                 "RemoteFileSystem",
-                .product(name: "Citadel", package: "Citadel")
+                .product(name: "Citadel", package: "Citadel"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh")
             ]
         ),
         .target(

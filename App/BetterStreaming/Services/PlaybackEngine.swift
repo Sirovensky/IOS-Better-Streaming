@@ -82,6 +82,10 @@ final class PlaybackEngine {
     private var timeControlObservation: NSKeyValueObservation?
     private var unshuffledQueue: [Track] = []
     private var resolveGeneration = 0
+    /// Generation for which onTrackStarted has already fired, so a "play" is
+    /// counted once and only after the item is actually ready (not on load,
+    /// where it would also count tracks that then fail to resolve/play).
+    private var notedPlayGeneration = -1
     private var audioSessionConfigured = false
     private var interruptedWhilePlaying = false
 
@@ -340,6 +344,12 @@ final class PlaybackEngine {
                     let duration = self.duration.isFinite ? self.duration : -1
                     print("BETTERSTREAMING_PLAY ready index=\(self.currentIndex) duration=\(duration)")
                     #endif
+                    // Count the play only once the item is genuinely ready.
+                    if self.notedPlayGeneration != generation,
+                       self.queue.indices.contains(self.currentIndex) {
+                        self.notedPlayGeneration = generation
+                        self.onTrackStarted?(self.queue[self.currentIndex])
+                    }
                     self.updateNowPlayingInfo()
                 case .failed:
                     self.isBuffering = false
@@ -377,9 +387,8 @@ final class PlaybackEngine {
             print("BETTERSTREAMING_PLAY player_play route=\(route) volume=\(AVAudioSession.sharedInstance().outputVolume)")
             #endif
         }
-        if queue.indices.contains(currentIndex) {
-            onTrackStarted?(queue[currentIndex])
-        }
+        // onTrackStarted is fired from the .readyToPlay observation, not here,
+        // so a track that fails to resolve/play is never counted as a play.
         updateNowPlayingInfo()
     }
 

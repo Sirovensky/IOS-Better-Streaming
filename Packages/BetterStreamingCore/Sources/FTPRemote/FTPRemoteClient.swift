@@ -37,6 +37,7 @@ public actor FTPRemoteClient: RemoteFileSystemClient {
             let path = resolvedPath(directory)
             let endpoint = try await control.enterPassiveMode()
             let data = FTPDataConnection(host: endpoint.host, port: endpoint.port)
+            defer { data.cancel() }   // NWConnection leaks its socket/FD unless cancelled
             try await data.connect()
             let reply = try await control.send("LIST \(Self.commandPath(path))")
             try Self.expectPreliminary(reply, path: directory)
@@ -97,12 +98,12 @@ public actor FTPRemoteClient: RemoteFileSystemClient {
 
             let endpoint = try await control.enterPassiveMode()
             let data = FTPDataConnection(host: endpoint.host, port: endpoint.port)
+            defer { data.cancel() }   // also aborts the partial RETR on the throw paths
             try await data.connect()
             let reply = try await control.send("RETR \(Self.commandPath(resolved))")
             try Self.expectPreliminary(reply, path: path)
             let requested = range.upperBound - range.lowerBound
             let bytes = try await data.read(maxBytes: requested)
-            data.cancel()
             return bytes
         }
     }
@@ -112,6 +113,7 @@ public actor FTPRemoteClient: RemoteFileSystemClient {
             let resolved = resolvedPath(path)
             let endpoint = try await control.enterPassiveMode()
             let data = FTPDataConnection(host: endpoint.host, port: endpoint.port)
+            defer { data.cancel() }   // NWConnection leaks its socket/FD unless cancelled
             try await data.connect()
             let reply = try await control.send("RETR \(Self.commandPath(resolved))")
             try Self.expectPreliminary(reply, path: path)
@@ -129,6 +131,12 @@ public actor FTPRemoteClient: RemoteFileSystemClient {
                 try handle.close()
                 let final = try await control.readReply()
                 try Self.expectComplete(final, path: path)
+                // Guard against a server that closes the data socket early but
+                // still returns 226: a short file would otherwise be accepted as a
+                // complete download (corrupt media, no error).
+                if let total, total > 0, completed < total {
+                    throw RemoteFileSystemError.serverDisconnected
+                }
                 if FileManager.default.fileExists(atPath: localURL.path) {
                     try FileManager.default.removeItem(at: localURL)
                 }
@@ -188,6 +196,7 @@ private extension FTPRemoteClient {
         let name = path.lastPathComponent
         let endpoint = try await control.enterPassiveMode()
         let data = FTPDataConnection(host: endpoint.host, port: endpoint.port)
+        defer { data.cancel() }   // NWConnection leaks its socket/FD unless cancelled
         try await data.connect()
         let reply = try await control.send("LIST \(Self.commandPath(resolvedPath(parent)))")
         try Self.expectPreliminary(reply, path: parent)
@@ -355,7 +364,7 @@ private final class FTPControlConnection: @unchecked Sendable {
             return endpoint
         }
         let pasv = try await send("PASV")
-        guard pasv.code == 227, let endpoint = Self.parsePASV(pasv) else {
+        guard pasv.code == 227, let endpoint = Self.parsePASV(pasv, fallbackHost: host) else {
             throw RemoteFileSystemError.invalidResponse
         }
         return endpoint
@@ -414,7 +423,7 @@ private final class FTPControlConnection: @unchecked Sendable {
         return FTPPassiveEndpoint(host: fallbackHost, port: port)
     }
 
-    private static func parsePASV(_ reply: FTPReply) -> FTPPassiveEndpoint? {
+    private static func parsePASV(_ reply: FTPReply, fallbackHost: String) -> FTPPassiveEndpoint? {
         let text = reply.message.joined(separator: " ")
         guard let open = text.firstIndex(of: "("),
               let close = text[open...].firstIndex(of: ")") else {
@@ -424,10 +433,12 @@ private final class FTPControlConnection: @unchecked Sendable {
             .split(separator: ",")
             .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         guard numbers.count == 6 else { return nil }
-        let host = numbers[0..<4].map(String.init).joined(separator: ".")
         let port = numbers[4] * 256 + numbers[5]
         guard (1...65_535).contains(port) else { return nil }
-        return FTPPassiveEndpoint(host: host, port: port)
+        // Ignore the IP advertised in the 227 reply: servers behind NAT report a
+        // private address that the client can't route to. Reuse the control
+        // connection's host (what curl/lftp do); only take the port from PASV.
+        return FTPPassiveEndpoint(host: fallbackHost, port: port)
     }
 }
 

@@ -169,11 +169,18 @@ final class AutoCacheController {
         var keep: [String] = []
         var used: Int64 = 0
 
-        // Favourites are always kept warm first (and don't compete for the tail).
+        // Favourites are kept warm first, but still bounded by the budget so a
+        // large favourited library can't fill the device. Highest-scored (most
+        // recently/often played) favourites win the available space.
         if protectFavorites {
-            for track in library where track.isFavorite {
+            let favorites = library
+                .filter { $0.isFavorite }
+                .sorted { score(for: $0.id, now: now) > score(for: $1.id, now: now) }
+            for track in favorites {
+                let size = bytesEstimate(for: track)
+                if used + size > budgetBytes { continue }
                 keep.append(track.id)
-                used += bytesEstimate(for: track)
+                used += size
             }
         }
 

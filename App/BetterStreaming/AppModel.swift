@@ -500,14 +500,19 @@ final class AppModel {
                 }
             }
             var downloaded = 0
-            for id in plan.keep where downloaded < 8 {
+            var moreToFetch = false
+            for id in plan.keep {
                 guard let target = self.track(id), target.cacheState == .remoteOnly else { continue }
-                if await self.library.ensureCached(target) {
+                if downloaded >= 8 { moreToFetch = true; break }   // bound work per pass
+                if await self.library.ensureCached(target, auto: true) {
                     if let i = self.trackIndex[id] { self.tracks[i].cacheState = .prefetched }
                     downloaded += 1
                 }
             }
-            self.autoCache.setUsage(await self.library.cachedBytes())
+            self.autoCache.setUsage(await self.library.autoCachedBytes())
+            // The hot set can exceed one batch; schedule another pass so the
+            // auto-cache actually converges instead of stopping at 8 downloads.
+            if moreToFetch { self.reconcileAutoCache() }
         }
     }
 

@@ -2,6 +2,7 @@ import BetterStreamingDomain
 @preconcurrency import Citadel
 import Foundation
 import NIO
+@preconcurrency import NIOSSH
 import RemoteFileSystem
 
 public actor SFTPRemoteClient: RemoteFileSystemClient {
@@ -89,9 +90,22 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
         do {
             let sftp = try await activeSFTPClient()
             return try await sftp.withFile(filePath: resolvedPath(path), flags: .read) { file in
-                var buffer = try await file.read(from: UInt64(range.lowerBound), length: UInt32(length))
-                let bytes = buffer.readBytes(length: buffer.readableBytes) ?? []
-                return Data(bytes)
+                // A single SSH_FXP_READ may return fewer bytes than requested
+                // (servers cap per-read at ~64-256KB), so loop until the whole
+                // range is read or EOF — otherwise large ranges stream truncated,
+                // corrupt audio. Mirrors download()'s chunked read.
+                var data = Data(capacity: Int(length))
+                var offset = UInt64(range.lowerBound)
+                while data.count < Int(length) {
+                    let want = UInt32(min(Int(length) - data.count, 262_144))
+                    var buffer = try await file.read(from: offset, length: want)
+                    guard let bytes = buffer.readBytes(length: buffer.readableBytes), !bytes.isEmpty else {
+                        break   // EOF: return the partial prefix (HTTP range semantics)
+                    }
+                    data.append(contentsOf: bytes)
+                    offset += UInt64(bytes.count)
+                }
+                return data
             }
         } catch {
             throw Self.map(error, path: path)
@@ -173,7 +187,10 @@ extension SFTPRemoteClient {
             authenticationMethod: {
                 .passwordBased(username: username, password: password)
             },
-            hostKeyValidator: .acceptAnything()
+            // Trust-on-first-use: record the host key on first connect and reject
+            // a changed key thereafter, instead of blindly accepting any key
+            // (which allowed a man-in-the-middle to capture credentials).
+            hostKeyValidator: .custom(TOFUHostKeyValidator(host: host, port: port == 0 ? 22 : port))
         )
         let client = try await SSHClient.connect(to: settings)
         self.sshClient = client
@@ -224,5 +241,68 @@ enum SFTPAttributeMapper {
     static func int64Size(_ size: UInt64?) -> Int64? {
         guard let size, size <= UInt64(Int64.max) else { return nil }
         return Int64(size)
+    }
+}
+
+/// Trust-on-first-use SSH host-key validator. Records each endpoint's host key
+/// the first time it connects, then rejects any later connection whose key has
+/// changed (a sign of a man-in-the-middle or a reprovisioned server). Replaces
+/// the previous accept-anything behaviour that exposed SFTP credentials to MITM.
+final class TOFUHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
+    private let endpoint: String
+    private let storeURL: URL
+    private static let lock = NSLock()
+
+    init(host: String, port: Int) {
+        self.endpoint = "\(host):\(port)"
+        let support = (try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+        )) ?? FileManager.default.temporaryDirectory
+        self.storeURL = support.appendingPathComponent("ssh_known_hosts.json")
+    }
+
+    func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
+        var buffer = ByteBufferAllocator().buffer(capacity: 256)
+        _ = hostKey.write(to: &buffer)
+        let bytes = buffer.getBytes(at: 0, length: buffer.readableBytes) ?? []
+        let fingerprint = Data(bytes).base64EncodedString()
+
+        Self.lock.lock()
+        defer { Self.lock.unlock() }
+        var known = loadKnownHosts()
+        if let existing = known[endpoint] {
+            if existing == fingerprint {
+                validationCompletePromise.succeed(())
+            } else {
+                validationCompletePromise.fail(SFTPHostKeyError.changed(endpoint))
+            }
+        } else {
+            known[endpoint] = fingerprint   // trust on first use
+            saveKnownHosts(known)
+            validationCompletePromise.succeed(())
+        }
+    }
+
+    private func loadKnownHosts() -> [String: String] {
+        guard let data = try? Data(contentsOf: storeURL),
+              let dict = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return dict
+    }
+
+    private func saveKnownHosts(_ dict: [String: String]) {
+        if let data = try? JSONEncoder().encode(dict) {
+            try? data.write(to: storeURL, options: .atomic)
+        }
+    }
+}
+
+enum SFTPHostKeyError: LocalizedError {
+    case changed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .changed(let endpoint):
+            return "The SSH host key for \(endpoint) has changed. This may indicate a man-in-the-middle attack, or the server was reinstalled. The saved key must be cleared to reconnect."
+        }
     }
 }

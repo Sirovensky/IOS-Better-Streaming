@@ -462,24 +462,31 @@ private extension EmbeddedMetadataReader {
         let type = fourCC(bytes, offset + 4)
         let headerSize: Int
         let size: Int
+        // `remaining` is the space left in the container; it is always >= 8 here
+        // (offset + 8 <= containerEnd) and can never overflow, unlike offset+size.
+        let remaining = containerEnd - offset
         if size32 == 1 {
+            // 64-bit extended size. On 64-bit platforms Int.max == Int64.max, so
+            // the old `size64 <= Int64(Int.max)` guard never rejected anything and
+            // `offset + size` could overflow and trap. Bound against `remaining`.
             guard offset + 16 <= containerEnd,
                   let size64 = readUInt64BE(bytes, offset + 8),
-                  size64 <= Int64(Int.max) else {
+                  size64 >= 0,
+                  size64 <= Int64(remaining) else {
                 return nil
             }
             headerSize = 16
             size = Int(size64)
         } else if size32 == 0 {
             headerSize = 8
-            size = containerEnd - offset
+            size = remaining
         } else {
             headerSize = 8
             size = size32
         }
-        guard size >= headerSize else { return nil }
-        let end = offset + size
-        guard end <= containerEnd else { return nil }
+        // No unchecked addition: validate against remaining space first.
+        guard size >= headerSize, size <= remaining else { return nil }
+        let end = offset + size   // safe: size <= remaining => end <= containerEnd
         return Atom(type: type, dataStart: offset + headerSize, end: end)
     }
 
