@@ -287,6 +287,9 @@ actor LibraryService {
         // the library from 20 GB to 10 GB.
         var listFailures = 0
         var filesSeen = 0
+        #if DEBUG
+        print("BETTERSTREAMING_SCAN start source=\(sourceID) root=\(cfg.rootPath) priorTracks=\(existing.count)")
+        #endif
 
         while let dir = pending.popLast() {
             if Task.isCancelled { break }
@@ -312,9 +315,18 @@ actor LibraryService {
                     entries = recovered
                 } else {
                     listFailures += 1
+                    #if DEBUG
+                    print("BETTERSTREAMING_SCAN list_failed dir=\(dir.displayPath) err=\(error)")
+                    #endif
                     continue
                 }
             }
+
+            #if DEBUG
+            let dirCount = entries.filter { $0.kind == .directory }.count
+            let fileCount = entries.filter { $0.kind == .file }.count
+            print("BETTERSTREAMING_SCAN dir=\(dir.displayPath) entries=\(entries.count) dirs=\(dirCount) files=\(fileCount)")
+            #endif
 
             for entry in entries {
                 if Task.isCancelled { break }
@@ -349,6 +361,16 @@ actor LibraryService {
         // `scanned` deletes any prior track not re-seen. On a partial walk, merge
         // instead — keep prior tracks we didn't re-scan so skipped folders survive.
         // (Genuinely-deleted files are pruned on the next clean scan.)
+        #if DEBUG
+        print("BETTERSTREAMING_SCAN done visited=\(visited.count) filesSeen=\(filesSeen) scanned=\(scanned.count) listFailures=\(listFailures) cancelled=\(Task.isCancelled)")
+        #endif
+        // Cancelled mid-walk → `scanned` is partial. NEVER persist it (that would
+        // replace the library with a half-walk and prune the rest). Leave the
+        // library untouched.
+        if Task.isCancelled {
+            lastScanIncomplete = true
+            return allTracks
+        }
         lastScanIncomplete = listFailures > 0
         let merged: [Track]
         if listFailures == 0 {
