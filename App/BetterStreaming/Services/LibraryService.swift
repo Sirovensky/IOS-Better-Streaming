@@ -613,7 +613,13 @@ actor LibraryService {
             #if DEBUG
             print("BETTERSTREAMING_RESOLVE local_or_cached title=\(track.title) url=\(localURL.path)")
             #endif
-            return AVPlayerItem(url: localURL)
+            // Precise timing: forces AVFoundation to compute the true duration by
+            // scanning frame headers instead of estimating from bitrate. VBR MP3s
+            // (e.g. without an accurate Xing header) otherwise report a duration
+            // seconds short of the real audio — which made the crossfade fade out
+            // early and the clock run past the end.
+            let asset = AVURLAsset(url: localURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+            return AVPlayerItem(asset: asset)
         }
         if offline { return nil }
         guard let cfg = configs.first(where: { $0.id == track.sourceID }),

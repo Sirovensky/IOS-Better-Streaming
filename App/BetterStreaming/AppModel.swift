@@ -1000,6 +1000,29 @@ final class AppModel {
 
     // MARK: Wiring
 
+    /// Last track for which a "mostly played → cache whole file" download fired,
+    /// so it triggers once per track.
+    private var partialCacheTriggeredID: String?
+
+    /// When the user has listened to most of a streamed track, cache the entire
+    /// file so it's saved offline — not only when the stream happens to cover 100%
+    /// (which never happens if you skip the last bytes).
+    private func maybeCacheMostlyPlayed() {
+        guard autoCache.isEnabled,
+              let track = engine.currentTrack,
+              engine.duration > 60,
+              engine.elapsed / engine.duration >= 0.75,
+              partialCacheTriggeredID != track.id,
+              let i = trackIndex[track.id], tracks[i].cacheState == .remoteOnly else { return }
+        partialCacheTriggeredID = track.id
+        Task { [weak self] in
+            guard let self else { return }
+            if await self.library.ensureCached(track, auto: true), let j = self.trackIndex[track.id] {
+                self.tracks[j].cacheState = .cached
+            }
+        }
+    }
+
     private func wireEngine() {
         engine.resolvePlayerItem = { [weak self] track in
             guard let self else { return nil }
@@ -1030,7 +1053,9 @@ final class AppModel {
             Task { await self.library.setDuration(seconds, forTrack: id) }
         }
         engine.onPlaybackTick = { [weak self] in
-            self?.savePlaybackSnapshot(throttled: true)
+            guard let self else { return }
+            self.savePlaybackSnapshot(throttled: true)
+            self.maybeCacheMostlyPlayed()
         }
         engine.onTrackStarted = { [weak self] track in
             guard let self else { return }

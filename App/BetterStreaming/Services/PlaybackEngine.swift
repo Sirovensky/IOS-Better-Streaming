@@ -670,17 +670,37 @@ final class PlaybackEngine {
     private func applyVolume() {
         let cf = enhancements.crossfadeSeconds
         var envelope: Float = 1
-        // Only shape volume INSIDE the known track bounds. Once `elapsed` reaches
-        // the reported `duration`, snap back to full — many files (esp. VBR MP3
-        // whose header duration is an underestimate) keep decoding real audio past
-        // it, and holding the fade-out at silence made that tail inaudible until
-        // the actual EOF ("fades out then plays silently forever").
-        if cf > 0.1, duration > cf * 2, elapsed < duration {
-            let inGain = min(elapsed / cf, 1)
-            let outGain = min((duration - elapsed) / cf, 1)
+        if cf > 0.1, duration > cf * 2 {
+            // Drive the envelope off the player's live time, not the 0.5 s display
+            // tick, so the roll-off is smooth instead of 5-6 audible steps. With an
+            // accurate duration (precise-timing asset) the fade reaches 0 exactly
+            // at the real end — no early fade, no screamer, no silent tail.
+            let t = player.currentTime().seconds
+            let pos = t.isFinite ? t : elapsed
+            let inGain = min(pos / cf, 1)
+            let outGain = min((duration - pos) / cf, 1)
             envelope = Float(max(0, min(inGain, outGain)))
         }
         player.volume = baseVolume * envelope
+    }
+
+    /// Re-apply audio enhancements (EQ mix, ReplayGain/preamp, crossfade volume)
+    /// to the CURRENT item live, e.g. when the user changes them in Settings while
+    /// a track is playing. Setting `audioMix` on an already-prepared item doesn't
+    /// take effect until the item is re-evaluated, so nudge it with an exact
+    /// seek-in-place (instant for a local/cached file).
+    func enhancementsDidChange() {
+        applyVolume()
+        guard let item = currentPlayerItem else { return }
+        let hadMix = item.audioMix != nil
+        configureItemAudio(item)
+        applyReplayGainVolume(for: item, generation: resolveGeneration)
+        // Only force a re-prep when the EQ mix actually went on/off or stayed on
+        // (a parameter change) — avoids a needless seek for pure volume tweaks.
+        if hadMix || item.audioMix != nil {
+            let t = player.currentTime()
+            if t.seconds.isFinite { player.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero) }
+        }
     }
 
     /// Attach duration / status / end-of-item observers to the item that is (or
@@ -865,7 +885,10 @@ final class PlaybackEngine {
     // MARK: Time observation
 
     private func addPeriodicTimeObserver() {
-        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        // 0.1 s (was 0.5): a fine enough tick that the crossfade envelope rolls off
+        // smoothly (≈30 steps over a 3 s fade, not 6) and the scrubber moves
+        // fluidly. Cheap on-device; the body early-returns unless actually playing.
+        let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             let seconds = time.seconds
             Task { @MainActor [weak self] in

@@ -3,6 +3,18 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @AppStorage(LibraryService.onlineArtworkKey) private var onlineArtwork = false
+    /// Debounces live re-apply of audio enhancements while the user drags sliders
+    /// (one re-prep after they settle, not one per step).
+    @State private var enhApplyTask: Task<Void, Never>?
+
+    private func scheduleEnhancementsApply() {
+        enhApplyTask?.cancel()
+        enhApplyTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            model.engine.enhancementsDidChange()
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -105,14 +117,6 @@ struct SettingsView: View {
 
                 rowDivider
 
-                Toggle(isOn: $enhancements.eqEnabled) {
-                    settingsLabel("Equalizer", "5-band graphic EQ", icon: "slider.vertical.3")
-                }
-                .tint(DesignTokens.brandPrimary)
-                .padding(12)
-
-                rowDivider
-
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         settingsLabel("Crossfade", "Fade between tracks", icon: "wave.3.forward")
@@ -123,6 +127,15 @@ struct SettingsView: View {
                     Slider(value: $enhancements.crossfadeSeconds, in: 0...12, step: 1)
                         .tint(DesignTokens.brandPrimary)
                 }
+                .padding(12)
+
+                rowDivider
+
+                // EQ toggle sits directly above its bands (below crossfade).
+                Toggle(isOn: $enhancements.eqEnabled) {
+                    settingsLabel("Equalizer", "5-band graphic EQ", icon: "slider.vertical.3")
+                }
+                .tint(DesignTokens.brandPrimary)
                 .padding(12)
 
                 if enhancements.eqEnabled {
@@ -157,6 +170,13 @@ struct SettingsView: View {
                 .font(.caption).foregroundStyle(DesignTokens.textTertiary)
                 .padding(.horizontal, 4)
         }
+        // Apply audio-enhancement changes to the CURRENTLY playing track, not just
+        // the next one (debounced so dragging a slider re-preps once on release).
+        .onChange(of: enhancements.eqEnabled) { _, _ in scheduleEnhancementsApply() }
+        .onChange(of: enhancements.eqBandsDB) { _, _ in scheduleEnhancementsApply() }
+        .onChange(of: enhancements.preampDB) { _, _ in scheduleEnhancementsApply() }
+        .onChange(of: enhancements.replayGainEnabled) { _, _ in scheduleEnhancementsApply() }
+        .onChange(of: enhancements.crossfadeSeconds) { _, _ in scheduleEnhancementsApply() }
     }
 
     private static func bandLabel(_ freq: Double) -> String {
