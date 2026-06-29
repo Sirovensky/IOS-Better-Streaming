@@ -591,6 +591,9 @@ final class AppModel {
         else { engine.setShuffle(false); engine.play(list, startAt: 0) }
     }
 
+    /// Lyrics for a track (`.lrc` sidecar), synced when timestamped.
+    func lyrics(for track: Track) async -> [LyricsLine]? { await library.lyrics(for: track) }
+
     func playPlaylist(_ playlist: Playlist, shuffled: Bool = false) {
         let list = playableContext(tracks(playlist.trackIDs))
         guard !list.isEmpty else { return }

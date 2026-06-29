@@ -136,6 +136,7 @@ struct NowPlayingView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var showQueue = false
+    @State private var showLyrics = false
     /// Pushes the artist/album screen ON TOP of Now Playing (like Apple Music),
     /// reusing the shared `LibraryRoute` destinations — not a modal sheet.
     @State private var path: [LibraryRoute] = []
@@ -212,6 +213,14 @@ struct NowPlayingView: View {
                 .environment(model)
                 .presentationDetents([.large, .medium])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showLyrics) {
+            if let track = engine.currentTrack {
+                LyricsSheet(track: track)
+                    .environment(model)
+                    .presentationDetents([.large, .medium])
+                    .presentationDragIndicator(.visible)
+            }
         }
     }
 
@@ -326,6 +335,7 @@ struct NowPlayingView: View {
                 Button(playlist.name) { model.addToPlaylist(playlist.id, trackIDs: [track.id]) }
             }
         }
+        Button("Lyrics", systemImage: "quote.bubble") { showLyrics = true }
         Button("View Queue", systemImage: "list.bullet") { showQueue = true }
         Menu("Sleep Timer", systemImage: model.sleepTimerArmed ? "moon.zzz.fill" : "moon.zzz") {
             if model.sleepTimerArmed {
@@ -398,7 +408,7 @@ struct NowPlayingView: View {
 
     private var bottomBar: some View {
         HStack {
-            Button {} label: {
+            Button { showLyrics = true } label: {
                 Image(systemName: "quote.bubble")
                     .font(.title3)
                     .foregroundStyle(.white.opacity(0.85))
@@ -595,4 +605,75 @@ struct RoutePickerButton: UIViewRepresentable {
         return view
     }
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
+}
+
+// MARK: - Lyrics
+
+struct LyricsSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let track: Track
+    @State private var lines: [LyricsLine]?
+    @State private var loading = true
+
+    private var engine: PlaybackEngine { model.engine }
+    private var synced: Bool { lines?.contains { $0.time != nil } ?? false }
+
+    /// Index of the current synced line for `engine.elapsed`.
+    private var currentIndex: Int? {
+        guard synced, let lines else { return nil }
+        var idx: Int?
+        for (i, line) in lines.enumerated() {
+            if let t = line.time, t <= engine.elapsed { idx = i } else if line.time != nil { break }
+        }
+        return idx
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if loading {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let lines, !lines.isEmpty {
+                    lyricsScroll(lines)
+                } else {
+                    ContentUnavailableView("No Lyrics", systemImage: "quote.bubble",
+                                           description: Text("No .lrc lyrics found next to this track."))
+                }
+            }
+            .navigationTitle("Lyrics")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .task {
+            lines = await model.lyrics(for: track)
+            loading = false
+        }
+    }
+
+    private func lyricsScroll(_ lines: [LyricsLine]) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
+                        Text(line.text.isEmpty ? "♪" : line.text)
+                            .font(.title3.weight(index == currentIndex ? .bold : .regular))
+                            .foregroundStyle(index == currentIndex ? DesignTokens.textPrimary : DesignTokens.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id(index)
+                    }
+                }
+                .padding(DesignTokens.phonePadding)
+                .padding(.bottom, 80)
+            }
+            .onChange(of: currentIndex) { _, new in
+                guard let new else { return }
+                withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(new, anchor: .center) }
+            }
+        }
+    }
 }

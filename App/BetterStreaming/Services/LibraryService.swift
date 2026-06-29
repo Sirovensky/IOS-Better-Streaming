@@ -799,6 +799,34 @@ actor LibraryService {
         return nil
     }
 
+    /// Fetch lyrics for a track: a `.lrc` sidecar (same path, `.lrc` extension)
+    /// from the source — synced if it carries timestamps — else nil. Bounded read
+    /// (lyrics files are tiny).
+    func lyrics(for track: Track) async -> [LyricsLine]? {
+        loadConfigsFromDiskIfNeeded()
+        func parse(_ data: Data) -> [LyricsLine]? {
+            let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+            guard let text else { return nil }
+            let lines = LyricsParser.parse(text)
+            return lines.isEmpty ? nil : lines
+        }
+        // Local source: read the sidecar straight off disk.
+        if let localURL = localFileURL(for: track) {
+            let lrc = localURL.deletingPathExtension().appendingPathExtension("lrc")
+            if let data = try? Data(contentsOf: lrc) { return parse(data) }
+            return nil
+        }
+        guard let cfg = configs.first(where: { $0.id == track.sourceID }),
+              cfg.proto != SourceProtocol.local.rawValue,
+              let client = backgroundClient(for: cfg),
+              let remote = track.remotePath, !remote.isEmpty else { return nil }
+        let lrcPath = RemotePath(displayPath: (remote as NSString).deletingPathExtension + ".lrc")
+        guard let meta = try? await client.stat(lrcPath), meta.kind == .file,
+              let size = meta.size, size > 0, size < 1_000_000,
+              let data = try? await client.read(lrcPath, range: 0..<size) else { return nil }
+        return parse(data)
+    }
+
     /// Extract embedded artwork from a locally-available track and cache a
     /// shared thumbnail per album. Returns the cached file URL (or nil).
     func cacheAlbumArtwork(for track: Track) async -> URL? {
