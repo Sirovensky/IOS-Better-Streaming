@@ -331,6 +331,13 @@ final class AppModel {
     }
 
     func removeSource(_ id: String) {
+        // Stop playback if the current track (or queue) belongs to the removed
+        // source — otherwise the live stream would revive its just-disconnected
+        // connection, and the queue would point at tracks that no longer exist.
+        if engine.queue.contains(where: { $0.sourceID == id }) {
+            engine.clearQueue()
+            lastNotedPlayID = nil
+        }
         Task { await library.removeSource(id) }
         sourceConfigs.removeAll { $0.id == id }
         sourceHealth[id] = nil

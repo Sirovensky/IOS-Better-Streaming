@@ -548,11 +548,40 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
         let factory = transportFactory
         let config = configuration
         let auth = authentication
-        let newTransport = try await Self.withTimeout(connectTimeoutNanos) {
-            try await factory(config, auth)
-        }
+        // Connect-specific timeout: if the connect overruns the deadline but then
+        // SUCCEEDS, the late transport owns a live NWConnection — disconnect it so
+        // it doesn't leak a server session (the generic withTimeout would just
+        // drop the value). Idempotent disconnect is non-blocking.
+        let newTransport = try await Self.connectWithTimeout(connectTimeoutNanos, factory: factory, config: config, auth: auth)
         transport = newTransport
         return newTransport
+    }
+
+    private static func connectWithTimeout(
+        _ nanoseconds: UInt64,
+        factory: @escaping SMBRemoteTransportFactory,
+        config: SMBConnectionConfiguration,
+        auth: SMBAuthentication
+    ) async throws -> any SMBRemoteTransport {
+        let gate = ResumeGate()
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<any SMBRemoteTransport, Error>) in
+            Task {
+                do {
+                    let transport = try await factory(config, auth)
+                    if gate.tryResume() {
+                        continuation.resume(returning: transport)
+                    } else {
+                        transport.disconnect()   // timed out already — don't leak the late connection
+                    }
+                } catch {
+                    if gate.tryResume() { continuation.resume(throwing: error) }
+                }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                if gate.tryResume() { continuation.resume(throwing: RemoteFileSystemError.timeout) }
+            }
+        }
     }
 
     private static func connectionState(for sourceError: SourceError) -> SMBConnectionTestState {

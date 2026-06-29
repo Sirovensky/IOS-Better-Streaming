@@ -78,6 +78,10 @@ actor LibraryService {
     /// merged rather than pruned). Lets the UI warn the user to rescan on a
     /// stable connection instead of trusting a shrunken count.
     private(set) var lastScanIncomplete = false
+    /// A scan is walking the tree right now. While set, app-background must NOT
+    /// tear down the background client — that would interrupt the walk (forcing a
+    /// reconnect mid-scan and risking skipped folders).
+    private var scanInProgress = false
     /// In-memory passwords for this session, set on add. Lets the first
     /// add→scan succeed even if the Keychain read lags/fails; Keychain remains
     /// the durable store for relaunches.
@@ -233,6 +237,8 @@ actor LibraryService {
     func scan(sourceID: String, progress: (@Sendable (Int) -> Void)? = nil) async throws -> [Track] {
         await loadLibraryFromDiskIfNeeded()
         guard let cfg = configs.first(where: { $0.id == sourceID }) else { return allTracks }
+        scanInProgress = true
+        defer { scanInProgress = false }
 
         if cfg.proto == SourceProtocol.local.rawValue {
             let scanned = try await scanLocal(cfg)
@@ -1089,6 +1095,8 @@ actor LibraryService {
     /// scan/artwork/download sessions are returned to the server. Stream clients
     /// are kept: audio keeps playing in the background. They reconnect lazily.
     func handleEnteredBackground() async {
+        // Don't cut a scan's connection out from under it.
+        guard !scanInProgress else { return }
         let clients = Array(backgroundClients.values)
         backgroundClients.removeAll()
         for client in clients { await client.disconnect() }
