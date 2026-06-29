@@ -89,7 +89,10 @@ Pulled `library.sqlite` (860 items). Findings + status:
 
 - **Headless Simulator testing:** the build box reaches the NAS over Tailscale (`100.83.121.63:445`). DEBUG-only launch env hooks (inert without the var): `BETTERSTREAMING_TEST_SMB_PASSWORD` injects the SMB password in-memory (no Keychain in the sim); `BETTERSTREAMING_TEST_AUTOPLAY=<title>` auto-plays a track. Pass via `SIMCTL_CHILD_…`. Inject a real library by copying the device's `library.sqlite`+`sources.json` into the sim app's Application Support and set `onboarded.v1`. Pull the device DB with `devicectl device copy from … --source "Library/Application Support/library.sqlite"`.
 
-## DONE (this session — committed locally `a4b282e`, NOT pushed; user builds from this Mac)
+## DONE (this session — committed locally, NOT pushed; user builds from this Mac)
+
+Commits: `a4b282e` (streaming/grouping/scan/UX), `8417e04` (sleep timer + stats tile), `bd1004a` (bughunt hardening: artist-split regexes, supersede-finishes-with-error, backfill convergence, reader-pool in-use guard, tolerant scan-reuse key). Verified live in the Simulator streaming the real NAS over Tailscale.
+
 
 - Streaming: removed the crashing per-read timeout; scoped allToEnd supersession + per-chunk retry + transport-reset-on-disconnect; pooled reader; os.Logger. Crash (`ByteReader` EXC_BREAKPOINT) + "scanning forever" both fixed. Verified live in sim.
 - Metadata/grouping: folder-keyed albumID; multi-artist credits (cross-listed); Various-Artists display; filename `Artist - Title` parse; ID3 Win-1251 (Cyrillic) decode; genre canonicalization + per-artist consensus.

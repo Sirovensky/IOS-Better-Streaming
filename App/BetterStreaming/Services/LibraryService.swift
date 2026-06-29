@@ -803,6 +803,16 @@ actor LibraryService {
         return result
     }
 
+    /// Persist a track's real (asset-resolved) duration. A tag-only scan has no
+    /// duration, so this fills it in as tracks play and survives relaunch.
+    func setDuration(_ seconds: Double, forTrack id: String) async {
+        guard seconds.isFinite, seconds > 0,
+              let i = allTracks.firstIndex(where: { $0.id == id }),
+              abs(allTracks[i].durationSeconds - seconds) > 0.5 else { return }
+        allTracks[i].durationSeconds = seconds
+        _ = try? await mediaStore.upsertMediaItems([mediaItem(from: allTracks[i])])
+    }
+
     /// Apply backfilled covers to the in-memory library and persist the artwork
     /// URLs (upsert by identity, so cache rows and ids are preserved).
     private func applyAlbumArtwork(_ map: [String: URL]) async {

@@ -72,6 +72,9 @@ final class PlaybackEngine {
     var loadArtwork: (@MainActor (Track) async -> UIImage?)?
     /// Called when a track actually starts, for recency/auto-cache tracking.
     var onTrackStarted: (@MainActor (Track) -> Void)?
+    /// Reports a track's real duration once the asset resolves it, so the library
+    /// (which has no duration from a tag-only scan) can persist + display it.
+    var onDurationResolved: (@MainActor (String, Double) -> Void)?
 
     // MARK: Private
 
@@ -322,6 +325,9 @@ final class PlaybackEngine {
                 if seconds.isFinite, seconds > 0 {
                     self.duration = seconds
                     self.updateNowPlayingInfo()
+                    if self.queue.indices.contains(self.currentIndex) {
+                        self.onDurationResolved?(self.queue[self.currentIndex].id, seconds)
+                    }
                 }
             }
         }

@@ -687,6 +687,12 @@ final class AppModel {
             }
             return Artwork.image(for: track.albumID, glyph: track.kind == .video ? "film" : "music.note")
         }
+        engine.onDurationResolved = { [weak self] id, seconds in
+            guard let self, let i = self.trackIndex[id], self.tracks.indices.contains(i),
+                  abs(self.tracks[i].durationSeconds - seconds) > 0.5 else { return }
+            self.tracks[i].durationSeconds = seconds
+            Task { await self.library.setDuration(seconds, forTrack: id) }
+        }
         engine.onTrackStarted = { [weak self] track in
             guard let self else { return }
             self.notePlayed(track.id)
