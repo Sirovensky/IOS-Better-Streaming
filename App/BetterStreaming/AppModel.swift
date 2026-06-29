@@ -91,13 +91,17 @@ final class AppModel {
 
     func rescan(_ sourceID: String) async {
         isScanning = true
+        sourceMessages[sourceID] = "Scanning…"
+        sourceHealth[sourceID] = .degraded
+        rebuildSources()
         defer { isScanning = false }
         do {
             let updated = try await library.scan(sourceID: sourceID)
             tracks = updated
             rebuildIndex()
             sourceHealth[sourceID] = .online
-            sourceMessages[sourceID] = nil
+            let sourceCount = updated.filter { $0.sourceID == sourceID }.count
+            sourceMessages[sourceID] = sourceCount == 0 ? "No supported media found" : nil
         } catch let error as LibraryError {
             sourceHealth[sourceID] = (error.kind == .auth) ? .authFailed : .unreachable
             sourceMessages[sourceID] = error.message
@@ -127,6 +131,7 @@ final class AppModel {
         domain: String? = nil,
         rootPath: String = "/"
     ) {
+        completeOnboarding()
         Task {
             let cfg = await library.addSource(
                 name: name,
@@ -141,7 +146,6 @@ final class AppModel {
             )
             sourceConfigs.append(cfg)
             sourceHealth[cfg.id] = .online
-            completeOnboarding()
             rebuildSources()
             await rescan(cfg.id)
         }
@@ -167,11 +171,11 @@ final class AppModel {
         guard let bookmark else { return }
         let b64 = bookmark.base64EncodedString()
         let path = folderURL.path
+        completeOnboarding()
         Task {
             let cfg = await library.addLocalSource(name: name, bookmark: b64, displayPath: path)
             sourceConfigs.append(cfg)
             sourceHealth[cfg.id] = .online
-            completeOnboarding()
             rebuildSources()
             await rescan(cfg.id)
         }
@@ -190,6 +194,7 @@ final class AppModel {
         sources = sourceConfigs.map { cfg in
             let count = tracks.filter { $0.sourceID == cfg.id }.count
             let health = sourceHealth[cfg.id] ?? .asleep
+            let message = sourceMessages[cfg.id]
             return LibrarySource(
                 id: cfg.id,
                 name: cfg.name,
@@ -199,7 +204,7 @@ final class AppModel {
                 health: health,
                 trackCount: count,
                 folderCount: 0,
-                lastScanLabel: count > 0 ? "\(count) songs" : (sourceMessages[cfg.id] ?? (health == .unreachable ? "Couldn’t connect" : "Not scanned")),
+                lastScanLabel: message ?? (count > 0 ? "\(count) songs" : (health == .unreachable ? "Couldn’t connect" : "Not scanned")),
                 speedLabel: "—"
             )
         }
@@ -228,8 +233,9 @@ final class AppModel {
         return grouped.values.compactMap { group -> Album? in
             guard let first = group.first else { return nil }
             let anyCached = group.contains { $0.cacheState.isPlayableOffline }
+            let artworkURL = group.compactMap(\.artworkURL).first
             return Album(id: first.albumID, title: first.album, artist: first.artist, artistID: first.artistID,
-                         year: nil, trackCount: group.count, cacheState: anyCached ? .cached : .remoteOnly, artworkURL: first.artworkURL)
+                         year: nil, trackCount: group.count, cacheState: anyCached ? .cached : .remoteOnly, artworkURL: artworkURL)
         }
         .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
@@ -246,10 +252,14 @@ final class AppModel {
     }
 
     func tracks(forAlbum albumID: String) -> [Track] {
-        tracks.filter { $0.albumID == albumID }.sorted { ($0.trackNumber ?? 0) < ($1.trackNumber ?? 0) }
+        tracks.filter { $0.albumID == albumID }.sorted(by: albumTrackSort)
     }
 
     func tracks(forArtist artistID: String) -> [Track] { tracks.filter { $0.artistID == artistID } }
+
+    func tracks(forGenre genre: String) -> [Track] {
+        audioTracks.filter { $0.genre.localizedCaseInsensitiveCompare(genre) == .orderedSame }
+    }
 
     var recentlyPlayed: [Track] { recentlyPlayedIDs.compactMap(track) }
     var recentlyAddedAlbums: [Album] {
@@ -265,7 +275,7 @@ final class AppModel {
                 year: nil,
                 trackCount: 0,
                 cacheState: track.cacheState.isPlayableOffline ? .cached : .remoteOnly,
-                artworkURL: track.artworkURL
+                artworkURL: tracks.first(where: { $0.albumID == track.albumID && $0.artworkURL != nil })?.artworkURL
             ))
             if result.count == 8 { break }
         }
@@ -276,9 +286,16 @@ final class AppModel {
 
     func play(_ track: Track, in context: [Track]) {
         let playable = playableContext(context)
+        #if DEBUG
+        print("BETTERSTREAMING_MODEL play_request title=\(track.title) ext=\(track.fileExtension) context=\(context.count) playable=\(playable.count) offline=\(offlineMode)")
+        #endif
+        engine.setShuffle(false)
         if let start = playable.firstIndex(where: { $0.id == track.id }) {
             engine.play(playable, startAt: start)
         } else {
+            #if DEBUG
+            print("BETTERSTREAMING_MODEL play_fallback_single title=\(track.title)")
+            #endif
             engine.play([track], startAt: 0)
         }
     }
@@ -303,9 +320,81 @@ final class AppModel {
         engine.playShuffled(list)
     }
 
+    func playArtistRadio(_ artistID: String) {
+        let list = playableContext(tracks(forArtist: artistID))
+        guard !list.isEmpty else { return }
+        engine.playShuffled(list)
+    }
+
+    func playGenreRadio(_ genre: String) {
+        let list = playableContext(tracks(forGenre: genre))
+        guard !list.isEmpty else { return }
+        engine.playShuffled(list)
+    }
+
+    func similarTracks(to seed: Track) -> [Track] {
+        let seedGenre = seed.genre.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasUsableGenre = !seedGenre.isEmpty && seedGenre.localizedCaseInsensitiveCompare("Unknown") != .orderedSame
+        let scored = audioTracks.compactMap { track -> (Track, Int)? in
+            var score = 0
+            if track.id == seed.id { score += 10 }
+            if track.artistID == seed.artistID { score += 6 }
+            if hasUsableGenre && track.genre.localizedCaseInsensitiveCompare(seedGenre) == .orderedSame { score += 5 }
+            if track.albumID == seed.albumID { score += 2 }
+            guard score > 0 else { return nil }
+            return (track, score)
+        }
+        let station = scored
+            .sorted { lhs, rhs in
+                if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+                return lhs.0.title.localizedCaseInsensitiveCompare(rhs.0.title) == .orderedAscending
+            }
+            .map(\.0)
+        return station.count >= 3 ? station : audioTracks
+    }
+
+    func playSimilarRadio(seed: Track) {
+        let list = playableContext(similarTracks(to: seed))
+        guard !list.isEmpty else { return }
+        engine.playShuffled(list)
+    }
+
     private func playableContext(_ context: [Track]) -> [Track] {
         guard offlineMode else { return context }
         return context.filter { $0.cacheState.isPlayableOffline }
+    }
+
+    private func albumTrackSort(_ lhs: Track, _ rhs: Track) -> Bool {
+        let leftDisc = lhs.discNumber ?? 0
+        let rightDisc = rhs.discNumber ?? 0
+        if leftDisc != rightDisc { return leftDisc < rightDisc }
+
+        let leftNumber = lhs.trackNumber ?? Self.leadingTrackNumber(lhs)
+        let rightNumber = rhs.trackNumber ?? Self.leadingTrackNumber(rhs)
+        switch (leftNumber, rightNumber) {
+        case let (left?, right?) where left != right:
+            return left < right
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        default:
+            break
+        }
+
+        return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+    }
+
+    private static func leadingTrackNumber(_ track: Track) -> Int? {
+        let fileStem = ((track.remotePath ?? track.folderPath) as NSString).lastPathComponent as NSString
+        let candidates = [fileStem.deletingPathExtension, track.title]
+        for value in candidates {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let digits = trimmed.prefix(while: { $0.isNumber })
+            guard !digits.isEmpty, digits.count <= 3, let number = Int(digits) else { continue }
+            return number
+        }
+        return nil
     }
 
     // MARK: Mutations
@@ -320,8 +409,13 @@ final class AppModel {
 
     func cacheState(_ id: String) -> CacheState { track(id)?.cacheState ?? .remoteOnly }
 
+    func canManageDownload(_ id: String) -> Bool {
+        guard let target = track(id) else { return false }
+        return !isLocalSource(target.sourceID)
+    }
+
     func download(_ id: String) {
-        guard let i = trackIndex[id] else { return }
+        guard let i = trackIndex[id], canManageDownload(id) else { return }
         tracks[i].cacheState = .downloading
         let target = tracks[i]
         Task {
@@ -331,7 +425,7 @@ final class AppModel {
     }
 
     func removeDownload(_ id: String) {
-        guard let i = trackIndex[id] else { return }
+        guard let i = trackIndex[id], canManageDownload(id) else { return }
         let target = tracks[i]
         Task { await library.evict(target) }
         tracks[i].cacheState = .remoteOnly
@@ -356,6 +450,10 @@ final class AppModel {
     // MARK: Wiring
 
     private func wireEngine() {
+        engine.resolvePlayerItem = { [weak self] track in
+            guard let self else { return nil }
+            return await self.library.playableItem(for: track, offline: self.offlineMode)
+        }
         engine.resolveAsset = { [weak self] track in
             guard let self else { return nil }
             return await self.library.playableURL(for: track, offline: self.offlineMode)
@@ -371,7 +469,16 @@ final class AppModel {
             self.notePlayed(track.id)
             Task {
                 let cached = await self.library.isCached(track)
-                if cached, let i = self.trackIndex[track.id] { self.tracks[i].cacheState = .cached }
+                if cached, let i = self.trackIndex[track.id] {
+                    switch self.tracks[i].cacheState {
+                    case .cached, .prefetched:
+                        break
+                    case .downloading:
+                        self.tracks[i].cacheState = .cached
+                    default:
+                        self.tracks[i].cacheState = .prefetched
+                    }
+                }
                 if let art = await self.library.cacheAlbumArtwork(for: track) {
                     for idx in self.tracks.indices
                     where self.tracks[idx].albumID == track.albumID && self.tracks[idx].artworkURL == nil {
@@ -388,7 +495,7 @@ final class AppModel {
             for id in plan.evict {
                 guard let target = self.track(id) else { continue }
                 await self.library.evict(target)
-                if let i = self.trackIndex[id], self.tracks[i].cacheState == .prefetched || self.tracks[i].cacheState == .cached {
+                if let i = self.trackIndex[id], self.tracks[i].cacheState == .prefetched {
                     self.tracks[i].cacheState = .remoteOnly
                 }
             }
@@ -396,7 +503,7 @@ final class AppModel {
             for id in plan.keep where downloaded < 8 {
                 guard let target = self.track(id), target.cacheState == .remoteOnly else { continue }
                 if await self.library.ensureCached(target) {
-                    if let i = self.trackIndex[id] { self.tracks[i].cacheState = .cached }
+                    if let i = self.trackIndex[id] { self.tracks[i].cacheState = .prefetched }
                     downloaded += 1
                 }
             }
@@ -418,5 +525,9 @@ final class AppModel {
         let localIDs = Set(sourceConfigs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
         let evictable = audioTracks.filter { !localIDs.contains($0.sourceID) }
         autoCache.scheduleReconcile(library: evictable, reachable: reachable && !offlineMode)
+    }
+
+    private func isLocalSource(_ sourceID: String) -> Bool {
+        sourceConfigs.first(where: { $0.id == sourceID })?.proto == SourceProtocol.local.rawValue
     }
 }

@@ -11,7 +11,42 @@ struct MiniPlayerBar: View {
     private var engine: PlaybackEngine { model.engine }
 
     var body: some View {
-        if let track = engine.currentTrack {
+        if let message = engine.lastErrorMessage {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(DesignTokens.warning)
+                    .frame(width: 28, height: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Can’t play this track")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(DesignTokens.textPrimary)
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(DesignTokens.textSecondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 8)
+                Button {
+                    engine.clearQueue()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(DesignTokens.textSecondary)
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(DesignTokens.borderSubtle.opacity(0.12), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.22), radius: 14, y: 6)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Playback error. \(message)")
+        } else if let track = engine.currentTrack {
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
                     ArtworkView(url: track.artworkURL, artworkKey: track.albumID, cornerRadius: 6)
@@ -259,10 +294,12 @@ struct NowPlayingView: View {
 
     @ViewBuilder
     private func trackMenu(_ track: Track) -> some View {
-        if model.cacheState(track.id) == .cached {
-            Button("Remove Download", systemImage: "trash") { model.removeDownload(track.id) }
-        } else {
-            Button("Download", systemImage: "arrow.down.circle") { model.download(track.id) }
+        if model.canManageDownload(track.id) {
+            if model.cacheState(track.id) == .cached {
+                Button("Remove Download", systemImage: "trash") { model.removeDownload(track.id) }
+            } else {
+                Button("Download", systemImage: "arrow.down.circle") { model.download(track.id) }
+            }
         }
         Button("Go to Album", systemImage: "square.stack") { detail = .album(track.albumID) }
         Button("Go to Artist", systemImage: "music.mic") { detail = .artist(track.artistID) }

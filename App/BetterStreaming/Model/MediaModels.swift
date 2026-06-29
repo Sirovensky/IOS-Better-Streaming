@@ -98,7 +98,7 @@ enum SourceProtocol: String, Codable, Sendable, Hashable, CaseIterable, Identifi
     /// Whether Core ships a real adapter for this protocol. SMB, WebDAV and
     /// local files are wired; FTP/SFTP are protocol-neutral behind
     /// RemoteFileSystemClient and need their adapter module built.
-    var hasAdapter: Bool { self == .smb || self == .webDAV || self == .local }
+    var hasAdapter: Bool { self == .smb || self == .webDAV || self == .ftp || self == .sftp || self == .local }
 
     /// Whether a live pre-save connection test exists (SMB only today).
     var hasConnectionTest: Bool { self == .smb }

@@ -63,6 +63,8 @@ final class PlaybackEngine {
 
     // MARK: Injected dependencies
 
+    /// Resolves a fully configured player item. Used for remote range streaming.
+    var resolvePlayerItem: (@MainActor (Track) async -> AVPlayerItem?)?
     /// Resolves a playable URL (local file or loopback stream) for a track.
     /// Returns nil if the track cannot currently be played (offline + uncached).
     var resolveAsset: (@MainActor (Track) async -> URL?)?
@@ -77,6 +79,7 @@ final class PlaybackEngine {
     private var timeObserver: Any?
     private var itemEndObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
+    private var timeControlObservation: NSKeyValueObservation?
     private var unshuffledQueue: [Track] = []
     private var resolveGeneration = 0
     private var audioSessionConfigured = false
@@ -86,6 +89,7 @@ final class PlaybackEngine {
         player.allowsExternalPlayback = true
         player.automaticallyWaitsToMinimizeStalling = true
         addPeriodicTimeObserver()
+        observeTimeControlStatus()
         configureRemoteCommands()
         observeInterruptions()
     }
@@ -252,6 +256,9 @@ final class PlaybackEngine {
 
     private func startCurrentItem(autoPlay: Bool) {
         guard let track = currentTrack else { return }
+        #if DEBUG
+        print("BETTERSTREAMING_PLAY start title=\(track.title) ext=\(track.fileExtension) source=\(track.sourceID) remote=\(track.remotePath ?? "nil")")
+        #endif
         resolveGeneration += 1
         let generation = resolveGeneration
         isBuffering = true
@@ -272,30 +279,38 @@ final class PlaybackEngine {
 
         Task { [weak self] in
             guard let self else { return }
-            let url: URL?
-            if let resolveAsset = self.resolveAsset {
-                url = await resolveAsset(track)
+            let item: AVPlayerItem?
+            if let resolvePlayerItem = self.resolvePlayerItem {
+                item = await resolvePlayerItem(track)
+            } else if let resolveAsset = self.resolveAsset, let url = await resolveAsset(track) {
+                item = AVPlayerItem(url: url)
+            } else if let url = track.assetURL {
+                item = AVPlayerItem(url: url)
             } else {
-                url = track.assetURL
+                item = nil
             }
             guard generation == self.resolveGeneration else { return }
-            guard let url else {
+            guard let item else {
                 self.isBuffering = false
                 self.lastErrorMessage = "“\(track.title)” isn’t available offline."
-                self.advanceAfterFailure()
+                #if DEBUG
+                print("BETTERSTREAMING_PLAY resolve_nil title=\(track.title) ext=\(track.fileExtension)")
+                #endif
+                self.stopAfterFailure()
                 return
             }
-            self.loadPlayerItem(url: url, autoPlay: autoPlay, generation: generation)
+            #if DEBUG
+            print("BETTERSTREAMING_PLAY resolved title=\(track.title) ext=\(track.fileExtension)")
+            #endif
+            self.loadPlayerItem(item: item, autoPlay: autoPlay, generation: generation)
         }
     }
 
-    private func loadPlayerItem(url: URL, autoPlay: Bool, generation: Int) {
-        let item = AVPlayerItem(url: url)
-
+    private func loadPlayerItem(item: AVPlayerItem, autoPlay: Bool, generation: Int) {
         // AVPlayerItem.duration is often `.indefinite` until well after
         // readyToPlay for these files, which left the scrubber/timer at 0:00.
         // Load it directly from the asset, which is reliable.
-        let durationAsset = AVURLAsset(url: url)
+        let durationAsset = item.asset
         Task { @MainActor in
             guard generation == self.resolveGeneration else { return }
             if let cmDuration = try? await durationAsset.load(.duration) {
@@ -321,11 +336,20 @@ final class PlaybackEngine {
                        assetDuration.isFinite, assetDuration > 0 {
                         self.duration = assetDuration
                     }
+                    #if DEBUG
+                    let duration = self.duration.isFinite ? self.duration : -1
+                    print("BETTERSTREAMING_PLAY ready index=\(self.currentIndex) duration=\(duration)")
+                    #endif
                     self.updateNowPlayingInfo()
                 case .failed:
                     self.isBuffering = false
                     self.lastErrorMessage = self.player.currentItem?.error?.localizedDescription ?? "Playback failed."
-                    self.advanceAfterFailure()
+                    #if DEBUG
+                    let itemError = self.player.currentItem?.error?.localizedDescription ?? "nil"
+                    let log = self.player.currentItem?.errorLog()?.events.last
+                    print("BETTERSTREAMING_PLAY failed itemError=\(itemError) log=\(log?.errorStatusCode ?? 0):\(log?.errorComment ?? "nil")")
+                    #endif
+                    self.stopAfterFailure()
                 default:
                     break
                 }
@@ -348,6 +372,10 @@ final class PlaybackEngine {
             configureAudioSessionIfNeeded()
             player.play()
             isPlaying = true
+            #if DEBUG
+            let route = AVAudioSession.sharedInstance().currentRoute.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
+            print("BETTERSTREAMING_PLAY player_play route=\(route) volume=\(AVAudioSession.sharedInstance().outputVolume)")
+            #endif
         }
         if queue.indices.contains(currentIndex) {
             onTrackStarted?(queue[currentIndex])
@@ -359,6 +387,15 @@ final class PlaybackEngine {
         if repeatMode == .one {
             seek(toSeconds: 0)
             player.play()
+            return
+        }
+        let playerTime = player.currentTime().seconds
+        let playedSeconds = max(elapsed, playerTime.isFinite ? playerTime : 0)
+        let itemDuration = player.currentItem?.duration.seconds ?? 0
+        let knownDuration = max(duration, itemDuration.isFinite ? itemDuration : 0)
+        if playedSeconds < 0.75 && knownDuration < 0.75 {
+            lastErrorMessage = "Playback ended before audio started."
+            stopAfterFailure()
             return
         }
         advance(userInitiated: false)
@@ -379,15 +416,15 @@ final class PlaybackEngine {
         }
     }
 
-    /// Skip forward when a track can't be resolved/played, but stop if the whole
-    /// tail is unplayable to avoid an infinite skip loop.
-    private func advanceAfterFailure() {
-        if currentIndex < queue.count - 1 {
-            currentIndex += 1
-            startCurrentItem(autoPlay: true)
-        } else {
-            isPlaying = false
-        }
+    /// Keep the failed selection visible instead of racing through the queue.
+    private func stopAfterFailure() {
+        player.pause()
+        isPlaying = false
+        isBuffering = false
+        #if DEBUG
+        print("BETTERSTREAMING_PLAY stop_after_failure message=\(lastErrorMessage ?? "nil")")
+        #endif
+        updateNowPlayingInfo()
     }
 
     private func shuffledQueue(_ tracks: [Track], keeping index: Int) -> [Track] {
@@ -407,6 +444,17 @@ final class PlaybackEngine {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if seconds.isFinite { self.elapsed = seconds }
+            }
+        }
+    }
+
+    private func observeTimeControlStatus() {
+        timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                #if DEBUG
+                print("BETTERSTREAMING_PLAY timeControl=\(player.timeControlStatus.rawValue) reason=\(player.reasonForWaitingToPlay?.rawValue ?? "none") elapsed=\(self.elapsed)")
+                #endif
             }
         }
     }

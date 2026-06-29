@@ -88,7 +88,7 @@ public struct SourceRecord: Identifiable, Hashable, Codable, Sendable {
     }
 }
 
-public struct SourceDraft: Sendable {
+public struct SourceDraft: Sendable, Equatable {
     public var protocolKind: SourceProtocolKind
     public var displayName: String
     public var endpoint: SourceEndpoint
@@ -110,11 +110,23 @@ public struct SourceDraft: Sendable {
     }
 }
 
-public struct CredentialSecret: Sendable {
+public struct CredentialSecret: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
     public let password: String
 
     public init(password: String) {
         self.password = password
+    }
+
+    public func withPassword<T>(_ body: (String) throws -> T) rethrows -> T {
+        try body(password)
+    }
+
+    public var description: String {
+        "<credential-secret:redacted>"
+    }
+
+    public var debugDescription: String {
+        "<credential-secret:redacted>"
     }
 }
 

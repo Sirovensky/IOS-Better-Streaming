@@ -9,14 +9,6 @@ public enum CachePriority: String, Codable, Sendable {
     case maintenance
 }
 
-public struct CacheJobID: Hashable, Codable, Sendable {
-    public let rawValue: UUID
-
-    public init(rawValue: UUID = UUID()) {
-        self.rawValue = rawValue
-    }
-}
-
 public struct CacheRequest: Sendable, Equatable {
     public var items: [MediaItemID]
     public var requiredBy: CacheRequiredBy
@@ -183,77 +175,23 @@ public struct CachePathResolver: Sendable {
     }
 }
 
-public struct CacheRecord: Identifiable, Codable, Sendable, Equatable {
-    public let id: UUID
-    public var mediaItemID: MediaItemID
-    public var identity: RemoteItemIdentity?
-    public var state: CacheState
-    public var localFileURL: URL?
-    public var bytesTotal: Int64?
-    public var bytesDone: Int64
-    public var requiredBy: Set<CacheRequiredBy>
-    public var lastPlayedAt: Date?
-    public var lastVerifiedAt: Date?
-    public var failureCode: String?
-
-    public init(
-        id: UUID = UUID(),
-        mediaItemID: MediaItemID,
-        identity: RemoteItemIdentity? = nil,
-        state: CacheState,
-        localFileURL: URL? = nil,
-        bytesTotal: Int64? = nil,
-        bytesDone: Int64 = 0,
-        requiredBy: Set<CacheRequiredBy> = [],
-        lastPlayedAt: Date? = nil,
-        lastVerifiedAt: Date? = nil,
-        failureCode: String? = nil
-    ) {
-        self.id = id
-        self.mediaItemID = mediaItemID
-        self.identity = identity
-        self.state = state
-        self.localFileURL = localFileURL
-        self.bytesTotal = bytesTotal
-        self.bytesDone = max(0, bytesDone)
-        self.requiredBy = requiredBy
-        self.lastPlayedAt = lastPlayedAt
-        self.lastVerifiedAt = lastVerifiedAt
-        self.failureCode = failureCode
-    }
-
-    public init(
-        id mediaItemID: MediaItemID,
-        localURL: URL? = nil,
-        state: CacheState,
-        completedBytes: Int64 = 0,
-        totalBytes: Int64? = nil
-    ) {
-        self.init(
-            mediaItemID: mediaItemID,
-            state: state,
-            localFileURL: localURL,
-            bytesTotal: totalBytes,
-            bytesDone: completedBytes
-        )
-    }
-
-    public var localURL: URL? {
+public extension CacheRecord {
+    var localURL: URL? {
         get { localFileURL }
         set { localFileURL = newValue }
     }
 
-    public var completedBytes: Int64 {
+    var completedBytes: Int64 {
         get { bytesDone }
         set { bytesDone = max(0, newValue) }
     }
 
-    public var totalBytes: Int64? {
+    var totalBytes: Int64? {
         get { bytesTotal }
         set { bytesTotal = newValue.map { max(0, $0) } }
     }
 
-    public var progress: ByteProgress {
+    var progress: ByteProgress {
         ByteProgress(completedBytes: bytesDone, totalBytes: bytesTotal)
     }
 }

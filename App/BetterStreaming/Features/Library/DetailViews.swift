@@ -96,7 +96,7 @@ struct AlbumDetailView: View {
                 if let first = albumTracks.first {
                     MediaDetailHeader(
                         artworkKey: albumID,
-                        artworkURL: first.artworkURL,
+                        artworkURL: albumTracks.compactMap(\.artworkURL).first,
                         glyph: "music.note",
                         title: first.album,
                         subtitle: first.artist,
@@ -139,12 +139,14 @@ struct ArtistDetailView: View {
                             .frame(width: 140, height: 140)
                         Text(name).font(.title.weight(.bold)).foregroundStyle(DesignTokens.textPrimary)
                         HStack(spacing: 12) {
-                            Button { model.engine.play(model.tracks(forArtist: artistID)) } label: {
+                            Button {
+                                model.engine.setShuffle(false)
+                                model.engine.play(model.tracks(forArtist: artistID))
+                            } label: {
                                 Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
                             }.buttonStyle(PrimaryActionButtonStyle())
                             Button {
-                                model.engine.setShuffle(true)
-                                model.engine.play(model.tracks(forArtist: artistID).shuffled())
+                                model.engine.playShuffled(model.tracks(forArtist: artistID))
                             } label: {
                                 Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
                             }.buttonStyle(SecondaryActionButtonStyle())

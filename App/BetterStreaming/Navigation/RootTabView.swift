@@ -11,6 +11,9 @@ struct RootTabView: View {
                 HomeView()
                     .tabItem { Label("Home", systemImage: "house.fill") }
 
+                RadioView()
+                    .tabItem { Label("Radio", systemImage: "dot.radiowaves.left.and.right") }
+
                 LibraryView()
                     .tabItem { Label("Library", systemImage: "square.stack.fill") }
 

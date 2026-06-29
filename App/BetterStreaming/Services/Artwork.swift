@@ -74,14 +74,20 @@ struct ArtworkView: View {
             )
             .overlay {
                 if let url {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image.resizable().scaledToFill()
-                        default:
-                            Image(systemName: glyph)
-                                .font(.system(size: 22, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.85))
+                    if url.isFileURL, let image = UIImage(contentsOfFile: url.path) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        AsyncImage(url: url) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image.resizable().scaledToFill()
+                            default:
+                                Image(systemName: glyph)
+                                    .font(.system(size: 22, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.85))
+                            }
                         }
                     }
                 } else {

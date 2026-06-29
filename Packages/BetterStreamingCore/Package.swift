@@ -14,9 +14,12 @@ let package = Package(
             targets: [
                 "BetterStreamingDomain",
                 "AppFoundation",
+                "MetadataReader",
                 "RemoteFileSystem",
                 "SMBRemote",
                 "WebDAVRemote",
+                "FTPRemote",
+                "SFTPRemote",
                 "BetterStreamingSources",
                 "MediaStore",
                 "LibraryIndexer",
@@ -27,9 +30,12 @@ let package = Package(
         ),
         .library(name: "BetterStreamingDomain", targets: ["BetterStreamingDomain"]),
         .library(name: "AppFoundation", targets: ["AppFoundation"]),
+        .library(name: "MetadataReader", targets: ["MetadataReader"]),
         .library(name: "RemoteFileSystem", targets: ["RemoteFileSystem"]),
         .library(name: "SMBRemote", targets: ["SMBRemote"]),
         .library(name: "WebDAVRemote", targets: ["WebDAVRemote"]),
+        .library(name: "FTPRemote", targets: ["FTPRemote"]),
+        .library(name: "SFTPRemote", targets: ["SFTPRemote"]),
         .library(name: "BetterStreamingSources", targets: ["BetterStreamingSources"]),
         .library(name: "MediaStore", targets: ["MediaStore"]),
         .library(name: "LibraryIndexer", targets: ["LibraryIndexer"]),
@@ -41,7 +47,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.9.0"),
-        .package(url: "https://github.com/kishikawakatsumi/SMBClient.git", from: "0.3.1")
+        .package(url: "https://github.com/kishikawakatsumi/SMBClient.git", from: "0.3.1"),
+        .package(url: "https://github.com/orlandos-nl/Citadel.git", from: "0.12.1")
     ],
     targets: [
         .target(name: "BetterStreamingDomain"),
@@ -49,6 +56,7 @@ let package = Package(
             name: "AppFoundation",
             dependencies: ["BetterStreamingDomain"]
         ),
+        .target(name: "MetadataReader"),
         .target(
             name: "RemoteFileSystem",
             dependencies: ["BetterStreamingDomain", "AppFoundation"]
@@ -68,6 +76,23 @@ let package = Package(
                 "BetterStreamingDomain",
                 "AppFoundation",
                 "RemoteFileSystem"
+            ]
+        ),
+        .target(
+            name: "FTPRemote",
+            dependencies: [
+                "BetterStreamingDomain",
+                "AppFoundation",
+                "RemoteFileSystem"
+            ]
+        ),
+        .target(
+            name: "SFTPRemote",
+            dependencies: [
+                "BetterStreamingDomain",
+                "AppFoundation",
+                "RemoteFileSystem",
+                .product(name: "Citadel", package: "Citadel")
             ]
         ),
         .target(
@@ -140,6 +165,10 @@ let package = Package(
             dependencies: ["BetterStreamingDomain"]
         ),
         .testTarget(
+            name: "MetadataReaderTests",
+            dependencies: ["MetadataReader"]
+        ),
+        .testTarget(
             name: "RemoteFileSystemTests",
             dependencies: ["RemoteFileSystem", "TestSupport"]
         ),
@@ -150,6 +179,14 @@ let package = Package(
         .testTarget(
             name: "WebDAVRemoteTests",
             dependencies: ["WebDAVRemote"]
+        ),
+        .testTarget(
+            name: "FTPRemoteTests",
+            dependencies: ["FTPRemote"]
+        ),
+        .testTarget(
+            name: "SFTPRemoteTests",
+            dependencies: ["SFTPRemote"]
         ),
         .testTarget(
             name: "MediaStoreTests",

@@ -62,8 +62,18 @@ struct SourcesView: View {
             HStack {
                 Text(source.lastScanLabel).font(.caption).foregroundStyle(DesignTokens.textTertiary)
                 Spacer()
+                Button {
+                    Task { await model.rescan(source.id) }
+                } label: {
+                    Label("Rescan", systemImage: "arrow.triangle.2.circlepath")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 30, height: 30)
+                }
+                .disabled(model.isScanning)
                 Menu {
-                    Button("Rescan", systemImage: "arrow.triangle.2.circlepath") {}
+                    Button("Rescan", systemImage: "arrow.triangle.2.circlepath") {
+                        Task { await model.rescan(source.id) }
+                    }
                     Button("Remove source", systemImage: "trash", role: .destructive) {
                         model.removeSource(source.id)
                     }

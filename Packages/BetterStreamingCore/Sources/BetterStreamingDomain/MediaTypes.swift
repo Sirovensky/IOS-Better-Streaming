@@ -56,7 +56,12 @@ public struct MediaItem: Identifiable, Hashable, Codable, Sendable {
     public var title: String?
     public var artist: String?
     public var album: String?
+    public var genre: String?
+    public var trackNumber: Int?
+    public var discNumber: Int?
     public var duration: TimeInterval?
+    public var artworkURL: URL?
+    public var isFavorite: Bool
     public var sortKey: String
     public var playbackCapability: PlaybackCapability?
 
@@ -69,7 +74,12 @@ public struct MediaItem: Identifiable, Hashable, Codable, Sendable {
         title: String? = nil,
         artist: String? = nil,
         album: String? = nil,
+        genre: String? = nil,
+        trackNumber: Int? = nil,
+        discNumber: Int? = nil,
         duration: TimeInterval? = nil,
+        artworkURL: URL? = nil,
+        isFavorite: Bool = false,
         sortKey: String? = nil,
         playbackCapability: PlaybackCapability? = nil
     ) {
@@ -81,7 +91,12 @@ public struct MediaItem: Identifiable, Hashable, Codable, Sendable {
         self.title = title
         self.artist = artist
         self.album = album
+        self.genre = genre
+        self.trackNumber = trackNumber
+        self.discNumber = discNumber
         self.duration = duration
+        self.artworkURL = artworkURL
+        self.isFavorite = isFavorite
         self.sortKey = sortKey ?? Self.defaultSortKey(fileName)
         self.playbackCapability = playbackCapability
     }
@@ -317,6 +332,62 @@ public struct CacheEntry: Identifiable, Hashable, Codable, Sendable {
         self.lastPlayedAt = lastPlayedAt
         self.lastVerifiedAt = lastVerifiedAt
         self.failureCode = failureCode
+    }
+}
+
+public struct CacheRecord: Identifiable, Hashable, Codable, Sendable {
+    public let id: UUID
+    public var mediaItemID: MediaItemID
+    public var identity: RemoteItemIdentity?
+    public var state: CacheState
+    public var localFileURL: URL?
+    public var bytesTotal: Int64?
+    public var bytesDone: Int64
+    public var requiredBy: Set<CacheRequiredBy>
+    public var lastPlayedAt: Date?
+    public var lastVerifiedAt: Date?
+    public var failureCode: String?
+
+    public init(
+        id: UUID = UUID(),
+        mediaItemID: MediaItemID,
+        identity: RemoteItemIdentity? = nil,
+        state: CacheState,
+        localFileURL: URL? = nil,
+        bytesTotal: Int64? = nil,
+        bytesDone: Int64 = 0,
+        requiredBy: Set<CacheRequiredBy> = [],
+        lastPlayedAt: Date? = nil,
+        lastVerifiedAt: Date? = nil,
+        failureCode: String? = nil
+    ) {
+        self.id = id
+        self.mediaItemID = mediaItemID
+        self.identity = identity
+        self.state = state
+        self.localFileURL = localFileURL
+        self.bytesTotal = bytesTotal
+        self.bytesDone = max(0, bytesDone)
+        self.requiredBy = requiredBy
+        self.lastPlayedAt = lastPlayedAt
+        self.lastVerifiedAt = lastVerifiedAt
+        self.failureCode = failureCode
+    }
+
+    public init(
+        id mediaItemID: MediaItemID,
+        localURL: URL? = nil,
+        state: CacheState,
+        completedBytes: Int64 = 0,
+        totalBytes: Int64? = nil
+    ) {
+        self.init(
+            mediaItemID: mediaItemID,
+            state: state,
+            localFileURL: localURL,
+            bytesTotal: totalBytes,
+            bytesDone: completedBytes
+        )
     }
 }
 

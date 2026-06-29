@@ -2,7 +2,6 @@ import Foundation
 @_exported import BetterStreamingDomain
 import GRDB
 
-public typealias CacheRecord = CacheEntry
 public typealias PlaybackQueueSnapshot = QueueSnapshot
 
 public struct MediaStoreConfiguration: Sendable {
@@ -186,6 +185,53 @@ public actor MediaStore {
                 sql: "SELECT * FROM media_items WHERE identity_key = ?",
                 arguments: [identity.stableKey]
             ).map(MediaStorePersistence.mediaItem(from:))
+        }
+    }
+
+    public func listMediaItems(sourceID: SourceID? = nil) async throws -> [MediaItem] {
+        try migrateIfNeededLocked()
+        return try await database().read { db in
+            if let sourceID {
+                return try Row.fetchAll(
+                    db,
+                    sql: """
+                    SELECT * FROM media_items
+                    WHERE source_id = ?
+                    ORDER BY source_id, share_id, sort_key, file_name
+                    """,
+                    arguments: [MediaStorePersistence.uuidString(sourceID.rawValue)]
+                ).map(MediaStorePersistence.mediaItem(from:))
+            }
+
+            return try Row.fetchAll(
+                db,
+                sql: "SELECT * FROM media_items ORDER BY source_id, share_id, sort_key, file_name"
+            ).map(MediaStorePersistence.mediaItem(from:))
+        }
+    }
+
+    @discardableResult
+    public func replaceMediaItems(_ items: [MediaItem], for sourceID: SourceID) async throws -> [MediaItem] {
+        try migrateIfNeededLocked()
+        return try await database().write { db in
+            try MediaStorePersistence.deleteMediaItems(sourceID: sourceID, in: db)
+            return try items.map { try MediaStorePersistence.upsertMediaItem($0, in: db) }
+        }
+    }
+
+    @discardableResult
+    public func replaceAllMediaItems(_ items: [MediaItem]) async throws -> [MediaItem] {
+        try migrateIfNeededLocked()
+        return try await database().write { db in
+            try MediaStorePersistence.deleteAllMediaItems(in: db)
+            return try items.map { try MediaStorePersistence.upsertMediaItem($0, in: db) }
+        }
+    }
+
+    public func deleteMediaItems(sourceID: SourceID) async throws {
+        try migrateIfNeededLocked()
+        try await database().write { db in
+            try MediaStorePersistence.deleteMediaItems(sourceID: sourceID, in: db)
         }
     }
 
@@ -435,7 +481,12 @@ private enum MediaStorePersistence {
             title TEXT,
             artist TEXT,
             album TEXT,
+            genre TEXT,
+            track_number INTEGER,
+            disc_number INTEGER,
             duration REAL,
+            artwork_url TEXT,
+            is_favorite INTEGER NOT NULL DEFAULT 0,
             sort_key TEXT NOT NULL,
             playback_capability_json TEXT,
             created_at REAL NOT NULL,
@@ -452,6 +503,7 @@ private enum MediaStorePersistence {
             title,
             artist,
             album,
+            genre,
             display_path,
             tokenize='unicode61 remove_diacritics 2'
         )
@@ -679,7 +731,12 @@ private enum MediaStorePersistence {
             title: item.title,
             artist: item.artist,
             album: item.album,
+            genre: item.genre,
+            trackNumber: item.trackNumber,
+            discNumber: item.discNumber,
             duration: item.duration,
+            artworkURL: item.artworkURL,
+            isFavorite: item.isFavorite,
             sortKey: item.sortKey,
             playbackCapability: item.playbackCapability
         )
@@ -705,7 +762,12 @@ private enum MediaStorePersistence {
                     title = :title,
                     artist = :artist,
                     album = :album,
+                    genre = :genre,
+                    track_number = :track_number,
+                    disc_number = :disc_number,
                     duration = :duration,
+                    artwork_url = :artwork_url,
+                    is_favorite = :is_favorite,
                     sort_key = :sort_key,
                     playback_capability_json = :playback_capability_json,
                     updated_at = :updated_at
@@ -719,14 +781,16 @@ private enum MediaStorePersistence {
                 INSERT INTO media_items (
                     id, identity_key, identity_json, source_id, share_id, display_path,
                     normalized_path, remote_file_id, size, modified_at, parent_folder_id,
-                    media_kind, file_name, title, artist, album, duration, sort_key,
-                    playback_capability_json, created_at, updated_at
+                    media_kind, file_name, title, artist, album, genre, track_number,
+                    disc_number, duration, artwork_url, is_favorite, sort_key, playback_capability_json,
+                    created_at, updated_at
                 )
                 VALUES (
                     :id, :identity_key, :identity_json, :source_id, :share_id, :display_path,
                     :normalized_path, :remote_file_id, :size, :modified_at, :parent_folder_id,
-                    :media_kind, :file_name, :title, :artist, :album, :duration, :sort_key,
-                    :playback_capability_json, :created_at, :updated_at
+                    :media_kind, :file_name, :title, :artist, :album, :genre, :track_number,
+                    :disc_number, :duration, :artwork_url, :is_favorite, :sort_key, :playback_capability_json,
+                    :created_at, :updated_at
                 )
                 """,
                 arguments: mediaItemArguments(persisted, now: now, includeCreatedAt: true)
@@ -736,8 +800,8 @@ private enum MediaStorePersistence {
         try db.execute(sql: "DELETE FROM media_search WHERE media_id = ?", arguments: [uuidString(persisted.id.rawValue)])
         try db.execute(
             sql: """
-            INSERT INTO media_search (media_id, file_name, title, artist, album, display_path)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO media_search (media_id, file_name, title, artist, album, genre, display_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [
                 uuidString(persisted.id.rawValue),
@@ -745,6 +809,7 @@ private enum MediaStorePersistence {
                 persisted.title,
                 persisted.artist,
                 persisted.album,
+                persisted.genre,
                 persisted.identity.path.displayPath
             ]
         )
@@ -759,6 +824,8 @@ private enum MediaStorePersistence {
         }
         let parentID: String? = row["parent_folder_id"]
         let playbackJSON: String? = row["playback_capability_json"]
+        let artworkURLString: String? = row["artwork_url"]
+        let isFavorite: Int = row["is_favorite"]
 
         return MediaItem(
             id: try mediaItemID(row["id"], table: "media_items", column: "id"),
@@ -769,7 +836,12 @@ private enum MediaStorePersistence {
             title: row["title"],
             artist: row["artist"],
             album: row["album"],
+            genre: row["genre"],
+            trackNumber: row["track_number"],
+            discNumber: row["disc_number"],
             duration: row["duration"],
+            artworkURL: artworkURLString.flatMap(URL.init(string:)),
+            isFavorite: isFavorite != 0,
             sortKey: row["sort_key"],
             playbackCapability: try playbackJSON.map { try decode(PlaybackCapability.self, from: $0) }
         )
@@ -1041,6 +1113,7 @@ private enum MediaStorePersistence {
             item.title,
             item.artist,
             item.album,
+            item.genre,
             item.identity.path.displayPath,
             item.identity.path.normalizedPath
         ])
@@ -1101,7 +1174,12 @@ private enum MediaStorePersistence {
             "title": item.title,
             "artist": item.artist,
             "album": item.album,
+            "genre": item.genre,
+            "track_number": item.trackNumber,
+            "disc_number": item.discNumber,
             "duration": item.duration,
+            "artwork_url": item.artworkURL?.absoluteString,
+            "is_favorite": item.isFavorite ? 1 : 0,
             "sort_key": item.sortKey,
             "playback_capability_json": try optionalEncode(item.playbackCapability),
             "updated_at": now
@@ -1110,6 +1188,33 @@ private enum MediaStorePersistence {
             arguments += ["created_at": now]
         }
         return arguments
+    }
+
+    static func deleteMediaItems(sourceID: SourceID, in db: Database) throws {
+        let source = uuidString(sourceID.rawValue)
+        try db.execute(
+            sql: """
+            DELETE FROM media_search
+            WHERE media_id IN (SELECT id FROM media_items WHERE source_id = ?)
+            """,
+            arguments: [source]
+        )
+        try db.execute(
+            sql: """
+            DELETE FROM cache_entries
+            WHERE media_item_id IN (SELECT id FROM media_items WHERE source_id = ?)
+            """,
+            arguments: [source]
+        )
+        try db.execute(sql: "DELETE FROM media_items WHERE source_id = ?", arguments: [source])
+        try db.execute(sql: "DELETE FROM folders WHERE source_id = ?", arguments: [source])
+    }
+
+    static func deleteAllMediaItems(in db: Database) throws {
+        try db.execute(sql: "DELETE FROM media_search")
+        try db.execute(sql: "DELETE FROM cache_entries")
+        try db.execute(sql: "DELETE FROM media_items")
+        try db.execute(sql: "DELETE FROM folders")
     }
 
     private static func folderExists(id: String, in db: Database) throws -> Bool {

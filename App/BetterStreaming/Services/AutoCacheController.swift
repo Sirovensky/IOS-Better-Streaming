@@ -187,19 +187,21 @@ final class AutoCacheController {
 
         let keepSet = Set(keep)
         // Evict tracks that the auto-cache previously held but are no longer in
-        // the hot set. Manual downloads (pinned) are excluded by the caller.
+        // the hot set. Manual downloads use `.cached`; auto-cache uses `.prefetched`.
         let evict = library
-            .filter { ($0.cacheState == .cached || $0.cacheState == .prefetched) && !keepSet.contains($0.id) }
+            .filter { $0.cacheState == .prefetched && !keepSet.contains($0.id) }
             .map(\.id)
 
         return CachePlan(keep: keep, evict: evict, projectedBytes: used, budgetBytes: budgetBytes)
     }
 
-    /// Rough byte estimate from duration (~256 kbps) until MediaStore supplies
-    /// real file sizes.
+    /// Prefer scan-provided file size. Duration is only a fallback for sources
+    /// that cannot report sizes yet.
     func bytesEstimate(for track: Track) -> Int64 {
+        if let size = track.sizeBytes, size > 0 { return size }
+        if track.durationSeconds <= 0 { return 5_000_000 }
         let bytesPerSecond: Double = 256_000 / 8
-        return Int64(max(track.durationSeconds, 1) * bytesPerSecond)
+        return Int64(track.durationSeconds * bytesPerSecond)
     }
 
     // MARK: Persistence

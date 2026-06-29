@@ -16,22 +16,16 @@ public enum QueueInsertionSource: Hashable, Codable, Sendable {
     case manual
 }
 
-public struct QueueItem: Identifiable, Hashable, Codable, Sendable {
-    public let id: UUID
-    public let mediaItemID: MediaItemID
-    public var title: String
-    public var source: QueueInsertionSource
+public typealias QueueItem = QueueEntry
 
-    public init(
+public extension QueueEntry {
+    init(
         id: UUID = UUID(),
         mediaItemID: MediaItemID,
         title: String = "",
         source: QueueInsertionSource = .manual
     ) {
-        self.id = id
-        self.mediaItemID = mediaItemID
-        self.title = title
-        self.source = source
+        self.init(id: id, mediaItemID: mediaItemID, title: title, subtitle: nil, duration: nil)
     }
 }
 
@@ -64,53 +58,55 @@ public struct PlaybackQueueSeed: Sendable, Equatable {
     }
 }
 
-public struct PlaybackQueueSnapshot: Codable, Sendable, Equatable {
-    public var id: QueueID
-    public var items: [QueueItem]
-    public var currentIndex: Int?
-    public var isShuffled: Bool
-    public var repeatMode: RepeatMode
-    public var savedAt: Date
+public typealias PlaybackQueueSnapshot = QueueSnapshot
 
-    public init(
+public extension QueueSnapshot {
+    init(
         id: QueueID = QueueID(),
-        items: [QueueItem] = [],
+        items: [QueueEntry] = [],
         currentIndex: Int? = nil,
         isShuffled: Bool = false,
-        repeatMode: RepeatMode = .off,
-        savedAt: Date = Date()
+        repeatMode: QueueRepeatMode = .off,
+        savedAt: Date
     ) {
-        self.id = id
-        self.items = items
-        self.currentIndex = currentIndex
-        self.isShuffled = isShuffled
-        self.repeatMode = repeatMode
-        self.savedAt = savedAt
+        self.init(
+            id: id,
+            items: items,
+            currentIndex: currentIndex,
+            isShuffled: isShuffled,
+            repeatMode: repeatMode,
+            updatedAt: savedAt
+        )
         normalizeCurrentIndex()
     }
 
-    public var queueID: QueueID {
+    var savedAt: Date {
+        get { updatedAt }
+        set { updatedAt = newValue }
+    }
+
+    var queueID: QueueID {
         get { id }
         set { id = newValue }
     }
 
-    public var shuffleEnabled: Bool {
+    var shuffleEnabled: Bool {
         get { isShuffled }
         set { isShuffled = newValue }
     }
 
-    public var currentItem: QueueItem? {
+    var currentItem: QueueEntry? {
         guard let currentIndex, items.indices.contains(currentIndex) else {
             return nil
         }
         return items[currentIndex]
     }
 
-    public var isEmpty: Bool {
+    var isEmpty: Bool {
         items.isEmpty
     }
 
-    public mutating func normalizeCurrentIndex() {
+    mutating func normalizeCurrentIndex() {
         if items.isEmpty {
             currentIndex = nil
         } else if let currentIndex {

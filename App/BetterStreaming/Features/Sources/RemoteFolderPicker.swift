@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Live folder browser used during source setup: after host+credentials, walk
 /// the share with `RemoteFileSystemClient.list` and tap a folder to set the scan
-/// root (e.g. share "Swimming" → subfolder "Music"). Protocol-neutral.
+/// root (e.g. share "Media" -> subfolder "Music"). Protocol-neutral.
 struct RemoteFolderPicker: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss

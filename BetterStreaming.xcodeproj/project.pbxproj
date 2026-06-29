@@ -12,6 +12,7 @@
 		09CB91B7CE09CC0517254724 /* LibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */; };
 		0C2915DAA2525F4DC783977C /* PlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */; };
 		0E46E85BBB9BDEB1DE9A940F /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A775D9D0F736C93341DC053D /* LibraryView.swift */; };
+		18577502559950ADF1A0FE66 /* RadioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29D42752E6AB53570E3B5878 /* RadioView.swift */; };
 		2020D1F1D03AAD056E2AD787 /* MediaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EFDEF12E77AC32B75528948 /* MediaModels.swift */; };
 		2A1D01B9DDF371E2E9F977E4 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8C350CC799F81C777E77341 /* SettingsView.swift */; };
 		42C64E722C9F7E853D7EE8FF /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97CD9B642C6A08F1D3F191D1 /* KeychainStore.swift */; };
@@ -30,15 +31,18 @@
 		B2B7B0DB65F0764A38B82548 /* RemoteFolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00A7302EDD3F93DA32911E53 /* RemoteFolderPicker.swift */; };
 		B5EF5E4C1F9FD30C4AFC38FE /* OfflineLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B85309C80C8120BB0FA8C25C /* OfflineLibraryView.swift */; };
 		E48911A655044AA9A1559265 /* SourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCDF8CD62C0F29867A2D1AED /* SourcesView.swift */; };
+		F6101C021E0759D3CCCABFF8 /* RemoteStreamingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C7A56D464C46BD86F239E4F /* RemoteStreamingService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		00A7302EDD3F93DA32911E53 /* RemoteFolderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFolderPicker.swift; sourceTree = "<group>"; };
 		12E89289617B809FA95582A3 /* Artwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Artwork.swift; sourceTree = "<group>"; };
-		46FFD8508D86BB73EEB8878B /* BetterStreaming.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BetterStreaming.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		29D42752E6AB53570E3B5878 /* RadioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RadioView.swift; sourceTree = "<group>"; };
+		46FFD8508D86BB73EEB8878B /* BetterStreaming.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = BetterStreaming.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4C690EE398FFC66BC3A5A3DF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		584731D16BCF26BA499F4B56 /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
 		5BCC2D943C5605432057942E /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		5C7A56D464C46BD86F239E4F /* RemoteStreamingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStreamingService.swift; sourceTree = "<group>"; };
 		67EC9B69AFFE0B8D3BE8D13D /* MediaCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCells.swift; sourceTree = "<group>"; };
 		6A8917473AFA9BF5C2915EC1 /* MiniPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerView.swift; sourceTree = "<group>"; };
 		7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackEngine.swift; sourceTree = "<group>"; };
@@ -87,6 +91,7 @@
 				1BDF4B1650278615F0EB2838 /* Library */,
 				1788BF5360AE659948BA2FCD /* Onboarding */,
 				CFA566D0DF6B74A3E114C7B0 /* Player */,
+				432E59396EF71E9C53752431 /* Radio */,
 				392A7D74A84A60A971317813 /* Search */,
 				066449CB31010AE13A5F9319 /* Settings */,
 				5691373A13D5901C4A1BEAE0 /* Sources */,
@@ -136,6 +141,14 @@
 			path = Components;
 			sourceTree = "<group>";
 		};
+		432E59396EF71E9C53752431 /* Radio */ = {
+			isa = PBXGroup;
+			children = (
+				29D42752E6AB53570E3B5878 /* RadioView.swift */,
+			);
+			path = Radio;
+			sourceTree = "<group>";
+		};
 		507E774FA4E9E037F8C93C83 /* Packages */ = {
 			isa = PBXGroup;
 			children = (
@@ -170,6 +183,7 @@
 				97CD9B642C6A08F1D3F191D1 /* KeychainStore.swift */,
 				82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */,
 				7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */,
+				5C7A56D464C46BD86F239E4F /* RemoteStreamingService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -254,6 +268,8 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+				};
 			};
 			buildConfigurationList = B1E9C49C1168F95954498365 /* Build configuration list for PBXProject "BetterStreaming" */;
 			developmentRegion = en;
@@ -298,7 +314,9 @@
 				B5EF5E4C1F9FD30C4AFC38FE /* OfflineLibraryView.swift in Sources */,
 				64A40EC9D5D6E532D7798D5E /* OnboardingView.swift in Sources */,
 				0C2915DAA2525F4DC783977C /* PlaybackEngine.swift in Sources */,
+				18577502559950ADF1A0FE66 /* RadioView.swift in Sources */,
 				B2B7B0DB65F0764A38B82548 /* RemoteFolderPicker.swift in Sources */,
+				F6101C021E0759D3CCCABFF8 /* RemoteStreamingService.swift in Sources */,
 				4A1CB58C63D7D548EDD339CB /* RootTabView.swift in Sources */,
 				A0492B51E450CBEC029BD4BE /* SearchView.swift in Sources */,
 				2A1D01B9DDF371E2E9F977E4 /* SettingsView.swift in Sources */,
@@ -441,7 +459,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = 4HFQ952344;
 				INFOPLIST_FILE = App/BetterStreaming/Info.plist;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -462,7 +479,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = 4HFQ952344;
 				INFOPLIST_FILE = App/BetterStreaming/Info.plist;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;

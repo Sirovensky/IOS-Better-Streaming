@@ -15,6 +15,9 @@ struct TrackRowView: View {
 
     var body: some View {
         Button {
+            #if DEBUG
+            print("BETTERSTREAMING_UI track_tap title=\(track.title) ext=\(track.fileExtension) source=\(track.sourceID)")
+            #endif
             model.play(track, in: context)
         } label: {
             HStack(spacing: 12) {
@@ -101,13 +104,15 @@ struct TrackRowView: View {
                systemImage: model.isFavorite(track.id) ? "star.slash" : "star") {
             model.toggleFavorite(track.id)
         }
-        if model.cacheState(track.id) == .cached {
-            Button("Remove Download", systemImage: "trash", role: .destructive) {
-                model.removeDownload(track.id)
-            }
-        } else {
-            Button("Download", systemImage: "arrow.down.circle") {
-                model.download(track.id)
+        if model.canManageDownload(track.id) {
+            if model.cacheState(track.id) == .cached {
+                Button("Remove Download", systemImage: "trash", role: .destructive) {
+                    model.removeDownload(track.id)
+                }
+            } else {
+                Button("Download", systemImage: "arrow.down.circle") {
+                    model.download(track.id)
+                }
             }
         }
     }

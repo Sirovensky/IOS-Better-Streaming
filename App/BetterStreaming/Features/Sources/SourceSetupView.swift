@@ -1,3 +1,4 @@
+import BetterStreamingDomain
 import BetterStreamingSources
 import SwiftUI
 import UIKit

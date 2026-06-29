@@ -69,7 +69,12 @@ import MediaStore
             title: "Test Track",
             artist: "Artist",
             album: "Album",
+            genre: "Progressive Rock",
+            trackNumber: 7,
+            discNumber: 2,
             duration: 180,
+            artworkURL: URL(string: "file:///tmp/cover.jpg"),
+            isFavorite: true,
             playbackCapability: .cacheRequired
         )
     )
@@ -80,18 +85,65 @@ import MediaStore
             parentFolderID: firstFolder.id,
             mediaKind: .audio,
             fileName: "Track.mp3",
-            title: "Updated Track"
+            title: "Updated Track",
+            artist: "Artist",
+            album: "Album",
+            genre: "Progressive Rock",
+            trackNumber: 7,
+            discNumber: 2,
+            artworkURL: URL(string: "file:///tmp/cover.jpg"),
+            isFavorite: true
         )
     )
 
     #expect(secondMedia.id == firstMedia.id)
+    let storedMedia = try await store.mediaItem(id: firstMedia.id)
+    #expect(storedMedia?.genre == "Progressive Rock")
+    #expect(storedMedia?.trackNumber == 7)
+    #expect(storedMedia?.discNumber == 2)
+    #expect(storedMedia?.artworkURL?.path == "/tmp/cover.jpg")
+    #expect(storedMedia?.isFavorite == true)
 
     let children = try await store.children(of: firstFolder.id)
     #expect(children.folders.isEmpty)
     #expect(children.mediaItems.map(\.id) == [firstMedia.id])
 
-    let searchResult = try await store.search(LibrarySearchQuery(text: "updated", mediaKinds: [.audio]))
+    let searchResult = try await store.search(LibrarySearchQuery(text: "progressive", mediaKinds: [.audio]))
     #expect(searchResult.mediaItems.map(\.id) == [firstMedia.id])
+}
+
+@Test func mediaStoreCanBulkListReplaceAndDeleteMediaItems() async throws {
+    let store = MediaStore(configuration: .inMemory())
+    let firstSourceID = SourceID()
+    let secondSourceID = SourceID()
+    let shareID = ShareID()
+    let first = MediaItem(
+        identity: identity(sourceID: firstSourceID, shareID: shareID, path: "Music/First.flac", size: 1),
+        mediaKind: .audio,
+        fileName: "First.flac",
+        title: "First"
+    )
+    let second = MediaItem(
+        identity: identity(sourceID: secondSourceID, shareID: shareID, path: "Music/Second.flac", size: 2),
+        mediaKind: .audio,
+        fileName: "Second.flac",
+        title: "Second"
+    )
+    try await store.replaceAllMediaItems([first, second])
+    #expect(try await store.listMediaItems().count == 2)
+    #expect(try await store.listMediaItems(sourceID: firstSourceID).map(\.title) == ["First"])
+
+    let replacement = MediaItem(
+        identity: identity(sourceID: firstSourceID, shareID: shareID, path: "Music/Replaced.flac", size: 3),
+        mediaKind: .audio,
+        fileName: "Replaced.flac",
+        title: "Replaced"
+    )
+    try await store.replaceMediaItems([replacement], for: firstSourceID)
+    #expect(try await store.listMediaItems().compactMap(\.title).sorted() == ["Replaced", "Second"])
+
+    try await store.deleteMediaItems(sourceID: secondSourceID)
+    #expect(try await store.listMediaItems().compactMap(\.title) == ["Replaced"])
 }
 
 @Test func mediaStorePersistsPlaylistQueueCacheAndScanCheckpoint() async throws {
