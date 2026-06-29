@@ -16,17 +16,25 @@ Goal: Apple-Music/Spotify-quality player over the user's own SMB/WebDAV/FTP/SFTP
 
 ## CURRENT STATE — 2026-06-29 (read first)
 
-**Session focus:** streaming stall + scrub + a crash-loop. All landed on the device; user confirmed *"works so far."*
-
-**On device now** (`com.betterstreaming.app`):
+**Streaming (prior work) — on device, user-verified:**
 - ✅ **Silent scrub fixed** — serialize SMB ops per client (FIX 6). User-verified.
 - ✅ **Underrun-skip fixed** — `AVPlayerItem.preferredForwardBufferDuration = 10` (FIX 6 buffer). User-verified.
-- 🔄 **Rapid-scrub cushion** — post-seek pre-roll gate (FIX 7). Installed; *needs final user test* (2–3 scrubs in a row → short spinner → resume with ~5s buffered).
-- ✅ **Crash-loop fixed** — vendored SMBClient + bounds-checked `ByteReader` (FIX 8). Launch-verified on device: survives 25s of background SMB maintenance, no `EXC_BREAKPOINT`.
+- ✅ **Rapid-scrub cushion** — post-seek pre-roll gate (FIX 7). User-verified 2026-06-29 ("rapid scrub is good").
+- ✅ **Crash-loop fixed** — vendored SMBClient + bounds-checked `ByteReader` (FIX 8). Launch-verified on device.
 
 (Mechanisms: see ACTIVE BUG #1, FIX 1–8.)
 
-**Repo:** changes are **uncommitted / not pushed**. Touched: `Packages/SMBClient/` (NEW vendored pkg), `Packages/BetterStreamingCore/{Package.swift, Sources/SMBRemote/SMBRemoteClient.swift, Tests/…}`, `App/BetterStreaming/Services/PlaybackEngine.swift`, `App/BetterStreaming/AppModel.swift`. Commit as `Pavel`, no AI trailer; `git pull --rebase` first (Codex shares the repo).
+**This session (2026-06-29) — NEXT TASKS #2–#7 ALL IMPLEMENTED, UNBUILT (no Mac/toolchain on the agent box this time — needs a Mac build + device verify before commit):**
+- ✅ #2 Connection-leak fix — per-source cached stream+background `SMBRemoteClient`, disconnect on removal/background, artwork dedup, download per-chunk timeout.
+- ✅ #3 Artist tap in full player → pushes Artist screen (NavigationStack, no more modal sheet).
+- ✅ #4 Persist + restore last played song & position (UserDefaults snapshot; restores paused, lazy load).
+- ✅ #5 Home "pick up where you left off" stuck — fixed by persisting recents + playback (was falling back to `audioTracks.first`).
+- ✅ #6 Similar-station preview song now plays first (seed pinned to head).
+- ✅ #7 Album long-press context menu (Play/Play Next/Add to Queue/Download/Favorite/Go to Artist).
+
+See NEXT TASKS entries for per-item detail + file lists + what to VERIFY.
+
+**Repo:** the prior streaming work IS committed (`517b9fd`). This session's #2–#7 are **uncommitted / not pushed**. Touched: `Packages/BetterStreamingCore/Sources/{RemoteFileSystem/RemoteFileSystemClient.swift, SMBRemote/SMBRemoteClient.swift, BetterStreamingSources/SourceConnectionTesting.swift}`, `App/BetterStreaming/{AppModel.swift, BetterStreamingApp.swift, Services/{LibraryService.swift, PlaybackEngine.swift}, Features/Player/MiniPlayerView.swift, Features/Library/DetailViews.swift, Features/Home/HomeView.swift}`. Commit as `Pavel`, no AI trailer; `git pull --rebase` first (Codex shares the repo). **Build first — these were written without a compiler.**
 
 **Build note:** `Packages/SMBClient` is a local path dep now → after a DerivedData wipe, run `xcodebuild -resolvePackageDependencies` to COMPLETION before building (avoids the "Package.swift modified during build" race). Device build/install recipe: `scratchpad/devbuild_full.sh` (resolve → `xcodebuild build -scheme BetterStreaming -destination 'generic/platform=iOS' DEVELOPMENT_TEAM=4HFQ952344 CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates` → `devicectl device install app --device 45FD6187-17F8-527C-BC77-EE065C4FF1FA <app>`; pick the `.app` under `Build/Products/Debug-iphoneos`, **not** `Index.noindex`).
 
@@ -36,19 +44,24 @@ Goal: Apple-Music/Spotify-quality player over the user's own SMB/WebDAV/FTP/SFTP
 
 > Mirrored in the live task list (#7–#12). Streaming was heavily bug-hunted (62 findings / 124 verdicts captured); the highest-value confirmed follow-up is the connection leak (#9).
 
-1. **Verify rapid-scrub pre-roll** (test only). 2–3 fast scrubs → expect a brief spinner then resume with a real cushion. If still thin, raise `PlaybackEngine.prerollSeconds` (currently 5) and/or `preferredForwardBufferSeconds` (10).
+1. ✅ **Rapid-scrub pre-roll** — user-verified 2026-06-29.
 
-2. **Connection-leak fix (#9) — top auto-recovery gap, confirmed CRITICAL by bughunt.** `LibraryService.makeClient` builds a NEW `SMBRemoteClient` (TCP+NTLM+treeconnect) on EVERY call and never disconnects a healthy one — streaming, stat, each prefetch/auto-cache download, artwork per-album, and the artwork backfill (~hundreds of connects/run). Eventually exhausts the NAS session table → new connects hang → unrecoverable stall ("does not auto recover"). **Fix:** cache/reuse ONE `SMBRemoteClient` per `sourceID` in `LibraryService` (open once; reuse for resolve/scan/artwork/download); explicit `disconnect()` on source removal + app background; dedupe per-track artwork (`onTrackStarted` vs `loadArtwork`) and skip when art is already on disk; bound the backfill to one reused client. Also: `download()` still has no per-chunk timeout (a whole-file transfer can't use the 10s read timeout) → add a per-chunk timeout inside `LiveSMBRemoteTransport.download`.
+2. ✅ **Connection-leak fix (#9) — IMPLEMENTED 2026-06-29, UNBUILT (needs Mac build + device verify).** Was: `LibraryService.makeClient` built a NEW `SMBRemoteClient` (TCP+NTLM+treeconnect) on EVERY call, never disconnected — streaming, stat, each prefetch/auto-cache download, artwork per-album, backfill (~hundreds/run) → exhausts NAS session table → unrecoverable stall. **Fix landed:**
+   - **Per-source client cache, TWO clients per source** (`LibraryService.streamClients` + `backgroundClients`). `streamClient` serves `playableItem` (live reads) ONLY; `backgroundClient` serves scan + artwork + downloads. Split (not one shared) because `SMBRemoteClient.download` holds the per-client op-lock for the ENTIRE transfer — sharing one would stall the live stream during a prefetch download.
+   - **`disconnect()` added to `RemoteFileSystemClient`** (default no-op) + real impl on `SMBRemoteClient` (non-blocking socket teardown, lazy reconnect). Called on source removal (`removeSource`) and app background (`AppModel.enteredBackground` ← `scenePhase` in `BetterStreamingApp`; background clients only, stream kept for background audio). Also `SMBSourceConnectionTester` now disconnects its one-shot probe.
+   - **Artwork dedupe** (`LibraryService.albumArtworkURLCache` + in-flight `albumArtworkTasks`): coalesces the duplicate `onTrackStarted`+`loadArtwork`(+backfill) calls per albumID onto one remote fetch; session-caches the resolved cover URL. Cleared on rescan.
+   - **Download per-chunk timeout**: `LiveSMBRemoteTransport.download` now streams via the pooled `read(path:offset:length:)`, each chunk (+ the size probe) bounded by `SMBRemoteClient.withTimeout` (30s); `SMBRemoteClient.download` routes errors through `handleFailure` so a wedged download tears the connection down instead of holding the background op-lock forever. Mock-transport download test still drives `transport.download` (unchanged contract).
+   - **Files:** `RemoteFileSystem/RemoteFileSystemClient.swift`, `SMBRemote/SMBRemoteClient.swift`, `BetterStreamingSources/SourceConnectionTesting.swift`, `App/.../LibraryService.swift`, `App/.../AppModel.swift`, `App/.../BetterStreamingApp.swift`. **VERIFY:** build on Mac; device-test a long session (stream + skip + scrub + artwork backfill) does not accumulate NAS sessions / stall.
 
-3. **Artist tap in full player → push full Artist screen (#7).** In the Now-Playing/full player, tapping the artist opens a pop-up; it should push the full Artist screen (same destination the album-detail subtitle artist link already uses). Find the player view's artist label; route through the nav path to the existing Artist destination instead of a sheet/popover.
+3. ✅ **Artist tap in full player → push Artist screen (#7) — IMPLEMENTED 2026-06-29, UNBUILT.** `NowPlayingView` now wraps its content in a `NavigationStack(path:)` and reuses the shared `LibraryRoute` destinations (`.libraryDestinations()`): tapping the artist (and "Go to Album") PUSHES the real Artist/Album screen on top of Now Playing — Apple-Music style — instead of the old modal `.sheet`. Removed the `NowPlayingDetail` enum + `.sheet(item:)`; root nav bar hidden so the grabber stays the only chrome. File: `App/.../Features/Player/MiniPlayerView.swift`.
 
-4. **Persist + restore last played song & position (#11).** Save current track ID + `elapsed` (ideally the queue) durably so it survives exit / crash / OS-kill / update. Restore on launch: re-select track, seek to saved position, **paused** (no auto-play). Write periodically (reuse the 0.5s periodic time observer) AND on background/resign-active so a crash still recovers. Persist via MediaStore or UserDefaults. (Pairs with #12.)
+4. ✅ **Persist + restore last played song & position (#11) — IMPLEMENTED 2026-06-29, UNBUILT.** `AppModel` persists a `PlaybackSnapshot` (queue track IDs + index + elapsed + shuffle + repeat) to UserDefaults: throttled (≤1/5s) via a new `PlaybackEngine.onPlaybackTick` (the 0.5s observer), on track change (`notePlayed`), and forced on `enteredBackground` (survives OS-kill while suspended). On launch (after the saved library loads) `restorePlaybackIfNeeded` re-selects the track via new `PlaybackEngine.restore(...)`, which loads the queue **paused, no network I/O** (`needsInitialLoad` flag); the first resume/seek lazily resolves the item and seeks to the saved position. Lock-screen/mini-bar play → `resume()` → loads + resumes. Files: `PlaybackEngine.swift`, `AppModel.swift`. *(Note: full queue IDs saved each 5s — fine for normal queues; cap if huge queues appear.)*
 
-5. **Home "pick up where you left off" stuck on same song (#12).** That shelf always shows the SAME track instead of the real most-recent. Find the Home view's data source for it and bind to live recently-played/last-played state (ties into #11).
+5. ✅ **Home "pick up where you left off" stuck on same song (#12) — FIXED 2026-06-29 (with #4).** Root cause: `recentlyPlayedIDs` + playback state were in-memory only, so a fresh launch had no current track and an empty recents list → the hero fell back to `audioTracks.first` (always the same song). Now `recentlyPlayedIDs` is persisted (UserDefaults `recentlyPlayed.v1`, restored in `init`) and playback is restored (#4), so the hero shows the real last track and the Recently-Played rail shows real recents. Hero label now keys on `isPlaying` ("NOW PLAYING" vs "PICK UP WHERE YOU LEFT OFF").
 
-6. **Station preview song plays first (#8).** On similar/seed stations, selecting a station must start with the EXACT preview song shown on the tile, not a different first track. Make the displayed preview the head of the generated station queue, then continue.
+6. ✅ **Station preview song plays first (#8) — FIXED 2026-06-29, UNBUILT.** `playSimilarRadio` was calling `engine.playShuffled`, which reshuffled and dropped the previewed seed from the head. Now it pins the seed as the head and plays the rest shuffled (`setShuffle(true)` + `play([seed]+rest, startAt: 0)` — `shuffledQueue` keeps index 0 and shuffles only the tail), so the exact tile song plays first. Falls back to plain shuffle if the seed itself isn't playable (offline + uncached). File: `AppModel.swift`. (Artist/Genre tiles show no specific preview song, so they keep full shuffle.)
 
-7. **Album long-press context menu (#10).** Long-press an album cell → menu with Download (full album), Favorite/unfavorite, + adjacent actions (Play next, Add to queue, Go to artist). Wire to existing services via SwiftUI `.contextMenu`.
+7. ✅ **Album long-press context menu (#10) — IMPLEMENTED 2026-06-29, UNBUILT.** `AlbumGridCellStatic` (the album grid cell used by Library / Album+Artist detail / Search) now has a `.contextMenu`: Play, Play Next, Add to Queue, Download/Remove Download (hidden for local sources), Favorite/Unfavorite, Go to Artist. New album-level `AppModel` actions: `playAlbumNext` (inserts reversed to keep order), `addAlbumToQueue`, `downloadAlbum`/`removeAlbumDownloads` (+ `canManageAlbumDownload`/`albumHasDownloads`), `isAlbumFavorite`/`toggleAlbumFavorite` (all-tracks). "Go to Artist" uses a `NavigationLink(value: .artist)` — all 3 host views have `NavigationStack` + `.libraryDestinations()`. Files: `AppModel.swift`, `Features/Library/DetailViews.swift`. **VERIFY:** NavigationLink-in-contextMenu navigation on device (idiomatic but flaky historically); favorite is in-memory only (matches existing per-track `toggleFavorite` — not persisted).
 
 8. **Streaming hardening (lower, after #9):** SMB2 message-id validation in vendored `Connection`/`Session` (responses are matched by ordering only); `Connection.send` round-trip timeout; true cancellation of in-flight prefetch/download on track change.
 
@@ -87,7 +100,7 @@ Covers were blank because the whole art pipeline only read from a **local** file
 
 ### 3. Genre is messy → genre radios miss songs (NEW)
 Example: Amaranthe tracks are tagged inconsistently (rock / symphonic metal / heavy metal), so a "Heavy Metal" station misses some of their songs. Need genre **reconciliation/canonicalization**: alias/normalize genres (a hierarchy or alias map), and/or derive a per-artist consensus genre, so stations group sensibly. Also align `RadioView` genre grouping with `AppModel.tracks(forGenre:)` normalization. (Old "similar-to-seed picks unrelated genre" issue is downstream of this.)
-- **TODO (user): on similar/seed stations, the first song played must be the exact preview song shown on the station tile/card** — make the displayed preview track the head of the generated station queue, then continue with the rest.
+- Similar/seed stations now start with the exact preview song from the tile (done 2026-06-29 — see NEXT TASKS #6).
 
 ## METADATA (deep-dive findings from the live DB — RESCAN needed for fixes to apply)
 
@@ -103,13 +116,36 @@ Pulled `library.sqlite` (860 items). Findings + status:
 - **Multi-artist credits.** Artist string is parsed into individual artists ("David Guetta feat. will.i.am & apl.de.ap" → 3). Each track is cross-listed under **every** credited artist (featured artist gets the song on their page); the album stays under the **primary** (first) artist. Artists list = one entry per individual. `artistID` = primary. **Caveat:** splits band names containing `&`/`,`/`vs.`/`x` (Above & Beyond, Earth Wind & Fire) — accepted default for a collab-heavy library; add a known-band exception list later if needed.
 - **Album display artist** = shared primary, else "Various Artists".
 - **recentlyAddedAlbums** now date-ordered with real trackCount + consensus artist.
-- **Artist tap-through:** album-detail subtitle links to the artist. **TODO this session:** make the Now-Playing (full player) artist clickable too.
+- **Artist tap-through:** album-detail subtitle links to the artist. Now-Playing (full player) artist also pushes the Artist screen (done 2026-06-29 — see NEXT TASKS #3).
 
 ## HOME SCREEN (NEW)
 
 - "Made For You" playlist is **empty** (nothing pre-populated) — populate it or remove it.
 - **Remove "Recently Added"** from Home.
 - Add **fun read-only stats** (total listened time, library info, counts) — NOT settings, no setup prompts; just delightful info.
+
+## BUGHUNT 2026-06-29 (3 Opus agents, whole-app re-verify of #2–#7)
+
+Verdict: #2–#7 confirmed correct as written (no Swift-6/actor/deadlock/reentrancy errors; #6 seed-pin provably lands at index 0; #3 nav restructure sound). Real bugs found → **FIXED this session (unbuilt):**
+- HIGH: source health stayed `.asleep` after a cold launch (only a scan set `.online`), silently disabling prefetch + auto-cache until manual rescan → now `onTrackStarted` marks the source `.online` (`AppModel`).
+- HIGH: favorites never persisted (in-memory only) → new `LibraryService.setFavorite` upsert, called from `toggleFavorite` + `toggleAlbumFavorite`.
+- MED: SMB `download` could truncate (short/empty read) and cache a corrupt track → `guard offset >= total` + `total > 0` (`SMBRemoteClient`).
+- MED: `listFolders` leaked a client per browse → `disconnect()` on exit. SFTP `disconnect()` was a no-op (default) → implemented (`SFTPRemoteClient`).
+- MED: won't resume after a phone-call/Siri interruption (session not reactivated) → `setActive(true)` before `resume()` on `.ended`.
+- MED: `restorePlaybackIfNeeded` carried stale elapsed onto the head track when the saved track was gone → resets elapsed to 0.
+- MED: `playAlbumNext` on an empty queue started on the album's LAST track → plays in order when queue empty.
+- MED: "Go to Artist" used a `NavigationLink` inside `.contextMenu` (dead on iOS — detached platter) → now a path-mutating `Button`, wired in Library + Search.
+- LOW: restore-seek clamped to 0 when duration unknown; `removeFromQueue` didn't update `unshuffledQueue`; `moveQueueItem`/`setShuffle` matched current track by full-struct equality → match by id.
+
+**Deferred (real, lower-impact / pre-existing — NOT yet done):**
+- "Go to Artist" is hidden on the **AllAlbums** grid + detail grids (those hosts don't own a nav path). Thread a path via `libraryDestinations` or an environment nav-action to enable it there.
+- Stall-recovery re-fires `onTrackStarted` (new generation) → `recordPlay` double-counts playCount, skewing Heavy Rotation. Guard by track id, not generation.
+- `repeatMode == .one` at last index: `hasNext` true but `next()` stops; repeat-one loop runs `beginPreroll` (stutter) + a dead synchronous `play()`.
+- `prefetchNextIfNeeded` doesn't wrap to index 0 at end+`.all` (wrap skip not instant).
+- `downloadAlbum` spawns one unbounded Task per track (serialized by the background op-lock now, so low impact) — batch it.
+- Dead `toggleFavoriteOnCurrent` in the engine (no callers) — remove.
+- Connect-timeout-then-success leaks the transport (no deinit/disconnect); `handleEnteredBackground` doesn't cancel an in-flight scan (it reconnects + may skip a folder); removing a source mid-stream lets the live session revive the connection.
+- Metadata (LOW, pre-existing): `creditedArtists` keeps bracketed contents → fragments "Artist (Live)" into extra artist IDs; TPE2/ALBUMARTIST can override TPE1 performer via `??` (pollutes grouping); ID3 header flags byte ignored (unsync/extended-header tags get no embedded metadata).
 
 ## ROUND-2 ROBUSTNESS (from the adversarial bughunt; not yet done)
 

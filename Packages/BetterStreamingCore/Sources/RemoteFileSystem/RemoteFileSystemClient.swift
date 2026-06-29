@@ -106,6 +106,14 @@ public protocol RemoteFileSystemClient: Sendable {
     func stat(_ path: RemotePath) async throws -> RemoteMetadata
     func read(_ path: RemotePath, range: Range<Int64>) async throws -> Data
     func download(_ path: RemotePath, to localURL: URL, progress: ProgressSink?) async throws
+    /// Tear down any cached connection without blocking, so the underlying
+    /// session is released back to the server. Idempotent; the client lazily
+    /// reconnects on the next operation. Default no-op for stateless clients.
+    func disconnect() async
+}
+
+public extension RemoteFileSystemClient {
+    func disconnect() async {}
 }
 
 public extension RemotePath {

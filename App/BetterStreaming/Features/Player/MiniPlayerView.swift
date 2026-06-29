@@ -136,11 +136,21 @@ struct NowPlayingView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var showQueue = false
-    @State private var detail: NowPlayingDetail?
+    /// Pushes the artist/album screen ON TOP of Now Playing (like Apple Music),
+    /// reusing the shared `LibraryRoute` destinations — not a modal sheet.
+    @State private var path: [LibraryRoute] = []
 
     private var engine: PlaybackEngine { model.engine }
 
     var body: some View {
+        NavigationStack(path: $path) {
+            playerContent
+                .toolbar(.hidden, for: .navigationBar)
+                .libraryDestinations()
+        }
+    }
+
+    private var playerContent: some View {
         GeometryReader { proxy in
             let artSize = min(proxy.size.width - 56, proxy.size.height * 0.42)
             ZStack {
@@ -201,16 +211,6 @@ struct NowPlayingView: View {
                 .environment(model)
                 .presentationDetents([.large, .medium])
                 .presentationDragIndicator(.visible)
-        }
-        .sheet(item: $detail) { item in
-            NavigationStack {
-                switch item {
-                case .album(let id): AlbumDetailView(albumID: id)
-                case .artist(let id): ArtistDetailView(artistID: id)
-                }
-            }
-            .libraryDestinations()
-            .environment(model)
         }
     }
 
@@ -273,7 +273,7 @@ struct NowPlayingView: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
                 Button {
-                    detail = .artist(track.artistID)
+                    path.append(.artist(track.artistID))
                 } label: {
                     Text(track.artist)
                         .font(.title3)
@@ -315,7 +315,7 @@ struct NowPlayingView: View {
                 Button("Download", systemImage: "arrow.down.circle") { model.download(track.id) }
             }
         }
-        Button("Go to Album", systemImage: "square.stack") { detail = .album(track.albumID) }
+        Button("Go to Album", systemImage: "square.stack") { path.append(.album(track.albumID)) }
         Button("View Queue", systemImage: "list.bullet") { showQueue = true }
         Menu("Sleep Timer", systemImage: model.sleepTimerArmed ? "moon.zzz.fill" : "moon.zzz") {
             if model.sleepTimerArmed {
@@ -407,17 +407,6 @@ struct NowPlayingView: View {
 }
 
 // MARK: - Playing Next (queue) sheet
-
-enum NowPlayingDetail: Identifiable {
-    case album(String)
-    case artist(String)
-    var id: String {
-        switch self {
-        case .album(let s): "album-\(s)"
-        case .artist(let s): "artist-\(s)"
-        }
-    }
-}
 
 struct NowPlayingQueueView: View {
     @Environment(AppModel.self) private var model

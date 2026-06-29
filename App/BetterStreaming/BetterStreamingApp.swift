@@ -30,12 +30,16 @@ struct BetterStreamingApp: App {
 
 private struct LaunchRootView: View {
     @State private var model: AppModel?
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
             if let model {
                 RootTabView()
                     .environment(model)
+                    .onChange(of: scenePhase) { _, phase in
+                        if phase == .background { model.enteredBackground() }
+                    }
             } else {
                 VStack(spacing: 14) {
                     Image(systemName: "music.note.house.fill")

@@ -464,7 +464,7 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
     /// in an UNSTRUCTURED task so that, on timeout, this function returns while
     /// the op is left to unwind on its own once its transport is torn down — a
     /// structured `TaskGroup` would instead block here awaiting the hung child.
-    private static func withTimeout<T: Sendable>(
+    fileprivate static func withTimeout<T: Sendable>(
         _ nanoseconds: UInt64,
         _ op: @escaping @Sendable () async throws -> T
     ) async throws -> T {
@@ -488,16 +488,34 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
     public func download(_ path: RemotePath, to localURL: URL, progress: ProgressSink?) async throws {
         await acquireOpLock()
         defer { releaseOpLock() }
+        var used: (any SMBRemoteTransport)?
         do {
             let transport = try await activeTransport()
+            used = transport
             try await transport.download(
                 path: SMBPathFormatter.smbPath(from: path),
                 to: localURL,
                 progress: progress
             )
         } catch {
-            throw Self.remoteFileSystemError(from: error, path: path)
+            // Same orphan-and-reconnect as reads: a wedged chunk (the transport
+            // bounds each chunk read with `withTimeout`) surfaces as `.timeout`,
+            // which tears down this connection so the next op reconnects — and so
+            // a hung download can't hold the op-lock (and the whole background
+            // connection) forever.
+            try handleFailure(error, path: path, transport: used)
         }
+    }
+
+    /// Tear down the cached connection without blocking (no graceful SMB
+    /// logoff/close — those would hang on a wedged connection). Idempotent; the
+    /// next operation reconnects on a fresh transport. Frees the server-side
+    /// session, which is what stops a long-lived app from exhausting the NAS
+    /// session table.
+    public func disconnect() async {
+        guard let current = transport else { return }
+        transport = nil
+        current.disconnect()
     }
 
     public func testConnection() async -> SMBConnectionTestResult {
@@ -665,6 +683,12 @@ private final class LiveSMBRemoteTransport: @unchecked Sendable, SMBRemoteTransp
     /// is in flight on it (would be a use-after-close → connection-buffer desync).
     private var inUse: [String: Int] = [:]
     private static let maxPooledReaders = 4
+    /// Wall-clock ceiling for a single download chunk read. A whole-file download
+    /// can't reuse the per-op read timeout (it's one op holding the lock for the
+    /// entire transfer), so each 1 MB chunk is bounded here. Generous so a slow-
+    /// but-alive link isn't cut off; a genuinely wedged receive trips it and the
+    /// client tears the connection down. 30s ≫ the time a 1 MB chunk needs.
+    private static let downloadChunkTimeoutNanos: UInt64 = 30_000_000_000
 
     private init(client: SMBClient) {
         self.client = client
@@ -809,47 +833,50 @@ private final class LiveSMBRemoteTransport: @unchecked Sendable, SMBRemoteTransp
     }
 
     func download(path: String, to localURL: URL, progress: ProgressSink?) async throws {
-        let reader = client.fileReader(path: path)
-        do {
-            let totalBytes = try await reader.fileSize
-            let fileManager = FileManager.default
-            let directoryURL = localURL.deletingLastPathComponent()
-            try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-            if fileManager.fileExists(atPath: localURL.path) {
-                try fileManager.removeItem(at: localURL)
-            }
-            fileManager.createFile(atPath: localURL.path, contents: nil)
-            guard let fileHandle = FileHandle(forWritingAtPath: localURL.path) else {
-                throw URLError(.cannotWriteToFile)
-            }
-            defer {
-                try? fileHandle.close()
-            }
-
-            var offset: UInt64 = 0
-            let chunkSize: UInt32 = 1_048_576
-            while offset < totalBytes {
-                let remaining = min(UInt64(chunkSize), totalBytes - offset)
-                let data = try await reader.read(offset: offset, length: UInt32(remaining))
-                if data.isEmpty {
-                    break
-                }
-                try fileHandle.write(contentsOf: data)
-                offset += UInt64(data.count)
-                await progress?(TransferProgress(
-                    completedBytes: Int64.clamping(offset),
-                    totalBytes: Int64.clamping(totalBytes)
-                ))
-            }
-            await progress?(TransferProgress(
-                completedBytes: Int64.clamping(offset),
-                totalBytes: Int64.clamping(totalBytes)
-            ))
-            try await reader.close()
-        } catch {
-            try? await reader.close()
-            throw error
+        // Stream chunks through the pooled `read(path:offset:length:)`. Each chunk
+        // (and the size probe) is bounded by `withTimeout`: a whole-file download
+        // is one op holding the lock for the entire transfer, so it can't reuse
+        // the per-op read timeout. Reads go through `self` (`@unchecked Sendable`)
+        // with value-type args so nothing non-`Sendable` (the `FileReader`)
+        // crosses the timeout's task.
+        let total = try await SMBRemoteClient.withTimeout(Self.downloadChunkTimeoutNanos) { [self] in
+            try await self.metadata(path: path).size ?? 0
         }
+        // A nil/zero size would otherwise write an empty file and report success,
+        // which `playableURL` then caches as a "complete" download → unplayable.
+        guard total > 0 else { throw RemoteFileSystemError.invalidResponse }
+
+        let fileManager = FileManager.default
+        let directoryURL = localURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        if fileManager.fileExists(atPath: localURL.path) {
+            try fileManager.removeItem(at: localURL)
+        }
+        fileManager.createFile(atPath: localURL.path, contents: nil)
+        guard let fileHandle = FileHandle(forWritingAtPath: localURL.path) else {
+            throw URLError(.cannotWriteToFile)
+        }
+        defer { try? fileHandle.close() }
+
+        var offset: Int64 = 0
+        let chunkSize: Int64 = 1_048_576
+        while offset < total {
+            let remaining = min(chunkSize, total - offset)
+            let readOffset = offset
+            let data = try await SMBRemoteClient.withTimeout(Self.downloadChunkTimeoutNanos) { [self] in
+                try await self.read(path: path, offset: readOffset, length: remaining)
+            }
+            if data.isEmpty { break }
+            try fileHandle.write(contentsOf: data)
+            offset += Int64(data.count)
+            await progress?(TransferProgress(completedBytes: offset, totalBytes: total))
+        }
+        // A short/empty read before EOF (e.g. a zero-filled bad frame from the
+        // bounds-checked ByteReader) would otherwise truncate the file and report
+        // success → a corrupt track cached as "complete" and never re-fetched.
+        // Treat it as a connection failure so the caller discards the partial.
+        guard offset >= total else { throw RemoteFileSystemError.serverDisconnected }
+        await progress?(TransferProgress(completedBytes: offset, totalBytes: total))
     }
 
     func disconnect() {

@@ -80,6 +80,23 @@ actor LibraryService {
     private var sessionPasswords: [String: String] = [:]
     /// Resolved + security-scope-accessing folder URLs for local sources, by id.
     private var localRoots: [String: URL] = [:]
+    /// Cached remote clients per sourceID. Building a client is a full
+    /// TCP+auth+tree-connect and was previously done on EVERY resolve/stat/
+    /// download/artwork call and never torn down — over a session that floods the
+    /// server's session table until new connects hang ("does not auto recover").
+    /// We keep TWO per source so a whole-file background download (which holds the
+    /// client's single op-lock for the entire transfer) can't stall the live
+    /// stream: `streamClients` serves playback reads only; `backgroundClients`
+    /// serves scan, artwork, and downloads. Torn down on source removal and app
+    /// background; each lazily reconnects on its next use.
+    private var streamClients: [String: any RemoteFileSystemClient] = [:]
+    private var backgroundClients: [String: any RemoteFileSystemClient] = [:]
+    /// Album covers resolved from the remote this session (albumID → on-disk URL),
+    /// plus in-flight resolutions, so the duplicate `onTrackStarted` +
+    /// `loadArtwork` calls for a just-started track (and the backfill) don't each
+    /// re-list the folder and re-read embedded art for the same album.
+    private var albumArtworkURLCache: [String: URL] = [:]
+    private var albumArtworkTasks: [String: Task<URL?, Never>] = [:]
 
     init() {
         let fm = FileManager.default
@@ -180,6 +197,7 @@ actor LibraryService {
 
     func removeSource(_ id: String) async {
         await loadLibraryFromDiskIfNeeded()
+        await disconnectClients(for: id)
         if let url = localRoots[id] {
             url.stopAccessingSecurityScopedResource()
             localRoots[id] = nil
@@ -221,7 +239,7 @@ actor LibraryService {
             return allTracks
         }
 
-        guard let client = makeClient(cfg) else {
+        guard let client = backgroundClient(for: cfg) else {
             throw LibraryError(kind: .other, message: "This source is missing connection details.")
         }
 
@@ -251,6 +269,7 @@ actor LibraryService {
             uniquingKeysWith: { first, _ in first }
         )
         attemptedArtworkAlbumIDs.removeAll()   // re-attempt covers after a scan
+        albumArtworkURLCache.removeAll()       // files may have changed; re-resolve
 
         let classifier = MediaFileClassifier()
         var scanned: [Track] = []
@@ -530,7 +549,7 @@ actor LibraryService {
         }
         if offline { return nil }
         guard let cfg = configs.first(where: { $0.id == track.sourceID }),
-              let client = makeClient(cfg) else {
+              let client = streamClient(for: cfg) else {
             let hasConfig = configs.contains(where: { $0.id == track.sourceID })
             streamLog.error("resolve no_client title=\(track.title, privacy: .public) hasConfig=\(hasConfig)")
             return nil
@@ -591,7 +610,7 @@ actor LibraryService {
         if let local = cachedFileURLIfPresent(for: track) { return local }
         if offline { return nil }
         guard let cfg = configs.first(where: { $0.id == track.sourceID }),
-              let client = makeClient(cfg) else { return nil }
+              let client = backgroundClient(for: cfg) else { return nil }
 
         let identity = remoteIdentity(for: track, cfg: cfg)
         let local = cacheFileURL(for: track)
@@ -729,11 +748,30 @@ actor LibraryService {
     /// what lets streamed tracks show art and lets the library backfill covers
     /// that an older scan never extracted (no full rescan needed).
     func remoteAlbumArtwork(for track: Track) async -> URL? {
+        let albumID = track.albumID
+        // Reuse a cover already resolved this session for the album.
+        if let url = albumArtworkURLCache[albumID] {
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+            albumArtworkURLCache[albumID] = nil
+        }
+        // Coalesce duplicate concurrent requests for the same album (the
+        // just-started track triggers both `onTrackStarted` and `loadArtwork`,
+        // and the backfill may target the same album) onto one remote fetch.
+        if let task = albumArtworkTasks[albumID] { return await task.value }
+        let task = Task { await self.computeRemoteAlbumArtwork(for: track) }
+        albumArtworkTasks[albumID] = task
+        let url = await task.value
+        albumArtworkTasks[albumID] = nil
+        if let url { albumArtworkURLCache[albumID] = url }
+        return url
+    }
+
+    private func computeRemoteAlbumArtwork(for track: Track) async -> URL? {
         loadConfigsFromDiskIfNeeded()
         if let local = await cacheAlbumArtwork(for: track) { return local }
         guard let cfg = configs.first(where: { $0.id == track.sourceID }),
               cfg.proto != SourceProtocol.local.rawValue,
-              let client = makeClient(cfg),
+              let client = backgroundClient(for: cfg),
               let remote = track.remotePath, !remote.isEmpty else { return nil }
         let path = RemotePath(displayPath: remote)
         let ext = (remote as NSString).pathExtension
@@ -810,6 +848,15 @@ actor LibraryService {
               let i = allTracks.firstIndex(where: { $0.id == id }),
               abs(allTracks[i].durationSeconds - seconds) > 0.5 else { return }
         allTracks[i].durationSeconds = seconds
+        _ = try? await mediaStore.upsertMediaItems([mediaItem(from: allTracks[i])])
+    }
+
+    /// Persist a favorite toggle so it survives relaunch (a tag-only rescan would
+    /// otherwise rebuild from remote and lose it). Upserts by identity.
+    func setFavorite(_ isFavorite: Bool, forTrack id: String) async {
+        guard let i = allTracks.firstIndex(where: { $0.id == id }),
+              allTracks[i].isFavorite != isFavorite else { return }
+        allTracks[i].isFavorite = isFavorite
         _ = try? await mediaStore.upsertMediaItems([mediaItem(from: allTracks[i])])
     }
 
@@ -949,6 +996,42 @@ actor LibraryService {
         )
     }
 
+    /// The dedicated playback-stream client for a source (cached + reused). Used
+    /// only by `playableItem` so live reads never queue behind a background
+    /// download holding the connection's op-lock.
+    private func streamClient(for cfg: SourceConfig) -> (any RemoteFileSystemClient)? {
+        if let client = streamClients[cfg.id] { return client }
+        guard let client = makeClient(cfg) else { return nil }
+        streamClients[cfg.id] = client
+        return client
+    }
+
+    /// The shared background client for a source (cached + reused) — scan,
+    /// artwork, and full-file downloads. One connection for all background work,
+    /// kept off the streaming connection.
+    private func backgroundClient(for cfg: SourceConfig) -> (any RemoteFileSystemClient)? {
+        if let client = backgroundClients[cfg.id] { return client }
+        guard let client = makeClient(cfg) else { return nil }
+        backgroundClients[cfg.id] = client
+        return client
+    }
+
+    /// Tear down every cached connection for a source (non-blocking). The clients
+    /// reconnect lazily on next use.
+    private func disconnectClients(for sourceID: String) async {
+        if let client = streamClients.removeValue(forKey: sourceID) { await client.disconnect() }
+        if let client = backgroundClients.removeValue(forKey: sourceID) { await client.disconnect() }
+    }
+
+    /// Drop the background connections when the app is backgrounded so idle
+    /// scan/artwork/download sessions are returned to the server. Stream clients
+    /// are kept: audio keeps playing in the background. They reconnect lazily.
+    func handleEnteredBackground() async {
+        let clients = Array(backgroundClients.values)
+        backgroundClients.removeAll()
+        for client in clients { await client.disconnect() }
+    }
+
     /// Pure client factory shared by scanning and the transient folder browser.
     nonisolated static func buildClient(
         proto: String, host: String, port: Int, share: String,
@@ -1003,6 +1086,9 @@ actor LibraryService {
         ) else {
             return .failure(LibraryError(kind: .other, message: "This protocol can’t be browsed yet."))
         }
+        // Transient, per-browse client — tear its session down on the way out so
+        // repeated folder browsing during setup doesn't leak server sessions.
+        defer { Task { await client.disconnect() } }
         do {
             let entries = try await client.list(RemotePath(displayPath: path.isEmpty ? "/" : path))
             let folders = entries

@@ -48,9 +48,77 @@ final class AppModel {
     init() {
         offlineMode = UserDefaults.standard.bool(forKey: "offlineMode.v1")
         hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "onboarded.v1")
+        recentlyPlayedIDs = UserDefaults.standard.stringArray(forKey: Self.recentlyPlayedKey) ?? []
         wireEngine()
         wireAutoCache()
         Task { await bootstrap() }
+    }
+
+    // MARK: Persisted playback state
+
+    private static let recentlyPlayedKey = "recentlyPlayed.v1"
+    private static let playbackSnapshotKey = "playback.snapshot.v1"
+    /// Last on-disk save of the playback position, for throttling the 0.5s tick.
+    private var lastSnapshotSave = Date.distantPast
+
+    /// Durable enough to survive exit / crash / OS-kill / update: the live queue,
+    /// the current index, and the elapsed seconds.
+    private struct PlaybackSnapshot: Codable {
+        var queueIDs: [String]
+        var index: Int
+        var elapsed: Double
+        var shuffle: Bool
+        var repeatMode: String
+    }
+
+    /// Persist the current queue + position. `throttled` saves at most every 5s
+    /// (called from the engine's 0.5s tick); pass `false` to force a save (track
+    /// change, app background).
+    private func savePlaybackSnapshot(throttled: Bool) {
+        if throttled {
+            let now = Date()
+            guard now.timeIntervalSince(lastSnapshotSave) >= 5 else { return }
+            lastSnapshotSave = now
+        }
+        let queue = engine.queue
+        guard !queue.isEmpty, queue.indices.contains(engine.currentIndex) else {
+            UserDefaults.standard.removeObject(forKey: Self.playbackSnapshotKey)
+            return
+        }
+        let snapshot = PlaybackSnapshot(
+            queueIDs: queue.map(\.id),
+            index: engine.currentIndex,
+            elapsed: engine.elapsed,
+            shuffle: engine.shuffleEnabled,
+            repeatMode: engine.repeatMode.rawValue
+        )
+        if let data = try? JSONEncoder().encode(snapshot) {
+            UserDefaults.standard.set(data, forKey: Self.playbackSnapshotKey)
+        }
+    }
+
+    /// Restore the last session's queue + position into the engine, PAUSED and
+    /// without resolving any audio (the first play/seek loads it). No-op if
+    /// something is already loaded or the saved tracks are gone.
+    private func restorePlaybackIfNeeded() {
+        guard engine.currentTrack == nil,
+              let data = UserDefaults.standard.data(forKey: Self.playbackSnapshotKey),
+              let snapshot = try? JSONDecoder().decode(PlaybackSnapshot.self, from: data) else { return }
+        let queue = tracks(snapshot.queueIDs)
+        guard !queue.isEmpty else { return }
+        // The library may have changed; re-find the saved track in the restored
+        // (possibly shorter) queue, else start at the head.
+        let savedID = snapshot.queueIDs.indices.contains(snapshot.index) ? snapshot.queueIDs[snapshot.index] : nil
+        let foundIndex = savedID.flatMap { id in queue.firstIndex { $0.id == id } }
+        // If the exact saved track is gone, start the surviving queue at its head
+        // from 0 — don't carry the old track's elapsed onto a different song.
+        engine.restore(
+            queue: queue,
+            index: foundIndex ?? 0,
+            elapsed: foundIndex != nil ? snapshot.elapsed : 0,
+            shuffle: snapshot.shuffle,
+            repeatMode: RepeatMode(rawValue: snapshot.repeatMode) ?? .off
+        )
     }
 
     // MARK: Bootstrap / scan
@@ -117,6 +185,7 @@ final class AppModel {
             self.rebuildIndex()
             self.rebuildSources()
             self.isLoadingSavedLibrary = false
+            self.restorePlaybackIfNeeded()   // re-select last track, paused at saved position
             self.reconcileAutoCache()
             self.backfillArtwork()
 
@@ -259,6 +328,15 @@ final class AppModel {
         tracks.removeAll { $0.sourceID == id }
         rebuildIndex()
         rebuildSources()
+    }
+
+    /// App moved to the background: tear down idle background (scan/artwork/
+    /// download) connections so the server's session table is freed. The stream
+    /// connection is kept so background audio keeps playing; it and any torn-down
+    /// background client reconnect lazily on next use.
+    func enteredBackground() {
+        savePlaybackSnapshot(throttled: false)   // survive an OS-kill while suspended
+        Task { await library.handleEnteredBackground() }
     }
 
     private func rebuildSources() {
@@ -539,7 +617,16 @@ final class AppModel {
     func playSimilarRadio(seed: Track) {
         let list = playableContext(similarTracks(to: seed))
         guard !list.isEmpty else { return }
-        engine.playShuffled(list)
+        // The tile shows `seed` as the preview — it must be the FIRST track played.
+        // Pin it to the head and let the rest play shuffled (radio feel): with
+        // shuffle on, `play(startAt: 0)` keeps index 0 and shuffles only the tail.
+        guard list.contains(where: { $0.id == seed.id }) else {
+            engine.playShuffled(list)   // seed not playable (offline + uncached)
+            return
+        }
+        let rest = list.filter { $0.id != seed.id }
+        engine.setShuffle(true)
+        engine.play([seed] + rest, startAt: 0)
     }
 
     // MARK: Sleep timer
@@ -618,7 +705,9 @@ final class AppModel {
 
     func toggleFavorite(_ id: String) {
         guard let i = trackIndex[id] else { return }
-        tracks[i].isFavorite.toggle()
+        let value = !tracks[i].isFavorite
+        tracks[i].isFavorite = value
+        Task { await library.setFavorite(value, forTrack: id) }
         reconcileAutoCache()
     }
 
@@ -647,6 +736,70 @@ final class AppModel {
     }
 
     func toggleOfflineMode() { offlineMode.toggle() }
+
+    // MARK: Album-level actions (long-press context menu)
+
+    /// Insert the whole album right after the current track, in album order.
+    func playAlbumNext(_ albumID: String) {
+        let album = tracks(forAlbum: albumID)
+        guard !album.isEmpty else { return }
+        // On an empty queue the first `playNext` auto-starts playback, which with
+        // the reversed feed would start on the album's LAST track — just play it
+        // in order instead.
+        if engine.queue.isEmpty {
+            engine.setShuffle(false)
+            engine.play(album, startAt: 0)
+            return
+        }
+        // playNext inserts at currentIndex+1, so feed reversed to keep order.
+        for track in album.reversed() { engine.playNext(track) }
+    }
+
+    /// Append the whole album to the end of the queue, in album order.
+    func addAlbumToQueue(_ albumID: String) {
+        for track in tracks(forAlbum: albumID) { engine.addToQueue(track) }
+    }
+
+    /// A remote album (at least one track can be downloaded/pinned).
+    func canManageAlbumDownload(_ albumID: String) -> Bool {
+        tracks(forAlbum: albumID).contains { canManageDownload($0.id) }
+    }
+
+    /// At least one album track is already on disk (pinned or auto-cached).
+    func albumHasDownloads(_ albumID: String) -> Bool {
+        tracks(forAlbum: albumID).contains {
+            $0.cacheState == .cached || $0.cacheState == .prefetched
+        }
+    }
+
+    func downloadAlbum(_ albumID: String) {
+        for track in tracks(forAlbum: albumID) where canManageDownload(track.id) {
+            download(track.id)
+        }
+    }
+
+    func removeAlbumDownloads(_ albumID: String) {
+        for track in tracks(forAlbum: albumID) where canManageDownload(track.id) {
+            removeDownload(track.id)
+        }
+    }
+
+    /// An album is "favorite" when every track is favorited; toggling sets them all.
+    func isAlbumFavorite(_ albumID: String) -> Bool {
+        let albumTracks = tracks(forAlbum: albumID)
+        return !albumTracks.isEmpty && albumTracks.allSatisfy(\.isFavorite)
+    }
+
+    func toggleAlbumFavorite(_ albumID: String) {
+        let makeFavorite = !isAlbumFavorite(albumID)
+        for track in tracks(forAlbum: albumID) {
+            guard let i = trackIndex[track.id] else { continue }
+            tracks[i].isFavorite = makeFavorite
+            let id = track.id
+            Task { await library.setFavorite(makeFavorite, forTrack: id) }
+        }
+        reconcileAutoCache()
+    }
 
     // MARK: Search
 
@@ -693,8 +846,19 @@ final class AppModel {
             self.tracks[i].durationSeconds = seconds
             Task { await self.library.setDuration(seconds, forTrack: id) }
         }
+        engine.onPlaybackTick = { [weak self] in
+            self?.savePlaybackSnapshot(throttled: true)
+        }
         engine.onTrackStarted = { [weak self] track in
             guard let self else { return }
+            // A track that actually started playing proves its source is
+            // reachable. Without this, a cold launch (restore + play, no rescan)
+            // leaves every source `.asleep`, which silently disables prefetch and
+            // auto-cache until the user manually rescans.
+            if self.sourceHealth[track.sourceID] != .online {
+                self.sourceHealth[track.sourceID] = .online
+                self.rebuildSources()
+            }
             self.notePlayed(track.id)
             self.prefetchNextIfNeeded()
             Task {
@@ -754,6 +918,8 @@ final class AppModel {
         recentlyPlayedIDs.removeAll { $0 == id }
         recentlyPlayedIDs.insert(id, at: 0)
         if recentlyPlayedIDs.count > 40 { recentlyPlayedIDs.removeLast() }
+        UserDefaults.standard.set(recentlyPlayedIDs, forKey: Self.recentlyPlayedKey)
+        savePlaybackSnapshot(throttled: false)   // capture the new current track
         autoCache.recordPlay(id)
         reconcileAutoCache()
     }

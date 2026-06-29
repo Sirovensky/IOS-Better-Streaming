@@ -60,7 +60,7 @@ struct SearchView: View {
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 18) {
                         ForEach(matchingAlbums) { album in
                             NavigationLink(value: LibraryRoute.album(album.id)) {
-                                AlbumGridCellStatic(album: album)
+                                AlbumGridCellStatic(album: album, goToArtist: { path.append(.artist($0)) })
                             }
                             .buttonStyle(.plain)
                         }

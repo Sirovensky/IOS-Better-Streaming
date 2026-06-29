@@ -91,6 +91,15 @@ final class PlaybackEngine {
     private var notedPlayGeneration = -1
     private var audioSessionConfigured = false
     private var interruptedWhilePlaying = false
+    /// Set by `restore(...)`: the queue + position were loaded from a previous
+    /// session but NO player item has been resolved yet (so launch does no
+    /// network I/O and the user lands paused). The first resume/seek lazily
+    /// resolves and seeks to `elapsed`. Cleared the moment an item is loaded.
+    private var needsInitialLoad = false
+
+    /// Fires on the periodic time observer (~every 0.5s) so an owner can persist
+    /// the current position. Throttle on the receiving side.
+    var onPlaybackTick: (@MainActor () -> Void)?
     /// When a fresh item should resume mid-track (stall recovery), the seconds to
     /// seek to once it reaches `.readyToPlay`. Cleared after it is applied.
     private var resumeSeekTarget: Double = 0
@@ -152,6 +161,40 @@ final class PlaybackEngine {
         startCurrentItem(autoPlay: true)
     }
 
+    /// Restore a previous session's queue + position WITHOUT auto-playing or
+    /// touching the network. The user lands paused on `queue[index]` at `elapsed`;
+    /// the first resume/seek resolves the item and seeks there. `queue` is the
+    /// live (already-shuffled, if applicable) order.
+    func restore(queue: [Track], index: Int, elapsed: Double, shuffle: Bool, repeatMode: RepeatMode) {
+        guard !queue.isEmpty, queue.indices.contains(index) else { return }
+        cancelStallWatchdog()
+        cancelPreroll()
+        resolveGeneration += 1
+        self.queue = queue
+        self.unshuffledQueue = queue
+        self.currentIndex = index
+        self.shuffleEnabled = shuffle
+        self.repeatMode = repeatMode
+        self.elapsed = max(0, elapsed)
+        self.duration = queue[index].durationSeconds
+        self.isPlaying = false
+        self.isBuffering = false
+        self.lastErrorMessage = nil
+        self.needsInitialLoad = true
+        self.currentArtwork = nil
+        let track = queue[index]
+        let generation = resolveGeneration
+        if let loadArtwork {
+            Task { [weak self] in
+                let image = await loadArtwork(track)
+                guard let self, self.needsInitialLoad, generation == self.resolveGeneration else { return }
+                self.currentArtwork = image
+                self.updateNowPlayingInfo()
+            }
+        }
+        updateNowPlayingInfo()
+    }
+
     /// Shuffle a fresh set and start from a random track (not pinned to index 0).
     func playShuffled(_ tracks: [Track]) {
         guard !tracks.isEmpty else { return }
@@ -180,14 +223,20 @@ final class PlaybackEngine {
         let safe = offsets.filter { $0 != currentIndex && queue.indices.contains($0) }
         guard !safe.isEmpty else { return }
         let removedBeforeCurrent = safe.filter { $0 < currentIndex }.count
+        let removedIDs = Set(safe.map { queue[$0].id })
         for index in safe.sorted(by: >) { queue.remove(at: index) }
         currentIndex -= removedBeforeCurrent
+        // Keep the shuffle-source in sync, else toggling shuffle off resurrects
+        // the removed tracks.
+        unshuffledQueue.removeAll { removedIDs.contains($0.id) }
     }
 
     func moveQueueItem(fromOffsets source: IndexSet, toOffset destination: Int) {
         let current = currentTrack
         queue.move(fromOffsets: source, toOffset: destination)
-        if let current, let newIndex = queue.firstIndex(of: current) {
+        // Match by id: full-struct equality breaks if a field (isFavorite/
+        // cacheState) diverged between `current` and the queue copy.
+        if let current, let newIndex = queue.firstIndex(where: { $0.id == current.id }) {
             currentIndex = newIndex
         }
     }
@@ -211,6 +260,11 @@ final class PlaybackEngine {
 
     func resume() {
         guard currentTrack != nil else { return }
+        if needsInitialLoad {
+            // Restored session: resolve the item now and resume at the saved point.
+            startCurrentItem(autoPlay: true, resumeAt: elapsed)
+            return
+        }
         configureAudioSessionIfNeeded()
         player.play()
         isPlaying = true
@@ -248,7 +302,15 @@ final class PlaybackEngine {
     }
 
     func seek(toSeconds seconds: Double) {
-        let clamped = min(max(seconds, 0), max(duration, 0))
+        // Don't clamp to 0 when duration isn't known yet (e.g. a restored track
+        // whose asset duration hasn't resolved at resume-seek time) — that would
+        // snap the resume position to 0:00. AVPlayer clamps to the real end itself.
+        let clamped = duration > 0 ? min(max(seconds, 0), duration) : max(seconds, 0)
+        if needsInitialLoad {
+            // Restored-but-unloaded: load (paused) at the scrubbed point.
+            startCurrentItem(autoPlay: false, resumeAt: clamped)
+            return
+        }
         // Reflect the target immediately so the scrubber tracks the finger, and
         // freeze the timer there: the periodic observer is suppressed while
         // seeking, so the displayed time can't advance silently before audio
@@ -359,7 +421,7 @@ final class PlaybackEngine {
             currentIndex = 0
         } else {
             queue = unshuffledQueue
-            if let current, let idx = queue.firstIndex(of: current) {
+            if let current, let idx = queue.firstIndex(where: { $0.id == current.id }) {
                 currentIndex = idx
             }
         }
@@ -387,6 +449,7 @@ final class PlaybackEngine {
         #endif
         cancelStallWatchdog()
         cancelPreroll()
+        needsInitialLoad = false   // we're resolving an item now
         isSeeking = false
         pendingSeekSeconds = nil
         resolveGeneration += 1
@@ -608,6 +671,7 @@ final class PlaybackEngine {
                 // then "skipping" once the buffer at the new point finally fills.
                 guard !self.isSeeking, self.player.timeControlStatus == .playing else { return }
                 if seconds.isFinite { self.elapsed = seconds }
+                self.onPlaybackTick?()
             }
         }
     }
@@ -745,6 +809,10 @@ final class PlaybackEngine {
         case .ended:
             let options = optionsValue.map(AVAudioSession.InterruptionOptions.init)
             if interruptedWhilePlaying, options?.contains(.shouldResume) == true {
+                // iOS deactivates our session during the interruption; the
+                // one-shot `configureAudioSessionIfNeeded` won't re-activate it, so
+                // `resume()`'s `play()` would silently no-op. Reactivate first.
+                try? AVAudioSession.sharedInstance().setActive(true)
                 resume()
             }
             interruptedWhilePlaying = false

@@ -160,6 +160,15 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
 }
 
 extension SFTPRemoteClient {
+    /// Release the SSH session (and with it the SFTP subsystem). Without this,
+    /// the protocol's default no-op left the session open on app background /
+    /// source removal. Reconnects lazily on the next operation.
+    public func disconnect() async {
+        if let sshClient { try? await sshClient.close() }
+        sshClient = nil
+        sftpClient = nil
+    }
+
     private func activeSFTPClient() async throws -> SFTPClient {
         if let sftpClient, sftpClient.isActive {
             return sftpClient

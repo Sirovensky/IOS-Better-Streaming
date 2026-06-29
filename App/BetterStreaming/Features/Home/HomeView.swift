@@ -91,7 +91,7 @@ struct HomeView: View {
                         .frame(width: 96, height: 96)
                         .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(model.engine.currentTrack == nil ? "PICK UP WHERE YOU LEFT OFF" : "NOW PLAYING")
+                        Text(model.engine.isPlaying ? "NOW PLAYING" : "PICK UP WHERE YOU LEFT OFF")
                             .font(.caption2.weight(.bold))
                             .tracking(1.1)
                             .foregroundStyle(DesignTokens.brandPrimary)

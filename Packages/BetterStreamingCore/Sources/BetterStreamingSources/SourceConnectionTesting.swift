@@ -52,10 +52,12 @@ public struct SMBSourceConnectionTester: SourceConnectionTesting {
         let authentication = SMBAuthentication(username: draft.username, domain: draft.domain) {
             credential?.password
         }
-        let result = await SMBRemoteClient(
+        let client = SMBRemoteClient(
             configuration: configuration,
             authentication: authentication
-        ).testConnection()
+        )
+        let result = await client.testConnection()
+        await client.disconnect()   // one-shot probe: don't leave the session open
 
         return SourceConnectionTestResult(
             state: result.state.sourceHealthState,

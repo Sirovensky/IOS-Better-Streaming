@@ -403,7 +403,14 @@ struct AllPlaylistsView: View {
 
 /// Non-button album cell for NavigationLink.
 struct AlbumGridCellStatic: View {
+    @Environment(AppModel.self) private var model
     var album: Album
+    /// Hosts that own a navigation path pass this so "Go to Artist" can push the
+    /// Artist screen. A `NavigationLink` inside `.contextMenu` does NOT navigate
+    /// on iOS (the menu renders in a detached platter outside the NavigationStack),
+    /// so we mutate the host's path from a plain Button instead. Omitted (nil) →
+    /// the item is hidden.
+    var goToArtist: ((String) -> Void)? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             ArtworkView(url: album.artworkURL, artworkKey: album.id, cornerRadius: 10)
@@ -411,6 +418,34 @@ struct AlbumGridCellStatic: View {
                 .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
             Text(album.title).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary).lineLimit(1)
             Text(album.artist).font(.caption).foregroundStyle(DesignTokens.textSecondary).lineLimit(1)
+        }
+        .contextMenu { albumMenu }
+    }
+
+    @ViewBuilder private var albumMenu: some View {
+        Button("Play", systemImage: "play.fill") { model.playAlbum(album.id) }
+        Button("Play Next", systemImage: "text.insert") { model.playAlbumNext(album.id) }
+        Button("Add to Queue", systemImage: "text.append") { model.addAlbumToQueue(album.id) }
+
+        Divider()
+
+        if model.canManageAlbumDownload(album.id) {
+            if model.albumHasDownloads(album.id) {
+                Button("Remove Download", systemImage: "trash") { model.removeAlbumDownloads(album.id) }
+            } else {
+                Button("Download", systemImage: "arrow.down.circle") { model.downloadAlbum(album.id) }
+            }
+        }
+        Button {
+            model.toggleAlbumFavorite(album.id)
+        } label: {
+            let fav = model.isAlbumFavorite(album.id)
+            Label(fav ? "Unfavorite" : "Favorite", systemImage: fav ? "star.fill" : "star")
+        }
+
+        if let goToArtist {
+            Divider()
+            Button("Go to Artist", systemImage: "music.mic") { goToArtist(album.artistID) }
         }
     }
 }
