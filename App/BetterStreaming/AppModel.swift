@@ -48,11 +48,16 @@ final class AppModel {
     var hasLibrary: Bool { !tracks.isEmpty }
     var needsOnboarding: Bool { !isBootstrapping && !hasCompletedOnboarding && sources.isEmpty }
 
+    /// Weak shared reference so a CarPlay scene (a separate UIKit scene with no
+    /// SwiftUI environment) can reach the live model. Set on creation.
+    static weak var shared: AppModel?
+
     init() {
         offlineMode = UserDefaults.standard.bool(forKey: "offlineMode.v1")
         hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "onboarded.v1")
         recentlyPlayedIDs = UserDefaults.standard.stringArray(forKey: Self.recentlyPlayedKey) ?? []
         loadPlaylists()
+        AppModel.shared = self
         wireEngine()
         wireAutoCache()
         Task { await bootstrap() }
