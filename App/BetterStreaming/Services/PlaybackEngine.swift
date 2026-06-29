@@ -80,13 +80,24 @@ final class PlaybackEngine {
 
     // MARK: Private
 
-    private let player = AVPlayer()
+    // AVQueuePlayer (an AVPlayer subclass) so a preloaded next item can transition
+    // sample-accurately (gapless). With a single queued item it behaves exactly
+    // like AVPlayer; the gapless lookahead is added on top.
+    private let player = AVQueuePlayer()
     /// Opt-in audio tweaks (ReplayGain / preamp / EQ). All default off.
     let enhancements = AudioEnhancements()
     private var timeObserver: Any?
     private var itemEndObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
+    private var currentItemObservation: NSKeyValueObservation?
+    /// The item WE made current (via load/skip), so the `currentItem` KVO can tell
+    /// our own change from a gapless auto-advance.
+    private var currentPlayerItem: AVPlayerItem?
+    /// The lookahead item enqueued after the current one for gapless transition,
+    /// and the queue index it represents. Cleared on any queue mutation.
+    private var preloadedNextItem: AVPlayerItem?
+    private var preloadedNextIndex: Int?
     private var unshuffledQueue: [Track] = []
     private var resolveGeneration = 0
     /// Generation for which onTrackStarted has already fired, so a "play" is
@@ -249,7 +260,9 @@ final class PlaybackEngine {
         queue = []
         unshuffledQueue = []
         currentIndex = 0
-        player.replaceCurrentItem(with: nil)
+        clearPreload()
+        player.removeAllItems()
+        currentPlayerItem = nil
         isPlaying = false
         elapsed = 0
         duration = 0
@@ -437,6 +450,16 @@ final class PlaybackEngine {
         case .all: repeatMode = .one
         case .one: repeatMode = .off
         }
+    }
+
+    // MARK: Gapless lookahead
+
+    /// Remove the preloaded next item from the queue and forget it. Called on any
+    /// change that invalidates "what plays next" (load/skip/reorder/remove/shuffle).
+    private func clearPreload() {
+        if let preloadedNextItem { player.remove(preloadedNextItem) }
+        preloadedNextItem = nil
+        preloadedNextIndex = nil
     }
 
     // MARK: Item lifecycle
@@ -627,7 +650,13 @@ final class PlaybackEngine {
 
         item.preferredForwardBufferDuration = Self.preferredForwardBufferSeconds
         applyEnhancements(to: item, generation: generation)
-        player.replaceCurrentItem(with: item)
+        // Replace the whole queue with this one item. (AVQueuePlayer's
+        // replaceCurrentItem is discouraged; removeAllItems + insert is the
+        // supported way to set a single current item.)
+        clearPreload()
+        player.removeAllItems()
+        player.insert(item, after: nil)
+        currentPlayerItem = item
         if autoPlay {
             configureAudioSessionIfNeeded()
             player.play()
