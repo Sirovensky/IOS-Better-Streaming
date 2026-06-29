@@ -265,7 +265,14 @@ private actor RemoteStreamSession {
                 return
             }
             if isAllToEnd, myAllToEndEpoch != allToEndEpoch {
+                // A newer allToEnd request took over. Finish with an error rather
+                // than returning silently: if AVPlayer still needs this request
+                // (it can keep several alive, and task scheduling isn't strictly
+                // ordered) an unfinished request would hang forever. An error lets
+                // AVPlayer re-drive; if it truly abandoned this one, the error is
+                // simply ignored.
                 streamLog.info("superseded reqOffset=\(offset) servedTo=\(cursor)")
+                request.finishLoading(with: StreamingError.superseded)
                 return
             }
             let chunkUpper = min(upper, cursor + Self.readChunkSize)
@@ -443,11 +450,13 @@ private actor RemoteStreamSession {
 private enum StreamingError: LocalizedError {
     case missingSize
     case shortRead
+    case superseded
 
     var errorDescription: String? {
         switch self {
         case .missingSize: "Remote file size is unavailable."
         case .shortRead: "The remote file ended before all requested data arrived."
+        case .superseded: "The request was superseded by a newer one."
         }
     }
 }

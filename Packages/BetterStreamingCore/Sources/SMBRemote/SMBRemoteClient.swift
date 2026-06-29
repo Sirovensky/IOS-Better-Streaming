@@ -523,6 +523,9 @@ private final class LiveSMBRemoteTransport: @unchecked Sendable, SMBRemoteTransp
     private let poolLock = NSLock()
     private var readers: [String: FileReader] = [:]
     private var readerOrder: [String] = []
+    /// Active read count per path. A reader is never evicted/closed while a read
+    /// is in flight on it (would be a use-after-close → connection-buffer desync).
+    private var inUse: [String: Int] = [:]
     private static let maxPooledReaders = 4
 
     private init(client: SMBClient) {
@@ -584,7 +587,10 @@ private final class LiveSMBRemoteTransport: @unchecked Sendable, SMBRemoteTransp
     /// is dropped (never leaving a stale handle cached) and the error rethrown
     /// for the caller to retry or surface.
     private func pooledRead(path: String, offset: Int64, length: Int64) async throws -> Data {
+        // `reader(for:)` hands back a reader already marked in-use (so a
+        // concurrent open of another path can't evict+close it mid-read).
         let reader = try await reader(for: path)
+        defer { endUse(path) }
         do {
             return try await reader.read(offset: UInt64(offset), length: UInt32(length))
         } catch {
@@ -595,8 +601,9 @@ private final class LiveSMBRemoteTransport: @unchecked Sendable, SMBRemoteTransp
         }
     }
 
-    /// Return the pooled reader for `path`, opening (and pooling) one if needed.
-    /// Opening forces the lazy SMB CREATE so open errors surface here, not later.
+    /// Return the pooled reader for `path`, opening (and pooling) one if needed,
+    /// and mark it in-use (caller must `endUse`). Opening forces the lazy SMB
+    /// CREATE so open errors surface here, not later.
     private func reader(for path: String) async throws -> FileReader {
         if let existing = cachedReader(path: path) { return existing }
         let reader = client.fileReader(path: path)
@@ -611,7 +618,15 @@ private final class LiveSMBRemoteTransport: @unchecked Sendable, SMBRemoteTransp
         poolLock.lock(); defer { poolLock.unlock() }
         guard let reader = readers[path] else { return nil }
         touchLocked(path)
+        inUse[path, default: 0] += 1
         return reader
+    }
+
+    private func endUse(_ path: String) {
+        poolLock.lock(); defer { poolLock.unlock() }
+        if let count = inUse[path] {
+            if count <= 1 { inUse[path] = nil } else { inUse[path] = count - 1 }
+        }
     }
 
     /// Insert a freshly-opened reader. If another read opened one for the same
@@ -624,13 +639,17 @@ private final class LiveSMBRemoteTransport: @unchecked Sendable, SMBRemoteTransp
         poolLock.lock(); defer { poolLock.unlock() }
         if let existing = readers[path] {
             touchLocked(path)
+            inUse[path, default: 0] += 1
             return (existing, reader, [])
         }
         readers[path] = reader
         touchLocked(path)
+        inUse[path, default: 0] += 1
         var evicted: [FileReader] = []
+        // Evict the oldest IDLE reader (never one with an in-flight read).
         while readerOrder.count > Self.maxPooledReaders {
-            let stale = readerOrder.removeFirst()
+            guard let idx = readerOrder.firstIndex(where: { (inUse[$0] ?? 0) == 0 }) else { break }
+            let stale = readerOrder.remove(at: idx)
             if let r = readers.removeValue(forKey: stale) { evicted.append(r) }
         }
         return (reader, nil, evicted)

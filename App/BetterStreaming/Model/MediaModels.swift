@@ -155,28 +155,37 @@ enum SourceProtocol: String, Codable, Sendable, Hashable, CaseIterable, Identifi
 // and featured tracks land under one artist.
 
 enum MetadataGrouping {
+    // Regexes compiled ONCE (these run per-track on hot paths like
+    // tracks(forArtist:) / artists / genre grouping; `.regularExpression` on
+    // String recompiles every call and caused scroll jank on large libraries).
+    private static let bracketRegex = try! NSRegularExpression(pattern: #"[\(\)\[\]]"#)
+    private static let whitespaceRegex = try! NSRegularExpression(pattern: #"\s+"#)
+    /// Separators that mark a real collaboration/feature. Deliberately conservative:
+    /// `feat`/`ft`/`featuring`/`vs`/`versus`, plus `&`/`+`. NOT `x`, `with`, or `,`
+    /// — those over-match real names ("Tyler, The Creator", "Earth, Wind & Fire"
+    /// already only breaks on the `&`; "… with Orchestra"). `&` is kept because the
+    /// target library is collaboration-heavy ("David Guetta & Afrojack") — it does
+    /// split a few `&`-bands, an accepted trade-off.
+    private static let separatorRegex = try! NSRegularExpression(
+        pattern: #"\s+(?:feat\.?|ft\.?|featuring|versus|vs\.?)\s+|\s+[&+]\s+"#,
+        options: [.caseInsensitive]
+    )
+
+    private static func replacingMatches(_ value: String, _ regex: NSRegularExpression, with template: String) -> String {
+        let range = NSRange(value.startIndex..., in: value)
+        return regex.stringByReplacingMatches(in: value, options: [], range: range, withTemplate: template)
+    }
+
     /// Split a combined artist credit into the individual artists, in order, so
     /// each one gets their own entry and every track is cross-listed under all of
     /// them. "David Guetta feat. will.i.am & apl.de.ap" -> ["David Guetta",
     /// "will.i.am", "apl.de.ap"]. The first is the main/primary artist.
-    ///
-    /// Caveat: this splits on "&" / "," / "vs." / "x", so a band whose NAME
-    /// contains one of those ("Above & Beyond", "Earth, Wind & Fire") is split
-    /// too. The target library is collaboration-heavy, where splitting is the
-    /// right default; known-band exceptions can be added later if needed.
     static func creditedArtists(_ artist: String) -> [String] {
         let trimmed = artist.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
-        // Brackets around a feat. credit -> plain text so the names split out.
-        let debracketed = trimmed.replacingOccurrences(
-            of: #"[\(\)\[\]]"#, with: " ", options: .regularExpression
-        )
         let separator = "\u{1}"
-        let flattened = debracketed.replacingOccurrences(
-            of: #"\s+(?:feat\.?|ft\.?|featuring|versus|vs\.?|with|x)\s+|\s*[&+]\s*|\s*,\s*"#,
-            with: separator,
-            options: [.regularExpression, .caseInsensitive]
-        )
+        let debracketed = replacingMatches(trimmed, bracketRegex, with: " ")
+        let flattened = replacingMatches(debracketed, separatorRegex, with: separator)
         var seen = Set<String>()
         var result: [String] = []
         for part in flattened.components(separatedBy: separator) {
@@ -196,8 +205,7 @@ enum MetadataGrouping {
 
     /// Lowercased, whitespace-collapsed key for stable identity comparisons.
     static func normalizeKey(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        replacingMatches(value, whitespaceRegex, with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
     }

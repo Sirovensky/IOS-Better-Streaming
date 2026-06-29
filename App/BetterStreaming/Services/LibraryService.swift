@@ -70,6 +70,10 @@ actor LibraryService {
     /// (pinned). Persisted so the distinction survives refresh/relaunch.
     private var autoCachedIDs: Set<String> = []
     private var didLoadAutoCacheIndex = false
+    /// Albums whose cover has been attempted (found OR confirmed absent) this
+    /// session, so the artwork backfill doesn't re-hit the server for covers that
+    /// aren't there. Cleared on a fresh scan (files may have changed).
+    private var attemptedArtworkAlbumIDs: Set<String> = []
     /// In-memory passwords for this session, set on add. Lets the first
     /// add→scan succeed even if the Keychain read lags/fails; Keychain remains
     /// the durable store for relaunches.
@@ -233,10 +237,20 @@ actor LibraryService {
         // NEW/changed files is left to the post-scan backfill so the scan's hot
         // path is just cheap metadata probes — no multi-MB cover reads inline,
         // which is what made a full scan look like it hung "forever".
+        // Reuse key is path|size|seconds — tolerant of sub-second / storage
+        // precision differences in modified-time (keying on the ms-precision
+        // stableKey could silently mismatch and re-probe the whole library).
+        func reuseKey(path: String, size: Int64?, modifiedEpoch: Double?) -> String {
+            let normalized = RemotePath(displayPath: path).normalizedPath
+            return "\(normalized)|\(size ?? -1)|\(Int(modifiedEpoch ?? 0))"
+        }
         let existing = Dictionary(
-            allTracks.filter { $0.sourceID == sourceID }.map { ($0.id, $0) },
+            allTracks.filter { $0.sourceID == sourceID }.map {
+                (reuseKey(path: $0.remotePath ?? $0.folderPath, size: $0.sizeBytes, modifiedEpoch: $0.modifiedAtEpoch), $0)
+            },
             uniquingKeysWith: { first, _ in first }
         )
+        attemptedArtworkAlbumIDs.removeAll()   // re-attempt covers after a scan
 
         let classifier = MediaFileClassifier()
         var scanned: [Track] = []
@@ -266,7 +280,7 @@ actor LibraryService {
                     if visited.count + pending.count < 50_000 { pending.append(entry.path) }
                 case .file:
                     guard let kind = classifier.classify(entry), scanned.count < 100_000 else { break }
-                    let key = entryIdentity(entry, cfg: cfg).stableKey
+                    let key = reuseKey(path: entry.path.displayPath, size: entry.size, modifiedEpoch: entry.modifiedAt?.timeIntervalSince1970)
                     if let prior = existing[key] {
                         scanned.append(prior)   // unchanged — no re-probe, keep artwork
                     } else {
@@ -769,12 +783,20 @@ actor LibraryService {
                 representative[track.albumID] = track
             }
         }
-        let targets = representative.filter { !hasArt.contains($0.key) }.values.prefix(limit)
+        // Skip albums already attempted this session (covered AND genuinely
+        // cover-less) so repeated passes don't re-list/re-read the server for
+        // art that isn't there — that converges and stops the AppModel loop.
+        // Stable (sorted) order so each pass makes deterministic forward progress.
+        let targets = representative
+            .filter { !hasArt.contains($0.key) && !attemptedArtworkAlbumIDs.contains($0.key) }
+            .sorted { $0.key < $1.key }
+            .prefix(limit)
         var result: [String: URL] = [:]
-        for track in targets {
+        for (albumID, track) in targets {
             if Task.isCancelled { break }
+            attemptedArtworkAlbumIDs.insert(albumID)
             if let url = await remoteAlbumArtwork(for: track) {
-                result[track.albumID] = url
+                result[albumID] = url
             }
         }
         await applyAlbumArtwork(result)
