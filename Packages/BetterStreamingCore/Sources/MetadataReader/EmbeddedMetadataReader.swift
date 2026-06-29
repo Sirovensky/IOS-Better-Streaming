@@ -107,53 +107,110 @@ public enum EmbeddedMetadataReader {
 }
 
 private extension EmbeddedMetadataReader {
-    static func parseID3(_ bytes: [UInt8]) -> EmbeddedMediaMetadata? {
-        guard bytes.count >= 10,
-              bytes[0] == 0x49, bytes[1] == 0x44, bytes[2] == 0x33,
-              let tagSize = readSyncSafe32(bytes, 6) else {
-            return nil
-        }
+    static func parseID3(_ allBytes: [UInt8]) -> EmbeddedMediaMetadata? {
+        // The tag isn't always at offset 0 — AIFF/AAC carry ID3 inside a chunk,
+        // so locate the "ID3" marker (with a valid version byte) anywhere early.
+        guard let start = id3Start(in: allBytes) else { return nil }
+        let bytes = Array(allBytes[start...])
+        guard bytes.count >= 10, let tagSize = readSyncSafe32(bytes, 6) else { return nil }
 
         let major = bytes[3]
+        let flags = bytes[5]
         let tagEnd = min(bytes.count, 10 + tagSize)
         guard tagEnd > 10 else { return nil }
 
-        var offset = 10
+        // Work on the tag body (offset 0 = first frame after the 10-byte header).
+        var body = Array(bytes[10..<tagEnd])
+        // Global unsynchronisation (v2.2/2.3): the whole body has 0x00 stuffed
+        // after every 0xFF — undo it so frame sizes/IDs parse, instead of the
+        // frame loop bailing on the first misread frame (→ no metadata at all).
+        if (flags & 0x80) != 0, major <= 3 { body = deunsynchronise(body) }
+        var offset = 0
+        // Skip the extended header (flag 0x40) so the first real frame isn't
+        // misread as one (which previously yielded zero metadata for such files).
+        if (flags & 0x40) != 0 { offset += extendedHeaderSize(body, major: major) }
+        let end = body.count
         var result = EmbeddedMediaMetadata()
 
-        while offset < tagEnd {
+        while offset < end {
             let frameID: String
             let frameSize: Int
             let contentStart: Int
 
             if major == 2 {
-                guard offset + 6 <= tagEnd else { break }
-                frameID = ascii(bytes, offset, 3)
-                frameSize = readUInt24BE(bytes, offset + 3) ?? 0
+                guard offset + 6 <= end else { break }
+                frameID = ascii(body, offset, 3)
+                frameSize = readUInt24BE(body, offset + 3) ?? 0
                 contentStart = offset + 6
             } else {
-                guard offset + 10 <= tagEnd else { break }
-                frameID = ascii(bytes, offset, 4)
+                guard offset + 10 <= end else { break }
+                frameID = ascii(body, offset, 4)
                 if major == 4 {
-                    frameSize = readSyncSafe32(bytes, offset + 4) ?? 0
+                    frameSize = readSyncSafe32(body, offset + 4) ?? 0
                 } else {
-                    frameSize = readUInt32BE(bytes, offset + 4) ?? 0
+                    frameSize = readUInt32BE(body, offset + 4) ?? 0
                 }
                 contentStart = offset + 10
             }
 
             guard frameID.allSatisfy({ $0.isLetter || $0.isNumber }),
                   frameSize > 0,
-                  contentStart + frameSize <= tagEnd else {
+                  contentStart + frameSize <= end else {
                 break
             }
 
-            let content = Array(bytes[contentStart..<(contentStart + frameSize)])
+            let content = Array(body[contentStart..<(contentStart + frameSize)])
             applyID3Frame(id: frameID, content: content, to: &result)
             offset = contentStart + frameSize
         }
 
         return result.isEmpty ? nil : result
+    }
+
+    /// Offset of the "ID3" tag marker (+ plausible version byte 2/3/4). 0 for a
+    /// normal MP3; a later offset for AIFF/AAC where ID3 lives in a chunk. Bounded
+    /// search so a stray byte run can't cost much; frame validation rejects a
+    /// false hit anyway.
+    static func id3Start(in bytes: [UInt8]) -> Int? {
+        let limit = min(bytes.count - 4, 256 * 1024)
+        guard limit >= 0 else { return nil }
+        var i = 0
+        while i <= limit {
+            if bytes[i] == 0x49, bytes[i + 1] == 0x44, bytes[i + 2] == 0x33,
+               (2...4).contains(bytes[i + 3]) {
+                return i
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    /// Reverse ID3 unsynchronisation: drop the 0x00 inserted after each 0xFF.
+    static func deunsynchronise(_ bytes: [UInt8]) -> [UInt8] {
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count)
+        var i = 0
+        while i < bytes.count {
+            out.append(bytes[i])
+            if bytes[i] == 0xFF, i + 1 < bytes.count, bytes[i + 1] == 0x00 {
+                i += 2   // skip the stuffed zero
+            } else {
+                i += 1
+            }
+        }
+        return out
+    }
+
+    /// Bytes to skip for an extended header. v2.3: 4-byte plain size that does NOT
+    /// count itself (skip 4 + size). v2.4: 4-byte syncsafe size that INCLUDES
+    /// itself (skip size).
+    static func extendedHeaderSize(_ body: [UInt8], major: UInt8) -> Int {
+        guard body.count >= 4 else { return 0 }
+        if major == 4 {
+            return readSyncSafe32(body, 0) ?? 0
+        } else {
+            return 4 + (readUInt32BE(body, 0) ?? 0)
+        }
     }
 
     static func applyID3Frame(id: String, content: [UInt8], to result: inout EmbeddedMediaMetadata) {
@@ -170,9 +227,9 @@ private extension EmbeddedMetadataReader {
         case "TIT2", "TT2":
             result.title = result.title ?? text
         case "TPE1", "TP1":
-            result.artist = result.artist ?? text
+            result.artist = text   // performer always wins, even over a TPE2 seen earlier
         case "TPE2", "TP2":
-            result.artist = result.artist ?? text
+            result.artist = result.artist ?? text   // album-artist (band) only as fallback
         case "TALB", "TAL":
             result.album = result.album ?? text
         case "TCON", "TCO":
@@ -390,8 +447,10 @@ private extension EmbeddedMetadataReader {
         switch key {
         case "TITLE":
             result.title = result.title ?? value
-        case "ARTIST", "ALBUMARTIST", "ALBUM ARTIST":
-            result.artist = result.artist ?? value
+        case "ARTIST":
+            if let value { result.artist = value }   // performer wins over an earlier ALBUMARTIST
+        case "ALBUMARTIST", "ALBUM ARTIST":
+            result.artist = result.artist ?? value   // album-artist only as fallback
         case "ALBUM":
             result.album = result.album ?? value
         case "GENRE":
@@ -772,6 +831,30 @@ private extension EmbeddedMetadataReader {
         "Christian Rap", "Pop/Funk", "Jungle", "Native American", "Cabaret",
         "New Wave", "Psychadelic", "Rave", "Showtunes", "Trailer", "Lo-Fi",
         "Tribal", "Acid Punk", "Acid Jazz", "Polka", "Retro", "Musical",
-        "Rock & Roll", "Hard Rock"
+        "Rock & Roll", "Hard Rock",
+        // Winamp extensions (80–147)
+        "Folk", "Folk-Rock", "National Folk", "Swing", "Fast Fusion", "Bebob",
+        "Latin", "Revival", "Celtic", "Bluegrass", "Avantgarde", "Gothic Rock",
+        "Progressive Rock", "Psychedelic Rock", "Symphonic Rock", "Slow Rock",
+        "Big Band", "Chorus", "Easy Listening", "Acoustic", "Humour", "Speech",
+        "Chanson", "Opera", "Chamber Music", "Sonata", "Symphony", "Booty Bass",
+        "Primus", "Porn Groove", "Satire", "Slow Jam", "Club", "Tango", "Samba",
+        "Folklore", "Ballad", "Power Ballad", "Rhythmic Soul", "Freestyle",
+        "Duet", "Punk Rock", "Drum Solo", "A Cappella", "Euro-House", "Dance Hall",
+        "Goa", "Drum & Bass", "Club-House", "Hardcore", "Terror", "Indie",
+        "BritPop", "Afro-Punk", "Polsk Punk", "Beat", "Christian Gangsta Rap",
+        "Heavy Metal", "Black Metal", "Crossover", "Contemporary Christian",
+        "Christian Rock", "Merengue", "Salsa", "Thrash Metal", "Anime", "JPop",
+        "Synthpop",
+        // Winamp 5.6 additions (148–191)
+        "Abstract", "Art Rock", "Baroque", "Bhangra", "Big Beat", "Breakbeat",
+        "Chillout", "Downtempo", "Dub", "EBM", "Eclectic", "Electro",
+        "Electroclash", "Emo", "Experimental", "Garage", "Global", "IDM",
+        "Illbient", "Industro-Goth", "Jam Band", "Krautrock", "Leftfield",
+        "Lounge", "Math Rock", "New Romantic", "Nu-Breakz", "Post-Punk",
+        "Post-Rock", "Psytrance", "Shoegaze", "Space Rock", "Trop Rock",
+        "World Music", "Neoclassical", "Audiobook", "Audio Theatre",
+        "Neue Deutsche Welle", "Podcast", "Indie Rock", "G-Funk", "Dubstep",
+        "Garage Rock", "Psybient"
     ]
 }

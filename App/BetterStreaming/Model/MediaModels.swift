@@ -159,6 +159,15 @@ enum MetadataGrouping {
     // tracks(forArtist:) / artists / genre grouping; `.regularExpression` on
     // String recompiles every call and caused scroll jank on large libraries).
     private static let bracketRegex = try! NSRegularExpression(pattern: #"[\(\)\[\]]"#)
+    /// A bracketed segment that is NOT a feature credit — e.g. "(Live)",
+    /// "(Acoustic)", "(Remix)". Removed whole (contents included) so it can't
+    /// fragment one artist into bogus per-parenthetical IDs ("Artist (Live)" vs
+    /// "Artist (Acoustic)"). A bracket containing feat/ft/featuring/vs/with is
+    /// left for the debracket+split below so its inner collaborator survives.
+    private static let versionBracketRegex = try! NSRegularExpression(
+        pattern: #"[\(\[](?![^\)\]]*\b(feat|ft|featuring|vs|versus|with)\b)[^\)\]]*[\)\]]"#,
+        options: [.caseInsensitive]
+    )
     private static let whitespaceRegex = try! NSRegularExpression(pattern: #"\s+"#)
     /// Separators that mark a real collaboration/feature. Deliberately conservative:
     /// `feat`/`ft`/`featuring`/`vs`/`versus`, plus `&`/`+`. NOT `x`, `with`, or `,`
@@ -184,12 +193,17 @@ enum MetadataGrouping {
         let trimmed = artist.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         let separator = "\u{1}"
-        let debracketed = replacingMatches(trimmed, bracketRegex, with: " ")
+        // Drop non-feature parentheticals first (keep "(feat. X)"), then turn the
+        // remaining brackets into spaces and split on feat/&/etc.
+        let deversioned = replacingMatches(trimmed, versionBracketRegex, with: " ")
+        let debracketed = replacingMatches(deversioned, bracketRegex, with: " ")
         let flattened = replacingMatches(debracketed, separatorRegex, with: separator)
         var seen = Set<String>()
         var result: [String] = []
         for part in flattened.components(separatedBy: separator) {
-            let name = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Collapse internal whitespace left by removed brackets ("Artist  " → "Artist").
+            let name = replacingMatches(part, whitespaceRegex, with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             let key = normalizeKey(name)
             guard !key.isEmpty, seen.insert(key).inserted else { continue }
             result.append(name)
