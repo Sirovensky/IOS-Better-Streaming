@@ -32,6 +32,9 @@ final class AppModel {
     var isNowPlayingPresented = false
 
     private var trackIndex: [String: Int] = [:]
+    /// Last track id counted as a play, so a stall-recovery re-resolve of the
+    /// SAME track (which re-fires onTrackStarted) doesn't double-count it.
+    private var lastNotedPlayID: String?
     private var sourceConfigs: [SourceConfig] = []
     private var sourceHealth: [String: SourceHealth] = [:]
     private var sourceMessages: [String: String] = [:]
@@ -779,8 +782,17 @@ final class AppModel {
     }
 
     func downloadAlbum(_ albumID: String) {
-        for track in tracks(forAlbum: albumID) where canManageDownload(track.id) {
-            download(track.id)
+        let targets = tracks(forAlbum: albumID).filter { canManageDownload($0.id) && $0.cacheState == .remoteOnly }
+        guard !targets.isEmpty else { return }
+        // Mark all queued, then download sequentially in ONE task — not N
+        // fire-and-forget tasks all contending for the source's background client.
+        for t in targets where trackIndex[t.id] != nil { tracks[trackIndex[t.id]!].cacheState = .downloading }
+        Task { [weak self] in
+            guard let self else { return }
+            for t in targets {
+                let ok = await self.library.ensureCached(t)
+                if let i = self.trackIndex[t.id] { self.tracks[i].cacheState = ok ? .cached : .remoteOnly }
+            }
         }
     }
 
@@ -865,7 +877,13 @@ final class AppModel {
                 self.sourceHealth[track.sourceID] = .online
                 self.rebuildSources()
             }
-            self.notePlayed(track.id)
+            // Count the play only on a real track change — stall recovery
+            // re-fires this for the same track (new generation) and would
+            // otherwise double-count it in recents / play counts.
+            if self.lastNotedPlayID != track.id {
+                self.lastNotedPlayID = track.id
+                self.notePlayed(track.id)
+            }
             self.prefetchNextIfNeeded()
             Task {
                 let cached = await self.library.isCached(track)
@@ -937,7 +955,11 @@ final class AppModel {
         prefetchTask?.cancel()
         guard autoCache.isEnabled, !offlineMode else { return }
         let queue = engine.queue
-        let nextIndex = engine.currentIndex + 1
+        guard !queue.isEmpty else { return }
+        // Wrap to the head when at the end of a repeat-all queue, so the
+        // about-to-play first track is warmed too.
+        let raw = engine.currentIndex + 1
+        let nextIndex = (raw >= queue.count && engine.repeatMode == .all) ? 0 : raw
         guard queue.indices.contains(nextIndex) else { return }
         let next = queue[nextIndex]
         guard next.kind != .video else { return }   // don't pre-pull large video

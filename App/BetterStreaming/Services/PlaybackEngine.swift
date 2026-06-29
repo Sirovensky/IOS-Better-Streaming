@@ -49,7 +49,9 @@ final class PlaybackEngine {
     }
 
     var hasNext: Bool {
-        repeatMode != .off || currentIndex < queue.count - 1
+        // repeat-one doesn't advance, so it shouldn't enable Next at the last
+        // track (where advance() just stops); only repeat-all wraps.
+        currentIndex < queue.count - 1 || repeatMode == .all
     }
 
     var hasPrevious: Bool {
@@ -433,11 +435,6 @@ final class PlaybackEngine {
         case .all: repeatMode = .one
         case .one: repeatMode = .off
         }
-    }
-
-    func toggleFavoriteOnCurrent() {
-        guard queue.indices.contains(currentIndex) else { return }
-        queue[currentIndex].isFavorite.toggle()
     }
 
     // MARK: Item lifecycle
