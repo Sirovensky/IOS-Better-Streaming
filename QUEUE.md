@@ -135,11 +135,17 @@ Goal: clear the whole backlog. Landed this sweep (each pushed to main):
 - **Batch 5** (`1068a44`): FTP LIST Dec→Jan year rollover. *(Deferred, low-EV for an SMB user: FTP per-op timeout/pooling, SFTP path-resolution + typed errors + known-hosts UI — rewrites of working secondary-protocol code with no FTP/SFTP source to validate.)*
 - **Batch 6 (partial)** (`41d025b`): "Go to Artist" from the album context menu now works in every grid (Library/AllAlbums/Search/Player) via an env nav-action (the old in-contextMenu NavigationLink was dead on iOS).
 
-**Still open after this sweep:**
-- Batch 6 rest: library sort/filter (year/date-added/play-count/genre); Home "Made For You" populate-or-remove; auto-cache stats write debounce.
-- Batch 7 (#3): genre canonicalization + progressive genre-expansion radio — **best done against the fully-synced library** (design/test on the real ~2000-track genre spread).
-- Batch 8 features: playlists + .m3u; gapless/crossfade; synced lyrics; online artwork fallback; EQ/ReplayGain (moves off AVPlayer). **Large untested additions — want a build/test loop.**
-- Can't-do-here: CarPlay (entitlement + hardware); interactive finger-driven player transition (needs sim/device iteration); device-verify of artwork backfill + metadata rescans.
+**Also landed this sweep:**
+- **Batch 6 rest** (`14b6f6f`): Songs sort (Title/Artist/Recently Added/Most Played) + genre filter; Albums sort (Title/Artist/Recently Added/Year); auto-cache stats writes debounced (flush on background). Home "Made For You" already hidden-when-empty.
+- **Batch 7 / #3** (`55ce533`): genre canonicalization was already in place; ADDED progressive genre-expansion similar stations — seed first, same family, then widening to adjacent families via a `genreAdjacency` graph + BFS distance (Rock→Metal yes, EDM no), capped, shuffled within each band.
+- **Playlists** (`ac018bf`): full subsystem — create / rename / delete, add-to-playlist from the player menu, **.m3u/.m3u8 import** (filename match), UserDefaults persistence, empty state. `Playlist` is now Codable.
+- **Online cover art** (`01b6010`): opt-in `OnlineArtworkClient` (MusicBrainz release search → Cover Art Archive front image, rate-limited 1.1s, proper User-Agent); last-resort fallback in artwork resolution; Settings → Artwork toggle (off by default).
+
+**Still open (deliberately NOT shipped blind):**
+- **Synced lyrics** — additive (USLT/SYLT + .lrc sidecar parser + a time-synced player view). Safe to do, just sizable; deferred for a focused pass.
+- **Gapless/crossfade** + **EQ/ReplayGain** — these REWRITE the core audio renderer (AVQueuePlayer / AVAudioEngine). Shipping blind risks regressing all playback (just stabilized) → need a build/test loop.
+- **CarPlay** — needs the CarPlay entitlement (project + Apple provisioning) and CarPlay sim/hardware; can't build/validate here.
+- Interactive finger-driven mini↔full player transition (needs sim/device gesture iteration); device-verify of artwork backfill + metadata rescans.
 
 ## BUGHUNT 2026-06-29 (3 Opus agents, whole-app re-verify of #2–#7)
 
