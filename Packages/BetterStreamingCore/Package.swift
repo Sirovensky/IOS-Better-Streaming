@@ -47,7 +47,10 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.9.0"),
-        .package(url: "https://github.com/kishikawakatsumi/SMBClient.git", from: "0.3.1"),
+        // Vendored locally (copy of kishikawakatsumi/SMBClient 0.3.1) so we can
+        // patch ByteReader to bounds-check instead of trapping (EXC_BREAKPOINT) on
+        // a truncated/misframed SMB response. See Packages/SMBClient/.
+        .package(path: "../SMBClient"),
         .package(url: "https://github.com/orlandos-nl/Citadel.git", from: "0.12.1"),
         // Mirrors Citadel's own swift-nio-ssh requirement so SFTPRemote can
         // import NIOSSH (host-key validation) without changing resolution.

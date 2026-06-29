@@ -733,7 +733,11 @@ final class AppModel {
             var moreToFetch = false
             for id in plan.keep {
                 guard let target = self.track(id), target.cacheState == .remoteOnly else { continue }
-                if downloaded >= 8 { moreToFetch = true; break }   // bound work per pass
+                // Small bites: each fetch is a full-file download on its own SMB
+                // connection competing with the live stream. Fewer per pass (with
+                // the reschedule below) keeps background caching from starving
+                // playback while still converging on the hot set.
+                if downloaded >= 3 { moreToFetch = true; break }
                 if await self.library.ensureCached(target, auto: true) {
                     if let i = self.trackIndex[id] { self.tracks[i].cacheState = .prefetched }
                     downloaded += 1
@@ -771,6 +775,12 @@ final class AppModel {
         guard sourceHealth.values.contains(where: { $0.isReachable }) else { return }
         prefetchTask = Task { [weak self] in
             guard let self else { return }
+            // Let the live stream establish its initial buffer before pulling the
+            // next track in full: both share the one Wi-Fi link to the NAS, and
+            // prefetching immediately at track-start is a common cause of
+            // mid-playback stalls. A skip within this window cancels the prefetch.
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if Task.isCancelled { return }
             let ok = await self.library.ensureCached(next, auto: true)
             if Task.isCancelled { return }
             if ok, let i = self.trackIndex[next.id], self.tracks[i].cacheState == .remoteOnly {

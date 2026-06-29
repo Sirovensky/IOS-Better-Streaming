@@ -215,11 +215,16 @@ public struct SMBRemoteMetadata: Sendable, Equatable {
     }
 }
 
-public protocol SMBRemoteTransport: Sendable {
+public protocol SMBRemoteTransport: AnyObject, Sendable {
     func listDirectory(path: String) async throws -> [SMBRemoteItem]
     func metadata(path: String) async throws -> SMBRemoteMetadata
     func read(path: String, offset: Int64, length: Int64) async throws -> Data
     func download(path: String, to localURL: URL, progress: ProgressSink?) async throws
+    /// Tear down the underlying connection WITHOUT issuing any graceful SMB
+    /// close/logoff (those would block on a wedged connection). Must be
+    /// non-blocking: it only cancels the transport's socket so any in-flight or
+    /// queued operation on it unwinds with an error. Idempotent.
+    func disconnect()
 }
 
 public typealias SMBRemoteTransportFactory = @Sendable (
@@ -263,10 +268,51 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
     private let transportFactory: SMBRemoteTransportFactory
     private var transport: (any SMBRemoteTransport)?
 
+    /// Wall-clock ceiling for a single ranged read. The underlying SMBClient has
+    /// NO receive timeout: a stalled receive (dropped packet, Wi-Fi power-save,
+    /// NAS hiccup) never returns and never throws, and — because every op
+    /// serializes behind one connection semaphore that is only released after the
+    /// receive completes — it wedges the whole connection forever. We bound the
+    /// read, orphan the wedged connection, and reconnect on a fresh one.
+    /// Instance-level (not static) so tests can inject a short value.
+    private let readTimeoutNanos: UInt64
+    /// Ceiling for establishing a connection (TCP + negotiate + auth + tree
+    /// connect). Same hang risk as reads on a half-open connection.
+    private let connectTimeoutNanos: UInt64
+
+    /// Serializes every operation on this client so only ONE is in flight at a
+    /// time. The underlying SMBClient already serializes the wire behind a single
+    /// connection semaphore — BUT it allocates each SMB2 message-id OUTSIDE that
+    /// semaphore (`Session.messageId`, a plain class), so two concurrent reads
+    /// (AVPlayer's all-to-end fill loop + a scrub's bounded read) race the id and
+    /// desync the protocol → a silent hang or garbage/silent audio (the "scrub →
+    /// plays but no sound" bug). Serializing here is effectively free (the wire
+    /// was already serial) and also removes the concurrent shared-`FileReader`
+    /// hazards. FIFO, so a queued scrub read is never starved by a tight fill loop.
+    private var opLocked = false
+    private var opWaiters: [CheckedContinuation<Void, Never>] = []
+
     public init(
         configuration: SMBConnectionConfiguration,
         authentication: SMBAuthentication? = nil,
         transportFactory: SMBRemoteTransportFactory? = nil
+    ) {
+        self.init(
+            configuration: configuration,
+            authentication: authentication,
+            transportFactory: transportFactory,
+            readTimeoutNanos: 10_000_000_000,      // 10s
+            connectTimeoutNanos: 12_000_000_000    // 12s
+        )
+    }
+
+    /// Designated init exposing the timeouts for tests (`@testable`).
+    init(
+        configuration: SMBConnectionConfiguration,
+        authentication: SMBAuthentication?,
+        transportFactory: SMBRemoteTransportFactory?,
+        readTimeoutNanos: UInt64,
+        connectTimeoutNanos: UInt64
     ) {
         self.configuration = configuration
         self.authentication = authentication ?? SMBAuthentication(
@@ -274,13 +320,21 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
             domain: configuration.domain
         )
         self.transportFactory = transportFactory ?? LiveSMBRemoteTransport.make
+        self.readTimeoutNanos = readTimeoutNanos
+        self.connectTimeoutNanos = connectTimeoutNanos
     }
 
     public func list(_ directory: RemotePath) async throws -> [RemoteEntry] {
+        await acquireOpLock()
+        defer { releaseOpLock() }
+        var used: (any SMBRemoteTransport)?
         do {
             let transport = try await activeTransport()
+            used = transport
             let smbPath = SMBPathFormatter.smbPath(from: directory)
-            return try await transport.listDirectory(path: smbPath)
+            return try await Self.withTimeout(readTimeoutNanos) {
+                try await transport.listDirectory(path: smbPath)
+            }
                 .filter { $0.name != "." && $0.name != ".." }
                 .map { item in
                     let entryPath = directory.appending(item.name)
@@ -293,14 +347,21 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
                     )
                 }
         } catch {
-            try handleFailure(error, path: directory)
+            try handleFailure(error, path: directory, transport: used)
         }
     }
 
     public func stat(_ path: RemotePath) async throws -> RemoteMetadata {
+        await acquireOpLock()
+        defer { releaseOpLock() }
+        var used: (any SMBRemoteTransport)?
         do {
             let transport = try await activeTransport()
-            let metadata = try await transport.metadata(path: SMBPathFormatter.smbPath(from: path))
+            used = transport
+            let smbPath = SMBPathFormatter.smbPath(from: path)
+            let metadata = try await Self.withTimeout(readTimeoutNanos) {
+                try await transport.metadata(path: smbPath)
+            }
             return RemoteMetadata(
                 path: path,
                 kind: metadata.kind.remoteEntryKind,
@@ -309,7 +370,7 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
                 fileID: metadata.fileID
             )
         } catch {
-            try handleFailure(error, path: path)
+            try handleFailure(error, path: path, transport: used)
         }
     }
 
@@ -324,29 +385,48 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
         guard length > 0 else {
             return Data()
         }
+        let smbPath = SMBPathFormatter.smbPath(from: path)
+        await acquireOpLock()
+        defer { releaseOpLock() }
+        var used: (any SMBRemoteTransport)?
         do {
             let transport = try await activeTransport()
-            return try await transport.read(
-                path: SMBPathFormatter.smbPath(from: path),
-                offset: range.lowerBound,
-                length: length
-            )
+            used = transport
+            return try await Self.withTimeout(readTimeoutNanos) {
+                try await transport.read(path: smbPath, offset: range.lowerBound, length: length)
+            }
         } catch {
-            try handleFailure(error, path: path)
+            try handleFailure(error, path: path, transport: used)
         }
     }
 
-    /// Map a thrown SMB error and, when it indicates the connection itself died,
-    /// drop the cached transport so the NEXT operation reconnects on a fresh one.
-    /// This recovers without ever abandoning an in-flight NWConnection operation
-    /// (abandoning corrupts the connection's receive buffer → an `EXC_BREAKPOINT`
-    /// in `ByteReader` — and leaves the send semaphore locked → permanent hang).
-    private func handleFailure(_ error: Error, path: RemotePath) throws -> Never {
+    /// Map a thrown SMB error and, when it indicates the connection itself died
+    /// (or wedged — see `.timeout` from `withTimeout`), drop AND tear down the
+    /// cached transport so the NEXT operation reconnects on a fresh one.
+    ///
+    /// Tearing down (vs. the old "just drop the reference") matters for the
+    /// timeout case: the orphaned read is still suspended inside the wedged
+    /// connection's `receive`, holding its one-permit semaphore. Cancelling that
+    /// connection's socket (`disconnect()` → `NWConnection.cancel()`, which is
+    /// non-blocking and issues NO further SMB traffic) makes the pending receive
+    /// fail, which resumes the orphaned read with an error so it unwinds and
+    /// releases the semaphore. We never reuse that connection, so there is no
+    /// receive-buffer desync (the old `EXC_BREAKPOINT in ByteReader` came from
+    /// REUSING a connection whose read had been abandoned — we don't).
+    ///
+    /// Only reset when the failed transport is STILL the current one: a stale
+    /// failure from a slow concurrent op must not tear down a healthy transport
+    /// that a sibling op already reconnected.
+    private func handleFailure(
+        _ error: Error,
+        path: RemotePath,
+        transport failed: (any SMBRemoteTransport)?
+    ) throws -> Never {
         let mapped = Self.remoteFileSystemError(from: error, path: path)
         if let rfs = mapped as? RemoteFileSystemError {
             switch rfs {
             case .serverDisconnected, .timeout, .invalidResponse:
-                transport = nil
+                resetTransport(ifCurrent: failed)
             default:
                 break
             }
@@ -354,7 +434,60 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
         throw mapped
     }
 
+    /// Drop and tear down `transport` iff it is still the one that failed
+    /// (`SMBRemoteTransport` is `AnyObject`, so this identity check is sound).
+    private func resetTransport(ifCurrent failed: (any SMBRemoteTransport)?) {
+        guard let failed, let current = transport, current === failed else { return }
+        transport = nil
+        failed.disconnect()
+    }
+
+    /// Acquire the per-client operation lock (FIFO). Held across one transport op.
+    private func acquireOpLock() async {
+        if !opLocked {
+            opLocked = true
+            return
+        }
+        await withCheckedContinuation { opWaiters.append($0) }
+    }
+
+    private func releaseOpLock() {
+        if opWaiters.isEmpty {
+            opLocked = false
+        } else {
+            opWaiters.removeFirst().resume()
+        }
+    }
+
+    /// Race `op` against a wall-clock timeout WITHOUT relying on cancellation of
+    /// the underlying work (the SMBClient honours no cancellation). The op runs
+    /// in an UNSTRUCTURED task so that, on timeout, this function returns while
+    /// the op is left to unwind on its own once its transport is torn down — a
+    /// structured `TaskGroup` would instead block here awaiting the hung child.
+    private static func withTimeout<T: Sendable>(
+        _ nanoseconds: UInt64,
+        _ op: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let gate = ResumeGate()
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            Task {
+                do {
+                    let value = try await op()
+                    if gate.tryResume() { continuation.resume(returning: value) }
+                } catch {
+                    if gate.tryResume() { continuation.resume(throwing: error) }
+                }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                if gate.tryResume() { continuation.resume(throwing: RemoteFileSystemError.timeout) }
+            }
+        }
+    }
+
     public func download(_ path: RemotePath, to localURL: URL, progress: ProgressSink?) async throws {
+        await acquireOpLock()
+        defer { releaseOpLock() }
         do {
             let transport = try await activeTransport()
             try await transport.download(
@@ -394,7 +527,12 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
             return transport
         }
         try configuration.validate()
-        let newTransport = try await transportFactory(configuration, authentication)
+        let factory = transportFactory
+        let config = configuration
+        let auth = authentication
+        let newTransport = try await Self.withTimeout(connectTimeoutNanos) {
+            try await factory(config, auth)
+        }
         transport = newTransport
         return newTransport
     }
@@ -712,6 +850,36 @@ private final class LiveSMBRemoteTransport: @unchecked Sendable, SMBRemoteTransp
             try? await reader.close()
             throw error
         }
+    }
+
+    func disconnect() {
+        // Drop pooled readers WITHOUT a graceful SMB CLOSE: a CLOSE would be sent
+        // over a possibly-wedged connection and block. Cancelling the socket below
+        // makes any in-flight read/close on those readers fail and unwind.
+        poolLock.lock()
+        readers.removeAll()
+        readerOrder.removeAll()
+        inUse.removeAll()
+        poolLock.unlock()
+        // Non-blocking: cancels the NWConnection. Pending receive(s) complete with
+        // an error, which resumes the connection's send-continuation and releases
+        // its one-permit semaphore, so every queued op on this connection unwinds.
+        client.session.disconnect()
+    }
+}
+
+/// One-shot gate: when a continuation is raced between two tasks (the real op
+/// and a timeout), this ensures it is resumed exactly once.
+private final class ResumeGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+
+    func tryResume() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if resumed { return false }
+        resumed = true
+        return true
     }
 }
 

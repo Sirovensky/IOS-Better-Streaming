@@ -91,6 +91,37 @@ final class PlaybackEngine {
     private var notedPlayGeneration = -1
     private var audioSessionConfigured = false
     private var interruptedWhilePlaying = false
+    /// When a fresh item should resume mid-track (stall recovery), the seconds to
+    /// seek to once it reaches `.readyToPlay`. Cleared after it is applied.
+    private var resumeSeekTarget: Double = 0
+    /// A seek is in flight. While set, the periodic observer is suppressed so the
+    /// displayed time can't run ahead of audio, and rapid scrubs coalesce into
+    /// `pendingSeekSeconds` (only the latest target is honoured).
+    private var isSeeking = false
+    private var pendingSeekSeconds: Double?
+    /// After a seek lands, playback is held (the player keeps filling its buffer
+    /// while paused) until ~`prerollSeconds` is actually buffered ahead, then it
+    /// resumes — so rapid scrubs don't resume on AVPlayer's thin "minimize
+    /// stalling" buffer (<2s). Cancelled by a new seek / pause / item change.
+    private var prerollTask: Task<Void, Never>?
+    private var isPrerolling = false
+    /// Seconds of audio to buffer ahead before resuming after a seek.
+    private static let prerollSeconds: Double = 5
+    /// Cap the pre-roll wait so a slow/dead stream still resumes (the stall
+    /// watchdog then covers a genuine wedge) instead of spinning forever.
+    private static let prerollMaxWaitNanos: UInt64 = 8_000_000_000
+    private static let prerollPollNanos: UInt64 = 150_000_000
+    /// Fires when the player sits in the buffering state too long without progress
+    /// and auto-rebuilds the item. Cancelled/replaced on every state change.
+    private var stallWatchdogTask: Task<Void, Never>?
+    /// Consecutive automatic stall recoveries for the current item; reset once it
+    /// actually plays. Bounds runaway re-resolve loops on a truly dead source.
+    private var recoveryAttempts = 0
+    /// How long the player may sit buffering (with no progress) before we rebuild
+    /// the current item on a fresh connection. Longer than the SMB read timeout +
+    /// reconnect (~12s) so the lower layer gets first chance to self-heal.
+    private static let stallRecoveryDelayNanos: UInt64 = 20_000_000_000
+    private static let maxStallRecoveries = 3
 
     init() {
         player.allowsExternalPlayback = true
@@ -189,6 +220,8 @@ final class PlaybackEngine {
     func pause() {
         player.pause()
         isPlaying = false
+        cancelStallWatchdog()
+        cancelPreroll()   // don't auto-resume from a pending pre-roll after a manual pause
         updateNowPlayingInfo()
     }
 
@@ -216,14 +249,100 @@ final class PlaybackEngine {
 
     func seek(toSeconds seconds: Double) {
         let clamped = min(max(seconds, 0), max(duration, 0))
-        let time = CMTime(seconds: clamped, preferredTimescale: 600)
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+        // Reflect the target immediately so the scrubber tracks the finger, and
+        // freeze the timer there: the periodic observer is suppressed while
+        // seeking, so the displayed time can't advance silently before audio
+        // actually resumes at the new point.
+        elapsed = clamped
+        updateNowPlayingInfo()
+        if isSeeking {
+            pendingSeekSeconds = clamped   // coalesce rapid scrubs to the latest
+            return
+        }
+        performSeek(to: clamped)
+    }
+
+    private func performSeek(to seconds: Double) {
+        isSeeking = true
+        cancelPreroll()   // a fresh seek supersedes any in-progress pre-roll
+        // Scrubbing to an un-cached position must fetch from the source; show
+        // activity immediately instead of a frozen or "playing-but-silent" UI.
+        if isPlaying { isBuffering = true }
+        let generation = resolveGeneration
+        let time = CMTime(seconds: seconds, preferredTimescale: 600)
+        // A small tolerance lets AVPlayer land on a nearby fetchable point instead
+        // of forcing the exact byte (`.zero`), which over the streaming loader made
+        // scrubs slow and produced the play-1s → jump → silent-rebuffer stutter.
+        let tolerance = CMTime(seconds: 1.0, preferredTimescale: 600)
+        player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] finished in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.elapsed = clamped
+                // The track changed mid-seek: abandon this stale completion so it
+                // can't seek the new item (the new item resets seek state itself).
+                guard generation == self.resolveGeneration else { return }
+                if let next = self.pendingSeekSeconds {
+                    self.pendingSeekSeconds = nil
+                    self.performSeek(to: next)   // honour the latest scrub target
+                    return
+                }
+                self.isSeeking = false
+                if finished {
+                    let now = self.player.currentTime().seconds
+                    self.elapsed = now.isFinite ? now : seconds
+                }
+                if self.isPlaying {
+                    // Hold playback until there's a real buffer cushion, so rapid
+                    // scrubs don't resume on AVPlayer's thin (<2s) buffer.
+                    self.beginPreroll(generation: generation)
+                } else {
+                    self.isBuffering = (self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate)
+                }
                 self.updateNowPlayingInfo()
             }
         }
+    }
+
+    /// Hold playback after a seek until ~`prerollSeconds` is buffered ahead (or the
+    /// item is fully buffered / near the end / the wait cap elapses), then resume.
+    /// AVPlayer keeps filling `loadedTimeRanges` toward `preferredForwardBufferDuration`
+    /// even while paused, so this just defers `play()` until there's a real cushion.
+    private func beginPreroll(generation: Int) {
+        prerollTask?.cancel()
+        // Already enough buffered (e.g. scrubbing within the loaded region): resume now.
+        if bufferedAheadSeconds >= Self.prerollSeconds {
+            isPrerolling = false
+            isBuffering = false
+            player.play()
+            return
+        }
+        isPrerolling = true
+        isBuffering = true
+        player.pause()   // hold; AVPlayer still prefetches into its buffer while paused
+        prerollTask = Task { [weak self] in
+            var waited: UInt64 = 0
+            while waited < Self.prerollMaxWaitNanos {
+                try? await Task.sleep(nanoseconds: Self.prerollPollNanos)
+                waited += Self.prerollPollNanos
+                guard !Task.isCancelled, let self else { return }
+                guard generation == self.resolveGeneration, self.isPrerolling else { return }
+                let ahead = self.bufferedAheadSeconds
+                let full = self.player.currentItem?.isPlaybackBufferFull ?? false
+                let nearEnd = self.duration > 0 && self.elapsed + Self.prerollSeconds >= self.duration
+                if ahead >= Self.prerollSeconds || full || nearEnd { break }
+            }
+            guard !Task.isCancelled, let self else { return }
+            guard generation == self.resolveGeneration, self.isPrerolling, self.isPlaying else { return }
+            self.isPrerolling = false
+            self.prerollTask = nil
+            self.player.play()
+            self.isBuffering = (self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate)
+        }
+    }
+
+    private func cancelPreroll() {
+        prerollTask?.cancel()
+        prerollTask = nil
+        isPrerolling = false
     }
 
     func toggleShuffle() {
@@ -261,15 +380,20 @@ final class PlaybackEngine {
 
     // MARK: Item lifecycle
 
-    private func startCurrentItem(autoPlay: Bool) {
+    private func startCurrentItem(autoPlay: Bool, resumeAt: Double = 0) {
         guard let track = currentTrack else { return }
         #if DEBUG
-        print("BETTERSTREAMING_PLAY start title=\(track.title) ext=\(track.fileExtension) source=\(track.sourceID) remote=\(track.remotePath ?? "nil")")
+        print("BETTERSTREAMING_PLAY start title=\(track.title) ext=\(track.fileExtension) source=\(track.sourceID) remote=\(track.remotePath ?? "nil") resumeAt=\(resumeAt)")
         #endif
+        cancelStallWatchdog()
+        cancelPreroll()
+        isSeeking = false
+        pendingSeekSeconds = nil
         resolveGeneration += 1
         let generation = resolveGeneration
         isBuffering = true
-        elapsed = 0
+        elapsed = resumeAt
+        resumeSeekTarget = resumeAt
         duration = track.durationSeconds
         lastErrorMessage = nil
 
@@ -313,6 +437,12 @@ final class PlaybackEngine {
         }
     }
 
+    /// Seconds of audio AVPlayer should keep buffered ahead of the playhead. A
+    /// scrub into an un-cached region otherwise plays the tiny default buffer,
+    /// starves, and lets the clock run past the audio (→ "plays a moment, lags,
+    /// then resumes skipping the gap"). ≈0.5 MB for MP3, ~1–2 MB for FLAC at 10s.
+    private static let preferredForwardBufferSeconds: TimeInterval = 10
+
     private func loadPlayerItem(item: AVPlayerItem, autoPlay: Bool, generation: Int) {
         // AVPlayerItem.duration is often `.indefinite` until well after
         // readyToPlay for these files, which left the scrubber/timer at 0:00.
@@ -345,6 +475,12 @@ final class PlaybackEngine {
                     if let assetDuration = self.player.currentItem?.duration.seconds,
                        assetDuration.isFinite, assetDuration > 0 {
                         self.duration = assetDuration
+                    }
+                    // Stall-recovery / resume: jump back to where playback was.
+                    if self.resumeSeekTarget > 1 {
+                        let target = self.resumeSeekTarget
+                        self.resumeSeekTarget = 0
+                        self.seek(toSeconds: target)
                     }
                     #if DEBUG
                     let duration = self.duration.isFinite ? self.duration : -1
@@ -381,6 +517,7 @@ final class PlaybackEngine {
             }
         }
 
+        item.preferredForwardBufferDuration = Self.preferredForwardBufferSeconds
         player.replaceCurrentItem(with: item)
         if autoPlay {
             configureAudioSessionIfNeeded()
@@ -465,6 +602,11 @@ final class PlaybackEngine {
             let seconds = time.seconds
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // Only advance the displayed time when audio is genuinely rolling:
+                // not mid-seek, and the player is actually playing (not waiting or
+                // buffering). This stops the timer from running ahead of sound and
+                // then "skipping" once the buffer at the new point finally fills.
+                guard !self.isSeeking, self.player.timeControlStatus == .playing else { return }
                 if seconds.isFinite { self.elapsed = seconds }
             }
         }
@@ -477,11 +619,72 @@ final class PlaybackEngine {
             Task { @MainActor in
                 guard let self else { return }
                 // Buffering = waiting to play (initial fill or a mid-track stall),
-                // so the UI can show activity instead of looking frozen.
-                self.isBuffering = (status == .waitingToPlayAtSpecifiedRate)
+                // or holding for the post-seek pre-roll. Show activity, not a freeze.
+                self.isBuffering = (status == .waitingToPlayAtSpecifiedRate) || self.isPrerolling
+                switch status {
+                case .playing:
+                    self.recoveryAttempts = 0
+                    self.cancelStallWatchdog()
+                case .waitingToPlayAtSpecifiedRate:
+                    self.scheduleStallWatchdog()
+                case .paused:
+                    self.cancelStallWatchdog()
+                @unknown default:
+                    break
+                }
                 streamLog.info("timeControl=\(status.rawValue) reason=\(reason, privacy: .public) elapsed=\(self.elapsed)")
             }
         }
+    }
+
+    // MARK: Stall recovery
+
+    /// If the player sits in the buffering (`waitingToPlayAtSpecifiedRate`) state
+    /// for too long without making progress — while the user intends to play —
+    /// rebuild the current item from scratch (fresh resolve → fresh SMB
+    /// connection) and resume at the saved position. This is the automatic
+    /// equivalent of "skip to the next track and back", which the user found
+    /// temporarily un-stuck playback. The lower SMB layer self-heals a wedged
+    /// connection on its own read timeout; this is the catch-all for any stall it
+    /// can't reach (e.g. a wedge during the initial buffer fill, or an
+    /// AVPlayer-internal stall).
+    private func scheduleStallWatchdog() {
+        guard isPlaying else { return }          // a paused player isn't "stalled"
+        guard stallWatchdogTask == nil else { return }
+        let generation = resolveGeneration
+        let startElapsed = elapsed
+        let startBuffered = bufferedAheadSeconds
+        stallWatchdogTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.stallRecoveryDelayNanos)
+            guard !Task.isCancelled, let self else { return }
+            self.stallWatchdogTask = nil
+            guard generation == self.resolveGeneration else { return }   // item changed
+            guard self.isPlaying,
+                  self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate else { return }
+            // Real progress while waiting means it isn't wedged — leave it alone.
+            if self.elapsed > startElapsed + 0.5 || self.bufferedAheadSeconds > startBuffered + 0.5 {
+                return
+            }
+            guard self.recoveryAttempts < Self.maxStallRecoveries else {
+                streamLog.error("stall_watchdog give_up attempts=\(self.recoveryAttempts) at=\(self.elapsed)")
+                self.lastErrorMessage = "Playback stalled. Check the connection to your library."
+                return
+            }
+            self.recoveryAttempts += 1
+            streamLog.error("stall_watchdog recover attempt=\(self.recoveryAttempts) at=\(self.elapsed)")
+            self.recoverCurrentItem()
+        }
+    }
+
+    private func cancelStallWatchdog() {
+        stallWatchdogTask?.cancel()
+        stallWatchdogTask = nil
+    }
+
+    /// Re-resolve and reload the current track, resuming at the current position.
+    private func recoverCurrentItem() {
+        guard currentTrack != nil else { return }
+        startCurrentItem(autoPlay: true, resumeAt: elapsed)
     }
 
     /// Seconds of audio buffered ahead of the playhead (from the player's loaded
