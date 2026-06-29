@@ -509,12 +509,17 @@ final class PlaybackEngine {
     /// preamp) goes through an `MTAudioProcessingTap` audio mix; ReplayGain (and
     /// preamp when the EQ is off) is applied via `player.volume`, read from the
     /// asset's gain tags. Default-off → no audio mix, volume 1.0.
+    /// Loudness base volume (ReplayGain / preamp), multiplied by the crossfade
+    /// envelope to get the actual `player.volume`. 1.0 by default.
+    private var baseVolume: Float = 1.0
+
     private func applyEnhancements(to item: AVPlayerItem, generation: Int) {
         let e = enhancements
         item.audioMix = e.eqEnabled
             ? AudioEQTap.makeAudioMix(bandsDB: e.eqBandsDB, preampDB: e.preampDB)
             : nil
-        player.volume = 1.0
+        baseVolume = 1.0
+        applyVolume()
         guard e.replayGainEnabled || (!e.eqEnabled && abs(e.preampDB) > 0.01) else { return }
         let assetToRead = item.asset
         Task { @MainActor in
@@ -526,8 +531,24 @@ final class PlaybackEngine {
                 db += rg
             }
             guard generation == self.resolveGeneration else { return }
-            self.player.volume = min(1.0, AudioEnhancements.linear(fromDB: db))
+            self.baseVolume = min(1.0, AudioEnhancements.linear(fromDB: db))
+            self.applyVolume()
         }
+    }
+
+    /// `player.volume = baseVolume × crossfade-envelope`. The envelope fades in
+    /// over the first `crossfadeSeconds` and out over the last `crossfadeSeconds`
+    /// of the track (0 = off → always 1). A single-player fade, not sample-gapless
+    /// (true gapless would need AVQueuePlayer); contained and off by default.
+    private func applyVolume() {
+        let cf = enhancements.crossfadeSeconds
+        var envelope: Float = 1
+        if cf > 0.1, duration > cf * 2 {
+            let inGain = min(elapsed / cf, 1)
+            let outGain = min((duration - elapsed) / cf, 1)
+            envelope = Float(max(0, min(inGain, outGain)))
+        }
+        player.volume = baseVolume * envelope
     }
 
     private func loadPlayerItem(item: AVPlayerItem, autoPlay: Bool, generation: Int) {
@@ -696,6 +717,7 @@ final class PlaybackEngine {
                 // then "skipping" once the buffer at the new point finally fills.
                 guard !self.isSeeking, self.player.timeControlStatus == .playing else { return }
                 if seconds.isFinite { self.elapsed = seconds }
+                if self.enhancements.crossfadeSeconds > 0.1 { self.applyVolume() }
                 self.onPlaybackTick?()
             }
         }

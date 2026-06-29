@@ -103,6 +103,20 @@ struct SettingsView: View {
                 .tint(DesignTokens.brandPrimary)
                 .padding(12)
 
+                rowDivider
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        settingsLabel("Crossfade", "Fade between tracks", icon: "wave.3.forward")
+                        Spacer()
+                        Text(enhancements.crossfadeSeconds < 0.5 ? "Off" : "\(enhancements.crossfadeSeconds, specifier: "%.0f")s")
+                            .font(.caption.monospacedDigit()).foregroundStyle(DesignTokens.textSecondary)
+                    }
+                    Slider(value: $enhancements.crossfadeSeconds, in: 0...12, step: 1)
+                        .tint(DesignTokens.brandPrimary)
+                }
+                .padding(12)
+
                 if enhancements.eqEnabled {
                     rowDivider
                     VStack(alignment: .leading, spacing: 10) {
