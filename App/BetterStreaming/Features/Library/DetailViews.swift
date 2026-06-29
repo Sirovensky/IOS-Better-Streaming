@@ -82,7 +82,7 @@ private struct MediaDetailHeader: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            ArtworkView(url: artworkURL, artworkKey: artworkKey, glyph: glyph, cornerRadius: 12)
+            ArtworkView(url: artworkURL, artworkKey: artworkKey, glyph: glyph, cornerRadius: 12, maxPixel: 600)
                 .frame(width: 220, height: 220)
                 .shadow(color: .black.opacity(0.3), radius: 18, y: 10)
 
@@ -162,6 +162,7 @@ struct AlbumDetailView: View {
         .appScreenBackground()
         .navigationTitle(albumTracks.first?.album ?? "Album")
         .navigationBarTitleDisplayMode(.inline)
+        .task { model.ensureAlbumArtwork(albumID) }
     }
 }
 

@@ -164,7 +164,7 @@ struct NowPlayingView: View {
                     if let track = engine.currentTrack {
                         Spacer(minLength: 8)
 
-                        ArtworkView(url: track.artworkURL, artworkKey: track.albumID, cornerRadius: 14)
+                        ArtworkView(url: track.artworkURL, artworkKey: track.albumID, cornerRadius: 14, maxPixel: 800)
                             .frame(width: artSize, height: artSize)
                             .shadow(color: .black.opacity(0.4), radius: 24, y: 14)
                             .scaleEffect(engine.isPlaying ? 1.0 : 0.84)

@@ -24,11 +24,17 @@ actor OnlineArtworkClient {
         let artistQ = artist.trimmingCharacters(in: .whitespacesAndNewlines)
         let albumQ = album.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !albumQ.isEmpty, albumQ.lowercased() != "unknown" else { return nil }
-        guard let mbid = await releaseMBID(artist: artistQ, album: albumQ) else { return nil }
-        return await coverArt(forReleaseMBID: mbid)
+        guard let match = await releaseMatch(artist: artistQ, album: albumQ) else { return nil }
+        // Cover art is often attached to the RELEASE-GROUP (or a sibling release),
+        // not the exact release MusicBrainz scored highest — so try the specific
+        // release first, then fall back to its release-group. (Verified: a release
+        // can 404 while its release-group has the cover.)
+        if let data = await coverArt(path: "release/\(match.release)") { return data }
+        if let group = match.releaseGroup, let data = await coverArt(path: "release-group/\(group)") { return data }
+        return nil
     }
 
-    private func releaseMBID(artist: String, album: String) async -> String? {
+    private func releaseMatch(artist: String, album: String) async -> (release: String, releaseGroup: String?)? {
         var query = "release:\"\(album)\""
         if !artist.isEmpty, artist.lowercased() != "unknown artist" {
             query += " AND artist:\"\(artist)\""
@@ -44,12 +50,13 @@ actor OnlineArtworkClient {
               let releases = json["releases"] as? [[String: Any]],
               let first = releases.first,
               let id = first["id"] as? String else { return nil }
-        return id
+        let groupID = (first["release-group"] as? [String: Any])?["id"] as? String
+        return (id, groupID)
     }
 
-    private func coverArt(forReleaseMBID mbid: String) async -> Data? {
-        // `front-500` 302-redirects to the actual image; URLSession follows it.
-        guard let url = URL(string: "https://coverartarchive.org/release/\(mbid)/front-500") else { return nil }
+    private func coverArt(path: String) async -> Data? {
+        // `front-500` 307-redirects to the actual image; URLSession follows it.
+        guard let url = URL(string: "https://coverartarchive.org/\(path)/front-500") else { return nil }
         guard let data = await get(url), data.count > 512 else { return nil }
         return data
     }

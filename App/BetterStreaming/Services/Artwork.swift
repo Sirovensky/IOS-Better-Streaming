@@ -1,5 +1,42 @@
+import ImageIO
 import SwiftUI
 import UIKit
+
+/// Decoded, downsampled cover thumbnails keyed by path — so a scrolling list
+/// never decodes a full-resolution cover on the main thread (the old
+/// `UIImage(contentsOfFile:)` in `body` did exactly that, per visible row, which
+/// caused the scroll lag on large result lists).
+enum ThumbnailLoader {
+    private static let cache: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.countLimit = 400
+        return c
+    }()
+
+    static func cached(_ url: URL, maxPixel: CGFloat) -> UIImage? {
+        cache.object(forKey: "\(url.path)#\(Int(maxPixel))" as NSString)
+    }
+
+    /// Load a file-URL image downsampled to ~`maxPixel` px, off the main thread,
+    /// cached. Returns nil on failure.
+    static func thumbnail(for url: URL, maxPixel: CGFloat) async -> UIImage? {
+        let key = "\(url.path)#\(Int(maxPixel))" as NSString
+        if let hit = cache.object(forKey: key) { return hit }
+        let image = await Task.detached(priority: .utility) { () -> UIImage? in
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixel
+            ]
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+            return UIImage(cgImage: cg)
+        }.value
+        if let image { cache.setObject(image, forKey: key) }
+        return image
+    }
+}
 
 /// Deterministic warm placeholder artwork derived from a stable key (album id,
 /// playlist id, …). Per creative-direction.md: missing art uses a generated warm
@@ -61,6 +98,11 @@ struct ArtworkView: View {
     var artworkKey: String
     var glyph: String = "music.note"
     var cornerRadius: CGFloat = 8
+    /// Downsample target in pixels. Default suits list rows; detail headers pass
+    /// larger. Decode happens off the main thread and is cached.
+    var maxPixel: CGFloat = 200
+
+    @State private var image: UIImage?
 
     var body: some View {
         let palette = Artwork.palette(for: artworkKey)
@@ -73,29 +115,29 @@ struct ArtworkView: View {
                 )
             )
             .overlay {
-                if let url {
-                    if url.isFileURL, let image = UIImage(contentsOfFile: url.path) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        AsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image.resizable().scaledToFill()
-                            default:
-                                Image(systemName: glyph)
-                                    .font(.system(size: 22, weight: .semibold))
-                                    .foregroundStyle(.white.opacity(0.85))
-                            }
-                        }
-                    }
-                } else {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else if url == nil {
                     Image(systemName: glyph)
                         .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.82))
                 }
+                // While a real cover loads, the gradient shows (no glyph flash).
             }
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .task(id: url) { await loadImage() }
+    }
+
+    private func loadImage() async {
+        guard let url else { image = nil; return }
+        // Sync cache hit first → no flicker for already-decoded covers.
+        if let hit = ThumbnailLoader.cached(url, maxPixel: maxPixel) { image = hit; return }
+        if url.isFileURL {
+            image = await ThumbnailLoader.thumbnail(for: url, maxPixel: maxPixel)
+        } else if let (data, _) = try? await URLSession.shared.data(from: url) {
+            image = UIImage(data: data)
+        }
     }
 }

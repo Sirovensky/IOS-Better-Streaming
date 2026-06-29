@@ -32,6 +32,12 @@ final class AppModel {
     var isNowPlayingPresented = false
 
     private var trackIndex: [String: Int] = [:]
+    /// Artist index, built once per library change in `rebuildIndex` — so artist
+    /// queries are O(1) instead of re-running the credited-artist regex over the
+    /// whole library on every access (which made a big artist's page take 5–10s).
+    private var artistTrackIDs: [String: [String]] = [:]
+    private var artistDisplayNames: [String: String] = [:]
+    private var artistList: [Artist] = []
     /// Last track id counted as a play, so a stall-recovery re-resolve of the
     /// SAME track (which re-fires onTrackStarted) doesn't double-count it.
     private var lastNotedPlayID: String?
@@ -392,6 +398,28 @@ final class AppModel {
 
     private func rebuildIndex() {
         trackIndex = Dictionary(tracks.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
+        // Build the artist index here (once), running the credited-artist regex a
+        // single time per track instead of per query.
+        var trackIDs: [String: [String]] = [:]
+        var names: [String: String] = [:]
+        var albumsByArtist: [String: Set<String>] = [:]
+        for track in tracks where track.kind == .audio {
+            for name in MetadataGrouping.creditedArtists(track.artist) {
+                let id = MetadataGrouping.normalizeKey(name)
+                guard !id.isEmpty else { continue }
+                trackIDs[id, default: []].append(track.id)
+                if names[id] == nil { names[id] = name }
+                albumsByArtist[id, default: []].insert(track.albumID)
+            }
+        }
+        artistTrackIDs = trackIDs
+        artistDisplayNames = names
+        artistList = trackIDs.keys.map { id in
+            Artist(id: id, name: names[id] ?? id,
+                   albumCount: albumsByArtist[id]?.count ?? 0,
+                   trackCount: trackIDs[id]?.count ?? 0, artworkURL: nil)
+        }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     // MARK: Derived collections
@@ -423,38 +451,11 @@ final class AppModel {
         .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
-    var artists: [Artist] {
-        // One entry per individual credited artist. A track credited to several
-        // artists (feat./collab) is counted under each, so a featured artist gets
-        // their own page listing that song while the album stays under its lead.
-        struct Acc { var name: String; var albums: Set<String> = []; var tracks = 0 }
-        var byID: [String: Acc] = [:]
-        for track in tracks where track.kind == .audio {
-            for name in MetadataGrouping.creditedArtists(track.artist) {
-                let id = MetadataGrouping.normalizeKey(name)
-                guard !id.isEmpty else { continue }
-                var acc = byID[id] ?? Acc(name: name)
-                acc.albums.insert(track.albumID)
-                acc.tracks += 1
-                byID[id] = acc
-            }
-        }
-        return byID.map { id, acc in
-            Artist(id: id, name: acc.name, albumCount: acc.albums.count, trackCount: acc.tracks, artworkURL: nil)
-        }
-        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
+    /// One entry per individual credited artist. Built in `rebuildIndex` (O(1) here).
+    var artists: [Artist] { artistList }
 
     /// Display name for an artist id (the first-seen credit spelling).
-    func artistName(_ artistID: String) -> String? {
-        for track in tracks where track.kind == .audio {
-            for name in MetadataGrouping.creditedArtists(track.artist)
-            where MetadataGrouping.normalizeKey(name) == artistID {
-                return name
-            }
-        }
-        return nil
-    }
+    func artistName(_ artistID: String) -> String? { artistDisplayNames[artistID] }
 
     /// Read-only library stats for the Home "Your Library" card (no setup/actions).
     struct LibraryStats {
@@ -495,8 +496,24 @@ final class AppModel {
         tracks.filter { $0.albumID == albumID }.sorted(by: albumTrackSort)
     }
 
+    /// Fetch + apply an album cover on demand (folder → embedded → online, per the
+    /// source and the online-artwork setting). Called when an album with no art is
+    /// opened, so the user doesn't have to wait for a background backfill pass.
+    func ensureAlbumArtwork(_ albumID: String) {
+        let albumTracks = tracks(forAlbum: albumID)
+        guard let representative = albumTracks.first,
+              !albumTracks.contains(where: { $0.artworkURL != nil }) else { return }
+        Task { [weak self] in
+            guard let self, let url = await self.library.remoteAlbumArtwork(for: representative) else { return }
+            for i in self.tracks.indices
+            where self.tracks[i].albumID == albumID && self.tracks[i].artworkURL == nil {
+                self.tracks[i].artworkURL = url
+            }
+        }
+    }
+
     func tracks(forArtist artistID: String) -> [Track] {
-        tracks.filter { $0.kind == .audio && $0.creditedArtistIDs.contains(artistID) }
+        (artistTrackIDs[artistID] ?? []).compactMap(track)
     }
 
     /// Per-artist dominant genre family. An artist whose tracks are tagged with a

@@ -70,7 +70,7 @@ struct TrackRowView: View {
                         .frame(width: 30, height: 44)
                 }
             }
-            .padding(.vertical, 6)
+            .padding(.vertical, 3)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

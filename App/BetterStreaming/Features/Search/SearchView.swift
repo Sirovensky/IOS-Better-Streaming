@@ -69,9 +69,11 @@ struct SearchView: View {
                 }
                 if !results.isEmpty {
                     SectionHeader(title: "Songs")
-                    ForEach(results) { track in
-                        TrackRowView(track: track, context: results)
-                        Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                    LazyVStack(spacing: 0) {
+                        ForEach(results) { track in
+                            TrackRowView(track: track, context: results)
+                            Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                        }
                     }
                 }
             }
