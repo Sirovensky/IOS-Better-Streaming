@@ -2,11 +2,13 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
+    @AppStorage(LibraryService.onlineArtworkKey) private var onlineArtwork = false
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 autoCacheSection
+                artworkSection
                 sourcesSection
                 aboutSection
             }
@@ -75,6 +77,24 @@ struct SettingsView: View {
                     .font(.caption.weight(.semibold))
             }
             .padding(.horizontal, 4)
+        }
+    }
+
+    // MARK: Artwork
+
+    private var artworkSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "Artwork", detail: "Fill in covers your files don’t carry")
+            VStack(spacing: 0) {
+                Toggle(isOn: $onlineArtwork) {
+                    settingsLabel("Online cover art",
+                                  "Fetch missing covers from MusicBrainz / Cover Art Archive",
+                                  icon: "photo.on.rectangle.angled")
+                }
+                .tint(DesignTokens.brandPrimary)
+                .padding(12)
+            }
+            .surfaceCard(fill: DesignTokens.surfaceCard)
         }
     }
 

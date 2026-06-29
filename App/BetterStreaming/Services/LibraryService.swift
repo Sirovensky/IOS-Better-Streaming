@@ -834,42 +834,56 @@ actor LibraryService {
         return url
     }
 
+    static let onlineArtworkKey = "onlineArtwork.enabled.v1"
+
     private func computeRemoteAlbumArtwork(for track: Track) async -> URL? {
         loadConfigsFromDiskIfNeeded()
         if let local = await cacheAlbumArtwork(for: track) { return local }
-        guard let cfg = configs.first(where: { $0.id == track.sourceID }),
-              cfg.proto != SourceProtocol.local.rawValue,
-              let client = backgroundClient(for: cfg),
-              let remote = track.remotePath, !remote.isEmpty else { return nil }
-        let path = RemotePath(displayPath: remote)
-        let ext = (remote as NSString).pathExtension
 
-        // Folder cover shared by the whole album directory.
-        let parentComponents = path.remotePathComponents.dropLast()
-        if !parentComponents.isEmpty {
-            let parent = RemotePath(displayPath: "/" + parentComponents.joined(separator: "/"))
-            if let entries = try? await client.list(parent),
-               let cover = entries.first(where: Self.isFolderCover),
-               let url = await cacheRemoteArtwork(from: cover, client: client) {
-                return url
+        // Remote source: folder cover, then embedded art via a ranged read — a
+        // cover WITHOUT downloading the whole track.
+        if let cfg = configs.first(where: { $0.id == track.sourceID }),
+           cfg.proto != SourceProtocol.local.rawValue,
+           let client = backgroundClient(for: cfg),
+           let remote = track.remotePath, !remote.isEmpty {
+            let path = RemotePath(displayPath: remote)
+            let ext = (remote as NSString).pathExtension
+
+            let parentComponents = path.remotePathComponents.dropLast()
+            if !parentComponents.isEmpty {
+                let parent = RemotePath(displayPath: "/" + parentComponents.joined(separator: "/"))
+                if let entries = try? await client.list(parent),
+                   let cover = entries.first(where: Self.isFolderCover),
+                   let url = await cacheRemoteArtwork(from: cover, client: client) {
+                    return url
+                }
+            }
+
+            var size = track.sizeBytes
+            if size == nil { size = (try? await client.stat(path))?.size }
+            if let size, size > 0 {
+                let probeLen = min(size, Int64(EmbeddedMetadataReader.defaultProbeLength))
+                let probe = try? await client.read(path, range: 0..<probeLen)
+                let entry = RemoteEntry(
+                    name: (remote as NSString).lastPathComponent,
+                    path: path, kind: .file, size: size, modifiedAt: nil
+                )
+                if let art = await remoteArtwork(entry: entry, client: client, probe: probe, ext: ext) {
+                    return cacheEmbeddedArtwork(art, key: "\(cfg.id)::\(track.albumID)")
+                }
             }
         }
 
-        // Embedded art via a ranged probe (+ exact hi-res read inside remoteArtwork).
-        var size = track.sizeBytes
-        if size == nil { size = (try? await client.stat(path))?.size }
-        guard let size, size > 0 else { return nil }
-        let probeLen = min(size, Int64(EmbeddedMetadataReader.defaultProbeLength))
-        let probe = try? await client.read(path, range: 0..<probeLen)
-        let entry = RemoteEntry(
-            name: (remote as NSString).lastPathComponent,
-            path: path,
-            kind: .file,
-            size: size,
-            modifiedAt: nil
-        )
-        if let art = await remoteArtwork(entry: entry, client: client, probe: probe, ext: ext) {
-            return cacheEmbeddedArtwork(art, key: "\(cfg.id)::\(track.albumID)")
+        // Last resort (opt-in): online cover lookup by artist + album.
+        if UserDefaults.standard.bool(forKey: Self.onlineArtworkKey),
+           let data = await OnlineArtworkClient.shared.frontCover(artist: track.artist, album: track.album),
+           !data.isEmpty {
+            let dest = artworkDir.appendingPathComponent(Self.stableHash("online::\(track.albumID)") + ".jpg")
+            if (try? data.write(to: dest, options: .atomic)) != nil,
+               FileManager.default.fileExists(atPath: dest.path) {
+                applyPlaybackFileProtection(dest)
+                return dest
+            }
         }
         return nil
     }
