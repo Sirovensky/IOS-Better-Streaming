@@ -46,24 +46,34 @@ struct RootTabView: View {
                         // `.gesture` (not high-priority) so the bar's own buttons
                         // still win taps; the drag only starts after real movement.
                         .gesture(expandDrag(height: height))
-                        // Keep the bar pinned above the tab bar — don't let the
-                        // keyboard shove it up (it used to float over the keyboard
-                        // with the tab-bar padding still attached).
-                        .ignoresSafeArea(.keyboard, edges: .bottom)
                 }
             }
+            // Pin the whole stack to the real screen bottom so the keyboard never
+            // shoves the floating mini bar up above it. Must live on the ZStack,
+            // not the bar: the bar is bottom-aligned, so when the keyboard shrank
+            // the stack's safe area the bar reflowed up regardless of its own
+            // .ignoresSafeArea. The search field sits at the top, so the list
+            // under the keyboard just scrolls as usual.
+            .ignoresSafeArea(.keyboard, edges: .bottom)
             .overlay {
                 if model.engine.currentTrack != nil {
+                    // Bloom OUT of the mini bar instead of sliding the whole sheet
+                    // up from the screen bottom: scale + corner-radius + opacity all
+                    // grow from a low anchor (where the bar floats), giving a
+                    // liquid-glass zoom that still tracks the finger via `p`.
+                    let anchorY = min(max(1 - 86 / max(proxy.size.height, 1), 0), 1)
+                    let miniAnchor = UnitPoint(x: 0.5, y: anchorY)
                     NowPlayingView(
                         dragFraction: $dragFraction,
                         presented: $model.isNowPlayingPresented,
                         containerHeight: height
                     )
                     .environment(model)
-                    .offset(y: (1 - p) * height)
-                    .opacity(p < 0.001 ? 0 : 1)
-                    .allowsHitTesting(p > 0.5)
                     .ignoresSafeArea()
+                    .scaleEffect(0.6 + 0.4 * p, anchor: miniAnchor)
+                    .clipShape(RoundedRectangle(cornerRadius: (1 - p) * 30, style: .continuous))
+                    .opacity(Double(min(p * 1.3, 1)))
+                    .allowsHitTesting(p > 0.5)
                 }
             }
             // Animate only the settled tap-open/close; a live drag already moves
@@ -71,6 +81,12 @@ struct RootTabView: View {
             .animation(dragFraction == nil ? .interpolatingSpring(stiffness: 320, damping: 30) : nil,
                        value: model.isNowPlayingPresented)
             .animation(.snappy(duration: 0.25), value: model.engine.currentTrack)
+            // If the track vanishes mid-drag (queue cleared / source removed), the
+            // gesture-holding bar is torn down and .onEnded never fires — reset so
+            // the next track can't mount the player at a stale partial fraction.
+            .onChange(of: model.engine.currentTrack == nil) { _, gone in
+                if gone { dragFraction = nil; model.isNowPlayingPresented = false }
+            }
         }
         .fullScreenCover(isPresented: Binding(get: { model.needsOnboarding }, set: { _ in })) {
             OnboardingView()
