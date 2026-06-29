@@ -52,6 +52,7 @@ final class AppModel {
         offlineMode = UserDefaults.standard.bool(forKey: "offlineMode.v1")
         hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "onboarded.v1")
         recentlyPlayedIDs = UserDefaults.standard.stringArray(forKey: Self.recentlyPlayedKey) ?? []
+        loadPlaylists()
         wireEngine()
         wireAutoCache()
         Task { await bootstrap() }
@@ -595,6 +596,102 @@ final class AppModel {
         guard !list.isEmpty else { return }
         if shuffled { engine.playShuffled(list) }
         else { engine.setShuffle(false); engine.play(list, startAt: 0) }
+    }
+
+    // MARK: Playlists (user-created + .m3u import)
+
+    private static let playlistsKey = "playlists.v1"
+
+    func loadPlaylists() {
+        guard let data = UserDefaults.standard.data(forKey: Self.playlistsKey),
+              let decoded = try? JSONDecoder().decode([Playlist].self, from: data) else { return }
+        // Keep only user playlists (not live folders, which are derived).
+        playlists = decoded
+    }
+
+    private func persistPlaylists() {
+        let userPlaylists = playlists.filter { !$0.isLiveFolder }
+        if let data = try? JSONEncoder().encode(userPlaylists) {
+            UserDefaults.standard.set(data, forKey: Self.playlistsKey)
+        }
+    }
+
+    @discardableResult
+    func createPlaylist(name: String, trackIDs: [String] = []) -> Playlist {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let playlist = Playlist(
+            id: UUID().uuidString,
+            name: trimmed.isEmpty ? "New Playlist" : trimmed,
+            subtitle: "Playlist",
+            trackIDs: trackIDs,
+            artworkURLs: artworkURLs(for: trackIDs),
+            isLiveFolder: false
+        )
+        playlists.insert(playlist, at: 0)
+        persistPlaylists()
+        return playlist
+    }
+
+    func renamePlaylist(_ id: String, to name: String) {
+        guard let i = playlists.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        playlists[i].name = trimmed
+        persistPlaylists()
+    }
+
+    func deletePlaylist(_ id: String) {
+        playlists.removeAll { $0.id == id }
+        persistPlaylists()
+    }
+
+    func addToPlaylist(_ playlistID: String, trackIDs newIDs: [String]) {
+        guard let i = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        // Append, skipping ones already present (preserve order).
+        let existing = Set(playlists[i].trackIDs)
+        playlists[i].trackIDs.append(contentsOf: newIDs.filter { !existing.contains($0) })
+        playlists[i].artworkURLs = artworkURLs(for: playlists[i].trackIDs)
+        persistPlaylists()
+    }
+
+    func removeFromPlaylist(_ playlistID: String, at offsets: IndexSet) {
+        guard let i = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        playlists[i].trackIDs.remove(atOffsets: offsets)
+        playlists[i].artworkURLs = artworkURLs(for: playlists[i].trackIDs)
+        persistPlaylists()
+    }
+
+    private func artworkURLs(for trackIDs: [String]) -> [URL] {
+        trackIDs.prefix(4).compactMap { track($0)?.artworkURL }
+    }
+
+    /// Import a `.m3u`/`.m3u8` playlist file: match each referenced path to a
+    /// library track by filename (case-insensitive), preserving order. Creates a
+    /// playlist named after the file. Returns the new playlist, or nil if nothing
+    /// matched.
+    @discardableResult
+    func importM3U(from url: URL) -> Playlist? {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        guard let text = (try? String(contentsOf: url, encoding: .utf8))
+            ?? (try? String(contentsOf: url, encoding: .isoLatin1)) else { return nil }
+        // Index library tracks by lowercased filename for matching.
+        var byFilename: [String: String] = [:]   // filename -> trackID
+        for t in tracks {
+            let file = ((t.remotePath ?? t.folderPath) as NSString).lastPathComponent.lowercased()
+            if !file.isEmpty, byFilename[file] == nil { byFilename[file] = t.id }
+        }
+        var matched: [String] = []
+        var seen = Set<String>()
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            let file = (line as NSString).lastPathComponent.lowercased()
+            if let id = byFilename[file], seen.insert(id).inserted { matched.append(id) }
+        }
+        guard !matched.isEmpty else { return nil }
+        let name = (url.lastPathComponent as NSString).deletingPathExtension
+        return createPlaylist(name: name, trackIDs: matched)
     }
 
     func shuffleAll() {

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Routing
 
@@ -255,7 +256,10 @@ struct SquareArtTileStatic: View {
 
 struct PlaylistDetailView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
     var playlistID: String
+    @State private var showingRename = false
+    @State private var renameText = ""
 
     private var playlist: Playlist? { model.playlists.first { $0.id == playlistID } }
     private var playlistTracks: [Track] { model.tracks(playlist?.trackIDs ?? []) }
@@ -288,6 +292,28 @@ struct PlaylistDetailView: View {
         .appScreenBackground()
         .navigationTitle(playlist?.name ?? "Playlist")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let playlist, !playlist.isLiveFolder {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button { renameText = playlist.name; showingRename = true } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            model.deletePlaylist(playlist.id)
+                            dismiss()
+                        } label: {
+                            Label("Delete Playlist", systemImage: "trash")
+                        }
+                    } label: { Image(systemName: "ellipsis.circle") }
+                }
+            }
+        }
+        .alert("Rename Playlist", isPresented: $showingRename) {
+            TextField("Name", text: $renameText)
+            Button("Save") { model.renamePlaylist(playlistID, to: renameText) }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 }
 
@@ -547,7 +573,68 @@ struct AllArtistsView: View {
 
 struct AllPlaylistsView: View {
     @Environment(AppModel.self) private var model
+    @State private var showingNew = false
+    @State private var newName = ""
+    @State private var showingImporter = false
+    @State private var importMessage: String?
+
+    private static let m3uTypes: [UTType] = [
+        UTType(filenameExtension: "m3u") ?? .plainText,
+        UTType(filenameExtension: "m3u8") ?? .plainText,
+        .plainText
+    ]
+
     var body: some View {
+        Group {
+            if model.playlists.isEmpty {
+                emptyState
+            } else {
+                listView
+            }
+        }
+        .appScreenBackground()
+        .navigationTitle("Playlists")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("New Playlist", systemImage: "plus") { newName = ""; showingNew = true }
+                    Button("Import .m3u…", systemImage: "square.and.arrow.down") { showingImporter = true }
+                } label: { Image(systemName: "plus") }
+            }
+        }
+        .alert("New Playlist", isPresented: $showingNew) {
+            TextField("Name", text: $newName)
+            Button("Create") { model.createPlaylist(name: newName) }
+            Button("Cancel", role: .cancel) {}
+        }
+        .fileImporter(isPresented: $showingImporter, allowedContentTypes: Self.m3uTypes) { result in
+            if case .success(let url) = result {
+                importMessage = model.importM3U(from: url) == nil ? "No tracks in that file matched your library." : nil
+            }
+        }
+        .alert("Import", isPresented: Binding(get: { importMessage != nil }, set: { if !$0 { importMessage = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(importMessage ?? "") }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "music.note.list")
+                .font(.system(size: 48))
+                .foregroundStyle(DesignTokens.brandPrimary)
+            Text("No playlists yet")
+                .font(.title3.weight(.bold))
+                .foregroundStyle(DesignTokens.textPrimary)
+            Text("Create one with the + button, or import a .m3u file.")
+                .font(.subheadline)
+                .foregroundStyle(DesignTokens.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var listView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(model.playlists) { playlist in

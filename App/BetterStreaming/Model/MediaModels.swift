@@ -460,7 +460,7 @@ struct Artist: Identifiable, Hashable, Sendable {
     var artworkURL: URL?
 }
 
-struct Playlist: Identifiable, Hashable, Sendable {
+struct Playlist: Identifiable, Hashable, Sendable, Codable {
     let id: String
     var name: String
     var subtitle: String

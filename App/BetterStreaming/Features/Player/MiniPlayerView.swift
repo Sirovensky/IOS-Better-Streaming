@@ -317,6 +317,15 @@ struct NowPlayingView: View {
             }
         }
         Button("Go to Album", systemImage: "square.stack") { path.append(.album(track.albumID)) }
+        Menu("Add to Playlist", systemImage: "text.badge.plus") {
+            Button("New Playlist", systemImage: "plus") {
+                model.createPlaylist(name: "New Playlist", trackIDs: [track.id])
+            }
+            if !model.playlists.isEmpty { Divider() }
+            ForEach(model.playlists) { playlist in
+                Button(playlist.name) { model.addToPlaylist(playlist.id, trackIDs: [track.id]) }
+            }
+        }
         Button("View Queue", systemImage: "list.bullet") { showQueue = true }
         Menu("Sleep Timer", systemImage: model.sleepTimerArmed ? "moon.zzz.fill" : "moon.zzz") {
             if model.sleepTimerArmed {
