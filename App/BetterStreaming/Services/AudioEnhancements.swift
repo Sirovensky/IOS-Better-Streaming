@@ -21,8 +21,9 @@ final class AudioEnhancements {
         static let crossfade = "audio.crossfadeSeconds"
     }
 
-    /// Centre frequencies for the EQ bands (Hz).
-    static let eqFrequencies: [Double] = [60, 230, 910, 3600, 14000]
+    /// Centre frequencies for the EQ bands (Hz). `nonisolated` so the EQ tap's
+    /// real-time (nonisolated) callbacks can read it.
+    nonisolated static let eqFrequencies: [Double] = [60, 230, 910, 3600, 14000]
 
     var replayGainEnabled: Bool { didSet { defaults.set(replayGainEnabled, forKey: Keys.replayGain) } }
     /// Manual preamp in dB (−12…+12). Also used as the EQ make-up/preamp.
@@ -48,8 +49,8 @@ final class AudioEnhancements {
         crossfadeSeconds = defaults.double(forKey: Keys.crossfade)
     }
 
-    /// dB → linear amplitude.
-    static func linear(fromDB db: Double) -> Float { Float(pow(10.0, db / 20.0)) }
+    /// dB → linear amplitude. `nonisolated` (pure) for the real-time tap.
+    nonisolated static func linear(fromDB db: Double) -> Float { Float(pow(10.0, db / 20.0)) }
 
     /// Parse a ReplayGain track-gain value (e.g. "-6.48 dB") from an AVAsset's
     /// metadata (TXXX:replaygain_track_gain / Vorbis REPLAYGAIN_TRACK_GAIN).

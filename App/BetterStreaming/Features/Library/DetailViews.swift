@@ -21,7 +21,9 @@ enum LibraryRoute: Hashable {
 /// `NavigationLink` inside `.contextMenu` doesn't work on iOS (detached platter),
 /// so menu items mutate the host path through this instead.
 private struct LibraryNavigateKey: EnvironmentKey {
-    static let defaultValue: ((LibraryRoute) -> Void)? = nil
+    // nil default; real values are MainActor closures set/read only in SwiftUI's
+    // MainActor context, so the static is safe to mark nonisolated(unsafe).
+    nonisolated(unsafe) static let defaultValue: ((LibraryRoute) -> Void)? = nil
 }
 
 extension EnvironmentValues {

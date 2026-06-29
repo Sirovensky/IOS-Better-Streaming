@@ -28,7 +28,7 @@ enum AudioEQTap {
             process: tapProcess
         )
 
-        var tap: Unmanaged<MTAudioProcessingTap>?
+        var tap: MTAudioProcessingTap?
         let status = MTAudioProcessingTapCreate(
             kCFAllocatorDefault, &callbacks,
             kMTAudioProcessingTapCreationFlag_PostEffects, &tap
@@ -40,7 +40,7 @@ enum AudioEQTap {
         }
 
         let params = AVMutableAudioMixInputParameters()
-        params.audioTapProcessor = tap.takeRetainedValue()
+        params.audioTapProcessor = tap
         let mix = AVMutableAudioMix()
         mix.inputParameters = [params]
         return mix

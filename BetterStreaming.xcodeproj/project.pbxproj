@@ -11,6 +11,11 @@
 		08245D20643E9CDB6CCA67F2 /* Artwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12E89289617B809FA95582A3 /* Artwork.swift */; };
 		09CB91B7CE09CC0517254724 /* LibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */; };
 		0C2915DAA2525F4DC783977C /* PlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */; };
+		E9301FAA941716BF7F2C8515 /* AudioEnhancements.swift in Sources */ = {isa = PBXBuildFile; fileRef = C32FCBB5C450AFE0D0F7EC8D /* AudioEnhancements.swift */; };
+		7070077AE14564B5A28A59B4 /* AudioEQTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 199EA4FC8D5BBC1CD249D9B4 /* AudioEQTap.swift */; };
+		3C40B7057DD3A73AE78B94C2 /* CarPlaySceneController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67AE622562E8D0D8B5C27E22 /* CarPlaySceneController.swift */; };
+		79A25C9D28AA7EE72DD96DDF /* Lyrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E526507481B1CBEE44C69859 /* Lyrics.swift */; };
+		22020331366B4FDE2F38D21C /* OnlineArtworkClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5BA51BEC516B0D3E77816A8 /* OnlineArtworkClient.swift */; };
 		0E46E85BBB9BDEB1DE9A940F /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A775D9D0F736C93341DC053D /* LibraryView.swift */; };
 		18577502559950ADF1A0FE66 /* RadioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29D42752E6AB53570E3B5878 /* RadioView.swift */; };
 		2020D1F1D03AAD056E2AD787 /* MediaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EFDEF12E77AC32B75528948 /* MediaModels.swift */; };
@@ -46,6 +51,11 @@
 		67EC9B69AFFE0B8D3BE8D13D /* MediaCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCells.swift; sourceTree = "<group>"; };
 		6A8917473AFA9BF5C2915EC1 /* MiniPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerView.swift; sourceTree = "<group>"; };
 		7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackEngine.swift; sourceTree = "<group>"; };
+		C32FCBB5C450AFE0D0F7EC8D /* AudioEnhancements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEnhancements.swift; sourceTree = "<group>"; };
+		199EA4FC8D5BBC1CD249D9B4 /* AudioEQTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEQTap.swift; sourceTree = "<group>"; };
+		67AE622562E8D0D8B5C27E22 /* CarPlaySceneController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarPlaySceneController.swift; sourceTree = "<group>"; };
+		E526507481B1CBEE44C69859 /* Lyrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Lyrics.swift; sourceTree = "<group>"; };
+		E5BA51BEC516B0D3E77816A8 /* OnlineArtworkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineArtworkClient.swift; sourceTree = "<group>"; };
 		7F28BFCB240C171BEBF1D73F /* BetterStreamingCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BetterStreamingCore; path = Packages/BetterStreamingCore; sourceTree = SOURCE_ROOT; };
 		82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryService.swift; sourceTree = "<group>"; };
 		8EFDEF12E77AC32B75528948 /* MediaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaModels.swift; sourceTree = "<group>"; };
@@ -183,6 +193,11 @@
 				97CD9B642C6A08F1D3F191D1 /* KeychainStore.swift */,
 				82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */,
 				7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */,
+				C32FCBB5C450AFE0D0F7EC8D /* AudioEnhancements.swift */,
+				199EA4FC8D5BBC1CD249D9B4 /* AudioEQTap.swift */,
+				67AE622562E8D0D8B5C27E22 /* CarPlaySceneController.swift */,
+				E526507481B1CBEE44C69859 /* Lyrics.swift */,
+				E5BA51BEC516B0D3E77816A8 /* OnlineArtworkClient.swift */,
 				5C7A56D464C46BD86F239E4F /* RemoteStreamingService.swift */,
 			);
 			path = Services;
@@ -314,6 +329,11 @@
 				B5EF5E4C1F9FD30C4AFC38FE /* OfflineLibraryView.swift in Sources */,
 				64A40EC9D5D6E532D7798D5E /* OnboardingView.swift in Sources */,
 				0C2915DAA2525F4DC783977C /* PlaybackEngine.swift in Sources */,
+				E9301FAA941716BF7F2C8515 /* AudioEnhancements.swift in Sources */,
+				7070077AE14564B5A28A59B4 /* AudioEQTap.swift in Sources */,
+				3C40B7057DD3A73AE78B94C2 /* CarPlaySceneController.swift in Sources */,
+				79A25C9D28AA7EE72DD96DDF /* Lyrics.swift in Sources */,
+				22020331366B4FDE2F38D21C /* OnlineArtworkClient.swift in Sources */,
 				18577502559950ADF1A0FE66 /* RadioView.swift in Sources */,
 				B2B7B0DB65F0764A38B82548 /* RemoteFolderPicker.swift in Sources */,
 				F6101C021E0759D3CCCABFF8 /* RemoteStreamingService.swift in Sources */,
