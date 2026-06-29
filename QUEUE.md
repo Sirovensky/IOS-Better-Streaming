@@ -147,9 +147,12 @@ Goal: clear the whole backlog. Landed this sweep (each pushed to main):
 - **Crossfade** (`1614412`): opt-in single-player track fade-in/out (`crossfadeSeconds`, default 0 = off), composed with the RG base volume. NOTE: this is a *fade*, not sample-gapless — true gapless needs an `AVQueuePlayer` rewrite (still open below).
 - **CarPlay** (`12a557f`): browse + Now-Playing template code (`CarPlaySceneController.swift`) wired to `AppModel.shared`. **INERT** until 3 Apple/Xcode steps are done (can't be done/tested from here): add the `com.apple.developer.carplay-audio` entitlement, declare the CarPlay scene in Info.plist's `UIApplicationSceneManifest` alongside the SwiftUI scene, and test on CarPlay hardware/sim. See the header comment in that file.
 
-**Genuinely still open (need device/build loop or are blocked):**
-- **True sample-gapless** — needs the `AVQueuePlayer` core-renderer rework; deliberately not done blind (would risk the just-stabilized streaming). Crossfade/fade is shipped as the interim.
-- **CarPlay activation** — the 3 project steps above (entitlement + scene manifest + hardware test).
+**True gapless — DONE 2026-06-29 (`ecfa958` Phase 1 + `53f767e` Phase 2), UNBUILT.**
+- Phase 1: `AVPlayer` → `AVQueuePlayer` (single-item, no behavior change — `removeAllItems`+`insert`, not `replaceCurrentItem`).
+- Phase 2: preload the next track (only when gapless on, playing, not repeat-one, and the next is **already cached/local** → zero streaming contention), enqueued after the current. When the current ends, `handlePlaybackEnded` sees AVQueuePlayer already moved to the preloaded item and runs `gaplessAdvanced` (index/observers/started/volume/art bookkeeping, no re-resolve) → no gap. Preload invalidated on skip/remove/move/shuffle/repeat-change/sleep-timer. Opt-in `AudioEnhancements.gaplessEnabled` (default ON) + Settings toggle. Files: `PlaybackEngine.swift`, `AudioEnhancements.swift`, `SettingsView.swift`. **VERIFY on device:** two downloaded tracks advance with no gap; manual skip / reorder / shuffle / sleep-timer / repeat-one still behave; streaming (non-preloaded) tracks advance as before.
+
+**Genuinely still open (blocked / need device):**
+- **CarPlay activation** — the 3 project steps above (entitlement + scene manifest + hardware test); template code is in place.
 - Interactive finger-driven mini↔full player transition (needs sim/device gesture iteration); device-verify of artwork backfill + metadata rescans.
 
 ## BUGHUNT 2026-06-29 (3 Opus agents, whole-app re-verify of #2–#7)
