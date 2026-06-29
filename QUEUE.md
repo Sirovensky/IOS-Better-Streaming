@@ -5,76 +5,79 @@ Goal: Apple-Music/Spotify-quality player over the user's own SMB/WebDAV/FTP/SFTP
 
 ## Handoff context (read first)
 
-- **No Swift toolchain on the dev (Linux) box.** All Swift is written + statically reviewed blind; the user builds/tests on a Mac (`xcodegen generate` then build). The device is an iPhone 17 Pro. You are NOT the build loop — make changes the user can build, and lean on static review.
-- **Real test server available:** host `selfhosted-venus-series`, SMB shares **Swimming** and **Music** (Swimming needs username/password). Use it to verify folder structure, embedded-art presence/size, and metadata grouping. (Creds aren't in the repo — ask the user, or have them run an `smbclient`/`ls` dump.)
-- **Two agents share this file** (this one + a "Codex" agent on another PC). `git pull --rebase origin main` before every push.
+- **A Mac build box with the iPhone 17 Pro attached is available this session.** Claude can `xcodebuild` + install to the device, AND pull the live app DB for diagnosis:
+  `xcrun devicectl device copy from --device <id> --domain-type appDataContainer --domain-identifier com.betterstreaming.app --source "Library/Application Support/library.sqlite" --destination ./library.sqlite`
+  Device console logs (our `print()` lines, filter `BETTERSTREAMING_`): `xcrun devicectl device process launch --console --terminate-existing --device <id> com.betterstreaming.app`. Live syslog (CoreMedia/AVFoundation): `idevicesyslog -u <udid>`. The Codex agent on the other PC has **no** toolchain — keep changes buildable.
+- **Real test server:** host `SELFHOST-VENUS-SERIES._smb._tcp.local`, SMB share **Swimming**, music under **/Music** (full path `smb://SELFHOST-VENUS-SERIES._smb._tcp.local/Swimming/Music`). User is logged in on device. The build box is NOT on that LAN (can't resolve the `.local` mDNS), so device testing + pulled-DB inspection are the verification path.
+- **Two agents share this file** (this one + "Codex"). `git pull --rebase origin main` before every push.
 - **Commits:** author `Pavel <sirovensky@gmail.com>`, **no AI mentions/trailers**.
-- **Supply chain:** `swift-nio-ssh` resolves to a fork `github.com/Wellz26/swift-nio-ssh` (Citadel 0.12.1 points there; we now declare it directly for the SFTP host-key fix). Audit/replace when possible.
+- **Supply chain:** `swift-nio-ssh` resolves to a fork `github.com/Wellz26/swift-nio-ssh` (Citadel 0.12.1 points there; we declare it directly for the SFTP host-key fix). Audit/replace when possible.
 
 ## ACTIVE BUGS (priority order)
 
-### 1. Streaming still stalls / caching issue (NOT fully fixed) — TOP
-User reports streaming still stalls on **some** songs and on **scrub**, after the fixes below. This is the #1 issue.
+### 1. Streaming stall — HARD STALLS FIXED; minor jank remains
+Hard "plays then permanent silence" stalls are **fixed** (user-confirmed). Root cause was the "latest-data-request-wins" epoch added earlier: AVPlayer keeps several loading requests alive at once (one long `allToEnd` stream + small bounded probe/seek reads — confirmed on-device, FLAC streams as `allToEnd=true`), and the epoch aborted every request except the newest, killing the active playback stream → `FigByteStream_Remote err=-12871` / `FigFilePlayer err=-12864`. Fix: serve every request independently (cancel only via `didCancel`), per-chunk retry, and an SMB per-read timeout (12s) that resets a wedged connection. Reader pooling kept.
 
-**Symptoms observed:**
-- Some songs play a few seconds (~4s) then stall into silence; others play fine. No clear pattern yet.
-- On scrub: keeps playing the already-cached region, then after a few seconds the progress bar jumps to the target and EITHER resumes (if the data loads) OR sits in silence (stalled).
-- Scrubbing to a position only works once playback has downloaded that far (cached) — live ranged reads at un-downloaded offsets are the failure point.
+**Remaining minor (not hard stalls):**
+- Rapid song-switch can semi-stall ~10s: the single SMB connection (one-request mutex) is busy with prefetch/cache downloads of the previous track; recovers on scrub. → cancel the in-flight prefetch download on track change (`RemoteFileSystemClient.download` has no cancel token yet — add one).
+- Scrub to an un-cached position is janky: brief stop, jumps back, then 1–2s stall while it caches the target. Functional but ugly. → improve seek responsiveness / surface buffering at the scrub target.
+- **Caching speed / activity indicator** (still wanted): show download speed + buffered-ahead while caching so a buffering pause reads as progress, not a freeze.
 
-**What's already been done (commits `8e6f287`, `0adcbc3`):**
-- Removed the 12MB `finishLoading()` cap that faked EOF (the original "plays ~9s then stops").
-- Content-information request now finishes on its own WITHOUT serving its dataRequest, to push AVPlayer into byte-range/random-access mode (so it issues bounded ranged + seek requests). `App/BetterStreaming/Services/RemoteStreamingService.swift`.
-- Per-chunk file writes (no shared long-lived `FileHandle`) to avoid corruption under AVPlayer's concurrent loading requests.
-- Fully-streamed tracks are promoted into the media cache; bounded session map; stale partials reclaimed on launch.
+### 2. Album artwork — remote backfill added (VERIFY on device)
+Covers were blank because the whole art pipeline only read from a **local** file (so streamed/un-rescanned tracks got nothing). Added: remote artwork extraction (folder cover + embedded ranged read) that works without downloading the track; a throttled library-wide backfill of missing covers (persisted via upsert, no full rescan needed); now-playing/lock-screen art for streamed tracks. Verify covers populate on device.
 
-**Leading hypotheses NOT yet resolved (start here):**
-- **SMB transport can't serve concurrent / fast ranged reads.** `SMBRemoteClient.read` opens a NEW `fileReader` per call (open→read→close) — many round-trips, and two in-flight reads (playback + seek) may serialize or hang. `download()` reuses ONE reader and works, which supports this theory.
-- **`didCancel` is unreliable on device** (documented). If AVPlayer issues `requestsAllDataToEndOfResource` for the first DATA request, our loop serves 0→EOF and, if not cancelled, hogs the SMB transport, so a concurrent seek read can't get through → "few-second delay then maybe stall".
-- Need to confirm via device logs whether AVPlayer actually switched to BOUNDED ranged requests after the content-info fix (look for `BETTERSTREAMING_STREAM request ... allToEnd=` lines).
+### 3. Genre is messy → genre radios miss songs (NEW)
+Example: Amaranthe tracks are tagged inconsistently (rock / symphonic metal / heavy metal), so a "Heavy Metal" station misses some of their songs. Need genre **reconciliation/canonicalization**: alias/normalize genres (a hierarchy or alias map), and/or derive a per-artist consensus genre, so stations group sensibly. Also align `RadioView` genre grouping with `AppModel.tracks(forGenre:)` normalization. (Old "similar-to-seed picks unrelated genre" issue is downstream of this.)
 
-**Suggested next steps:**
-1. Get device console logs (filter `BETTERSTREAMING_`): confirm request shape (bounded vs allToEnd), offsets, and where reads hang/error.
-2. If still all-to-end / hogging: add a "latest data-request wins" epoch in `RemoteStreamSession` so an older serving loop aborts when a newer DATA request arrives (frees the SMB transport for seeks). Risk: AVPlayer prefetch concurrency — guard carefully.
-3. Serialize SMB reads per session and/or reuse a single open `fileReader` for sequential reads (mirror `download()`), opening a fresh one only for seeks.
-4. Consider `player.automaticallyWaitsToMinimizeStalling` and `currentItem.preferredForwardBufferDuration` tuning.
-5. Bigger option: `AVQueuePlayer` + true progressive buffering, or a battle-tested approach (study VIMediaCache / KTVHTTPCache patterns — research notes are in the session).
-6. Test matrix: MP3 vs FLAC vs M4A (M4A may also hit moov-atom-at-end → needs whole-file before play; detect moov position).
+## METADATA (deep-dive findings from the live DB — RESCAN needed for fixes to apply)
 
-### 2. Album artwork missing for SMB (fix pushed — VERIFY on device)
-- Just fixed (`66e26ef`): hi-res FLAC embedded covers (PICTURE block > 256KB probe) were never read because `parseFLAC` broke at the truncated block. Now the PICTURE block range is located from its header and ranged-read exactly; bounded fallback for ID3 APIC / MP4 covr. Art fetched once per album during scan. **Rescan required** to populate.
-- If art is STILL missing after rescan: (a) check folder-cover detection — `Self.isFolderCover` names list (`LibraryService` ~line 438) vs what the server actually has (use the real server); (b) verify `artworkURL` survives the MediaStore round-trip — `track(fromMediaItem:)` / `mediaItem(from:)` must persist+restore `artworkURL`; (c) confirm the cached art file path is still valid after relaunch (Caches dir).
-- Reference: VLC fetches Avantasia covers fine, so the art exists (embedded and/or folder cover).
+Pulled `library.sqlite` (860 items). Findings + status:
+- **Эпидемия didn't register** — the `Manriel_slskd/2010 Дорога домой` album has **no embedded tags**; path-derivation made artist = the junk soulseek download-folder ("Manriel_slskd") and left the real artist buried in the `NN - Artist - Title` filename. **Fixed:** parse `Artist - Title` from the filename when untagged (split on " - ", guards numeric/empty). NEEDS RESCAN.
+  - **TODO (user):** make filename parsing robust — artist may be AFTER the title ("Title - Artist"), or other layouts. Sample MULTIPLE files in a folder to infer the pattern rather than assume `Artist - Title`. Hard to do without edge cases — get a sub-agent to design the rule.
+- **"Full Kaidalov MP3" (203 tracks) are mojibake** (`�®¦ª¨ ¡ «¥à¨­`). The **filenames themselves are corrupted on the NAS** (soulseek Win-1251 bytes the NAS can't represent → SMB returns lossy `U+FFFD`). Not recoverable from the filename app-side; VLC shows the same. **User:** known bad archive, no clean copy — wants a way to **clean up on the server** (a rename/retag utility?). If those files DO carry embedded ID3 tags, the Win-1251 fix below now recovers them (tag beats bad filename).
+- **Cyrillic ID3 mojibake** — ID3v2 "ISO-8859-1" text frames are frequently mis-tagged Windows-1251 (Russian MP3s). **Fixed:** decode Latin-1, fall back to Windows-1251 when it yields more real letters (safe for genuine Western text). NEEDS RESCAN. (Not yet validated on real tagged data — the Kaidalov sample was filename-level, not tag-level.)
 
-### 3. Radio "similar to <seed>" picks unrelated genre
-- Seed "Get Up (Original Mix)" Skrillex & Korn (dubstep) → first track played was an acoustic singer-songwriter (Kaidalov). Similar-station selection isn't honoring genre/artist similarity.
-- Likely cause: genre tags are still "Unknown"/sparse for these tracks (embedded genre extraction quality), so the similar logic falls back to ~random. Check `AppModel` similar-station builder + `autoplayScore`, and verify genre is actually populated (use the real server / a rescan after the artwork+metadata fixes).
-- Also a known low: `RadioView` genre grouping vs `AppModel.tracks(forGenre:)` use mismatched normalization (trim/case) — align them.
+## METADATA / LIBRARY GROUPING (done this session — mostly recompute on launch, no rescan)
 
-## ROUND-2 ROBUSTNESS (from the adversarial bughunt; mediums/lows not yet done)
+- **Album split by feat./compilation FIXED.** `albumID` now keyed on the album **folder + title** (one folder = one album on a NAS; collapses `CD1/CD2` disc subfolders), not the per-track artist. "Moonglow" and the "F*** Me I'm Famous" / "Greatest Hits & Remixes" compilations no longer fragment. Recomputes on launch.
+- **Multi-artist credits.** Artist string is parsed into individual artists ("David Guetta feat. will.i.am & apl.de.ap" → 3). Each track is cross-listed under **every** credited artist (featured artist gets the song on their page); the album stays under the **primary** (first) artist. Artists list = one entry per individual. `artistID` = primary. **Caveat:** splits band names containing `&`/`,`/`vs.`/`x` (Above & Beyond, Earth Wind & Fire) — accepted default for a collab-heavy library; add a known-band exception list later if needed.
+- **Album display artist** = shared primary, else "Various Artists".
+- **recentlyAddedAlbums** now date-ordered with real trackCount + consensus artist.
+- **Artist tap-through:** album-detail subtitle links to the artist. **TODO this session:** make the Now-Playing (full player) artist clickable too.
 
-- **FTP:** per-operation timeouts + task-cancellation (silent server hangs forever); reuse a pooled logged-in control connection across range reads (+ `ABOR` on partial RETR); LIST/MSDOS dates in server TZ + Dec→Jan rollover; `parseUnix` filename trim. Needs device testing.
-- **SFTP:** `resolvedPath` forces absolute, breaking home-relative `basePath` (e.g. `Music` → `/Music` not `~/Music`); error mapping via typed SFTP status codes not substring match; list vs stat symlink consistency; Settings action to clear `ssh_known_hosts.json` when a host key legitimately changes.
-- **MediaStore (#33):** `replaceMediaItems` delete-then-insert reassigns every track's primary key per scan and cascade-deletes valid `cache_entries` — diff by `identity_key`. FTS5 `media_search` maintained but never queried (search is full-table scan + per-row JSON decode). Cached prepared statements; WAL/DatabasePool.
-- **Metadata:** ID3 unsync (0x80) + extended-header (0x40); Ogg/Opus page framing for tags+art; ID3 numeric genre table is truncated at 80 (add 80–191); ID3v1 + AIFF/AAC ID3-in-chunk.
-- **Auto-cache:** listening stats written to UserDefaults synchronously on every play (debounce); 3 unsynchronized cache representations; decide whether to wire or delete the unused `FileBackedCacheManager`.
-- **Lows:** artist-radio tiles always nil artwork; `recentlyAddedAlbums` not date-ordered + trackCount 0; `LibraryService.stableHash` FNV basis differs from probe's (cosmetic).
+## HOME SCREEN (NEW)
 
-## FEATURE BACKLOG (user approved ALL of these — build after the active bugs)
+- "Made For You" playlist is **empty** (nothing pre-populated) — populate it or remove it.
+- **Remove "Recently Added"** from Home.
+- Add **fun read-only stats** (total listened time, library info, counts) — NOT settings, no setup prompts; just delightful info.
 
-Priority order chosen for impact; each should be a self-contained, fully-finished commit (the user's rule: "one 100% done beats three half-baked").
-1. **Playlists + .m3u import** — create/rename/reorder/delete; persist (MediaStore has `playlist_entries`); add-to-playlist from track/album menus; Playlists section in Library + detail/play/shuffle; parse `.m3u`/`.m3u8` from the NAS. Biggest gap.
-2. **Gapless + crossfade** — `AVQueuePlayer` (or preroll next item); optional crossfade. Pairs with the existing pre-cache-next work. (Coordinate with the streaming-stall fix — both touch playback.)
-3. **Synced lyrics** — `.lrc` sidecar from NAS + embedded ID3 `USLT`/`SYLT`, time-synced in Now Playing.
-4. **Online artwork fallback** — Cover Art Archive / MusicBrainz when no embedded/folder art; cached; opt-in (leaves LAN).
-5. **CarPlay** — `CPNowPlayingTemplate` + browse templates.
-6. **Sleep timer** — stop after N min / end of track. Small.
-7. **Sort/filter + resume queue** — sort albums/songs by year/added/play-count; filter by genre; persist + resume the play queue on launch.
-8. **Equalizer + Replay Gain** — `AVAudioEngine`/`AVAudioUnitEQ` presets + gain-tag normalization. Largest (moves playback off `AVPlayer` — scope carefully, conflicts with the streaming work).
+## ROUND-2 ROBUSTNESS (from the adversarial bughunt; not yet done)
 
-## DONE (this session, pushed to main)
+- **FTP:** per-op timeouts + cancellation; pooled logged-in control connection across range reads (+ `ABOR` on partial RETR); LIST/MSDOS dates in server TZ + Dec→Jan rollover; `parseUnix` filename trim.
+- **SFTP:** `resolvedPath` forces absolute (breaks home-relative `basePath`); error mapping via typed SFTP status codes; list vs stat symlink consistency; Settings action to clear `ssh_known_hosts.json`.
+- **MediaStore (#33):** `replaceMediaItems` delete-then-insert reassigns PKs + cascade-deletes valid `cache_entries` — diff by `identity_key` (the new art backfill uses `upsertMediaItems`, which is the safe path). FTS5 `media_search` maintained but never queried. WAL/DatabasePool.
+- **Metadata:** ID3 unsync (0x80) + extended header (0x40); Ogg/Opus page framing for tags+art; ID3 numeric genre table truncated at 80 (add 80–191); ID3v1 + AIFF/AAC ID3-in-chunk. (Win-1251 fallback + filename Artist-Title now done.)
+- **Auto-cache:** listening stats written to UserDefaults synchronously per play (debounce); 3 unsynchronized cache representations; wire or delete `FileBackedCacheManager`.
+- **Offline view cache usage** — FIXED (refreshes real on-disk bytes on appear).
+- **Lows:** artist-radio tiles always nil artwork; `LibraryService.stableHash` FNV basis differs from probe's (cosmetic).
 
-- `66e26ef` artwork: hi-res FLAC embedded cover via exact PICTURE-block ranged read (+ bounded fallback).
-- `0adcbc3` streaming: finish content-info request separately (random-access mode) + per-chunk cache writes.
-- `e448f49` pre-cache next queue track for instant skip/advance.
-- `8e6f287` fix wave: streaming stall (12MB cap removed), config-load data-loss, MP4 metadata overflow crash, SFTP host-key TOFU + range-read truncation, FTP conn leak/PASV-NAT/truncation check, auto-cache eviction/budget/usage/convergence + play-counted-at-ready.
-- Earlier (Codex `cc9b753` + prior): FTP/SFTP adapters, GRDB swap, metadata-at-scan, Radio tab, remote artwork at scan, folder picker, local files, Library/search/Now-Playing polish.
+## FEATURE BACKLOG (user approved earlier — build after active bugs)
+
+1. **Playlists + .m3u import** — biggest gap.
+2. **Gapless + crossfade** (`AVQueuePlayer` / preroll). Coordinate with streaming work.
+3. **Synced lyrics** (`.lrc` + ID3 `USLT`/`SYLT`).
+4. **Online artwork fallback** (Cover Art Archive / MusicBrainz) — opt-in.
+5. **CarPlay.**
+6. **Sleep timer.**
+7. **Sort/filter + resume queue** on launch.
+8. **Equalizer + Replay Gain** (moves off `AVPlayer` — scope carefully).
+
+## DONE (this session — not yet committed/pushed unless noted)
+
+- Streaming hard-stall fix (remove epoch, per-chunk retry, SMB read timeout+reset; diagnosed from device logs).
+- Album/artist grouping: folder-keyed albumID, multi-artist credits, Various-Artists display, date-ordered recently-added.
+- Remote album-art backfill + now-playing art for streamed tracks.
+- Metadata: filename `Artist - Title` parse for untagged; ID3 Win-1251 fallback.
+- Offline view real cache-usage readout.
+- Album-detail artist tap-through.
+- (Earlier pushed) `66e26ef` hi-res FLAC embedded cover; `0adcbc3` content-info separate request; `e448f49` pre-cache next; `8e6f287` stall/data-loss/MP4/SFTP/FTP/auto-cache wave; Codex `cc9b753` FTP/SFTP/GRDB/metadata-at-scan/Radio/folder-picker/local-files.

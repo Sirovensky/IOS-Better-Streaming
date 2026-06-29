@@ -212,21 +212,46 @@ private extension EmbeddedMetadataReader {
 
     static func decodeID3Text(_ content: [UInt8]) -> String? {
         guard let encodingByte = content.first else { return nil }
-        let payload = content.dropFirst()
+        let payload = Data(content.dropFirst())
         let decoded: String?
         switch encodingByte {
         case 0:
-            decoded = String(data: Data(payload), encoding: .isoLatin1)
+            // ID3v2.3 "ISO-8859-1" frames in the wild are frequently mis-tagged
+            // single-byte Cyrillic (Windows-1251) — extremely common for Russian
+            // MP3s. Decode as Latin-1, but fall back to Windows-1251 when that
+            // yields real letters instead of symbol soup (mojibake).
+            decoded = decodeLatin1OrCyrillic(payload)
         case 1:
-            decoded = String(data: Data(payload), encoding: .utf16)
+            decoded = String(data: payload, encoding: .utf16)
         case 2:
-            decoded = String(data: Data(payload), encoding: .utf16BigEndian)
+            decoded = String(data: payload, encoding: .utf16BigEndian)
         case 3:
-            decoded = String(data: Data(payload), encoding: .utf8)
+            decoded = String(data: payload, encoding: .utf8)
         default:
-            decoded = String(data: Data(payload), encoding: .utf8)
+            decoded = String(data: payload, encoding: .utf8) ?? decodeLatin1OrCyrillic(payload)
         }
         return EmbeddedMediaMetadata.clean(decoded)
+    }
+
+    /// Decode a single-byte payload as Latin-1, but prefer Windows-1251 when it
+    /// produces more actual letters. Cyrillic text mis-stored as Latin-1 decodes
+    /// to a run of symbols (®, ¥, ª…); the same bytes as Windows-1251 decode to
+    /// real Cyrillic letters, so the letter count cleanly disambiguates without
+    /// corrupting genuine Western text (accented Latin scores equal letters and
+    /// keeps Latin-1).
+    static func decodeLatin1OrCyrillic(_ data: Data) -> String? {
+        let latin1 = String(data: data, encoding: .isoLatin1)
+        guard let cyrillic = windows1251String(data) else { return latin1 }
+        guard let latin1 else { return cyrillic }
+        let latinLetters = latin1.reduce(0) { $1.isLetter ? $0 + 1 : $0 }
+        let cyrillicLetters = cyrillic.reduce(0) { $1.isLetter ? $0 + 1 : $0 }
+        return cyrillicLetters > latinLetters ? cyrillic : latin1
+    }
+
+    static func windows1251String(_ data: Data) -> String? {
+        let cfEncoding = CFStringEncoding(CFStringEncodings.windowsCyrillic.rawValue)
+        let nsEncoding = CFStringConvertEncodingToNSStringEncoding(cfEncoding)
+        return String(data: data, encoding: String.Encoding(rawValue: nsEncoding))
     }
 
     static func parseFLAC(_ bytes: [UInt8]) -> EmbeddedMediaMetadata? {

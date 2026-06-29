@@ -204,7 +204,7 @@ actor LibraryService {
 
     /// Recursively scan a source into tracks (path-first). Returns the full
     /// merged library so the caller can replace its state.
-    func scan(sourceID: String) async throws -> [Track] {
+    func scan(sourceID: String, progress: (@Sendable (Int) -> Void)? = nil) async throws -> [Track] {
         await loadLibraryFromDiskIfNeeded()
         guard let cfg = configs.first(where: { $0.id == sourceID }) else { return allTracks }
 
@@ -226,11 +226,24 @@ actor LibraryService {
         // real shares show as Unavailable. Here a deep folder failure is skipped;
         // only a failure on the FIRST (root) list is treated as a real connection
         // error and surfaced.
+        // Incremental: reuse tracks for unchanged files. `stableKey` encodes size
+        // + modified-time, so an unchanged file produces the same id and we skip
+        // its metadata probe entirely (a rescan of an unchanged library is then
+        // near-instant). Reused tracks keep their existing artwork. Artwork for
+        // NEW/changed files is left to the post-scan backfill so the scan's hot
+        // path is just cheap metadata probes — no multi-MB cover reads inline,
+        // which is what made a full scan look like it hung "forever".
+        let existing = Dictionary(
+            allTracks.filter { $0.sourceID == sourceID }.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
         let classifier = MediaFileClassifier()
         var scanned: [Track] = []
         var pending: [RemotePath] = [RemotePath(displayPath: cfg.rootPath)]
         var visited = Set<String>()
         var listedAnyFolder = false
+        var filesSeen = 0
 
         while let dir = pending.popLast() {
             if Task.isCancelled { break }
@@ -246,58 +259,50 @@ actor LibraryService {
                 continue
             }
 
-            let coverEntry = entries.first(where: Self.isFolderCover)
-            var directoryTracks: [Track] = []
-            var embeddedArtworkByAlbum: [String: URL] = [:]
             for entry in entries {
+                if Task.isCancelled { break }
                 switch entry.kind {
                 case .directory:
                     if visited.count + pending.count < 50_000 { pending.append(entry.path) }
                 case .file:
-                    if let kind = classifier.classify(entry), scanned.count < 100_000 {
+                    guard let kind = classifier.classify(entry), scanned.count < 100_000 else { break }
+                    let key = entryIdentity(entry, cfg: cfg).stableKey
+                    if let prior = existing[key] {
+                        scanned.append(prior)   // unchanged — no re-probe, keep artwork
+                    } else {
                         let ext = (entry.name as NSString).pathExtension
                         let probe = await embeddedProbe(for: entry, client: client)
                         let embedded = probe.flatMap { data -> EmbeddedMediaMetadata? in
                             let parsed = EmbeddedMetadataReader.parse(data, fileExtension: ext)
                             return parsed.isEmpty ? nil : parsed
                         }
-                        var track = track(fromEntry: entry, kind: kind, cfg: cfg, embedded: embedded)
-                        if coverEntry == nil {
-                            if let artworkURL = embeddedArtworkByAlbum[track.albumID] {
-                                track.artworkURL = artworkURL
-                            } else if let artwork = await remoteArtwork(entry: entry, client: client, probe: probe, ext: ext),
-                                      let artworkURL = cacheEmbeddedArtwork(artwork, key: "\(cfg.id)::\(track.albumID)") {
-                                embeddedArtworkByAlbum[track.albumID] = artworkURL
-                                track.artworkURL = artworkURL
-                            }
-                        }
-                        directoryTracks.append(track)
+                        scanned.append(track(fromEntry: entry, kind: kind, cfg: cfg, embedded: embedded))
                     }
+                    filesSeen += 1
+                    if filesSeen % 20 == 0 { progress?(filesSeen) }
                 default:
                     break
                 }
             }
-            if let coverEntry,
-               !directoryTracks.isEmpty,
-               let artworkURL = await cacheRemoteArtwork(from: coverEntry, client: client) {
-                for index in directoryTracks.indices {
-                    directoryTracks[index].artworkURL = artworkURL
-                }
-            } else if !embeddedArtworkByAlbum.isEmpty {
-                for index in directoryTracks.indices {
-                    if let artworkURL = embeddedArtworkByAlbum[directoryTracks[index].albumID] {
-                        directoryTracks[index].artworkURL = artworkURL
-                    }
-                }
-            }
-            scanned.append(contentsOf: directoryTracks)
         }
 
+        progress?(filesSeen)
         allTracks.removeAll { $0.sourceID == sourceID }
         allTracks.append(contentsOf: scanned)
         refreshCacheStates()
         await persistLibrary(sourceID: sourceID, tracks: scanned)
         return allTracks
+    }
+
+    private func entryIdentity(_ entry: RemoteEntry, cfg: SourceConfig) -> RemoteItemIdentity {
+        RemoteItemIdentity(
+            sourceID: SourceID(rawValue: UUID(uuidString: cfg.id) ?? UUID()),
+            shareID: ShareID(rawValue: UUID(uuidString: cfg.shareID) ?? UUID()),
+            path: entry.path,
+            remoteFileID: entry.fileID,
+            size: entry.size,
+            modifiedAt: entry.modifiedAt
+        )
     }
 
     private func track(
@@ -306,14 +311,7 @@ actor LibraryService {
         cfg: SourceConfig,
         embedded: EmbeddedMediaMetadata? = nil
     ) -> Track {
-        let identity = RemoteItemIdentity(
-            sourceID: SourceID(rawValue: UUID(uuidString: cfg.id) ?? UUID()),
-            shareID: ShareID(rawValue: UUID(uuidString: cfg.shareID) ?? UUID()),
-            path: entry.path,
-            remoteFileID: entry.fileID,
-            size: entry.size,
-            modifiedAt: entry.modifiedAt
-        )
+        let identity = entryIdentity(entry, cfg: cfg)
         let metadata = Self.resolvedTrackMetadata(
             fileName: entry.name,
             pathComponents: entry.path.remotePathComponents,
@@ -326,8 +324,8 @@ actor LibraryService {
             title: metadata.title,
             artist: metadata.artist,
             album: metadata.album,
-            albumID: "\(metadata.artist)::\(metadata.album)".lowercased(),
-            artistID: metadata.artist.lowercased(),
+            // albumID/artistID derived from folder + feat-stripped artist by the
+            // Track initializer (see MetadataGrouping) — do not key on raw artist.
             genre: metadata.genre,
             durationSeconds: metadata.durationSeconds,
             trackNumber: metadata.trackNumber,
@@ -422,8 +420,16 @@ actor LibraryService {
         let fallbackArtist = fallbackArtist(folders: Array(folders), rootComponents: rootComponents)
 
         let embeddedTitle = cleanMetadataValue(embedded?.title).map(parseTrack)
-        let title = embeddedTitle?.title ?? (parsed.title.isEmpty ? fileName : parsed.title)
-        let artist = cleanMetadataValue(embedded?.artist) ?? fallbackArtist
+        // Recover "Artist - Title" from the file name when tags are missing —
+        // common for downloads stored as ".../NN - Artist - Title.ext" inside a
+        // junk username folder, where the real artist would otherwise be lost.
+        let fromName = splitArtistTitle(parsed.title)
+        let title = embeddedTitle?.title
+            ?? fromName.title
+            ?? (parsed.title.isEmpty ? fileName : parsed.title)
+        let artist = cleanMetadataValue(embedded?.artist)
+            ?? fromName.artist
+            ?? fallbackArtist
         let album = cleanMetadataValue(embedded?.album) ?? fallbackAlbum
         let genre = cleanMetadataValue(embedded?.genre) ?? "Unknown"
         let duration = embedded?.durationSeconds ?? 0
@@ -511,12 +517,11 @@ actor LibraryService {
         if offline { return nil }
         guard let cfg = configs.first(where: { $0.id == track.sourceID }),
               let client = makeClient(cfg) else {
-            #if DEBUG
             let hasConfig = configs.contains(where: { $0.id == track.sourceID })
-            print("BETTERSTREAMING_RESOLVE no_client title=\(track.title) source=\(track.sourceID) hasConfig=\(hasConfig)")
-            #endif
+            streamLog.error("resolve no_client title=\(track.title, privacy: .public) hasConfig=\(hasConfig)")
             return nil
         }
+        streamLog.info("resolve start title=\(track.title, privacy: .public)")
 
         let identity = remoteIdentity(for: track, cfg: cfg)
         guard client.capabilities.supportsByteRangeRead else {
@@ -539,9 +544,7 @@ actor LibraryService {
                 guard let url = await playableURL(for: track, offline: false) else { return nil }
                 return AVPlayerItem(url: url)
             }
-            #if DEBUG
-            print("BETTERSTREAMING_RESOLVE streaming title=\(track.title) ext=\(track.fileExtension) size=\(size) path=\(identity.path.displayPath)")
-            #endif
+            streamLog.info("resolve streaming title=\(track.title, privacy: .public) size=\(size)")
             let streamMetadata = RemoteMetadata(
                 path: metadata.path,
                 kind: metadata.kind,
@@ -562,9 +565,7 @@ actor LibraryService {
                 onComplete: { [weak self] in await self?.onStreamFullyCached(trackID) }
             )
         } catch {
-            #if DEBUG
-            print("BETTERSTREAMING_RESOLVE stat_error title=\(track.title) error=\(error)")
-            #endif
+            streamLog.error("resolve stat_error title=\(track.title, privacy: .public) err=\(String(describing: error), privacy: .public)")
             guard let url = await playableURL(for: track, offline: false) else { return nil }
             return AVPlayerItem(url: url)
         }
@@ -705,6 +706,94 @@ actor LibraryService {
         guard let data = await artworkData(for: track) else { return nil }
         try? data.write(to: dest, options: .atomic)
         return FileManager.default.fileExists(atPath: dest.path) ? dest : nil
+    }
+
+    /// Album artwork for a track fetched straight from the remote source —
+    /// folder cover (cover.jpg/folder.jpg/…) first, then embedded art via a
+    /// ranged read — so a cover can be obtained WITHOUT the whole track being
+    /// downloaded. Falls back to a local/cached file when one exists. This is
+    /// what lets streamed tracks show art and lets the library backfill covers
+    /// that an older scan never extracted (no full rescan needed).
+    func remoteAlbumArtwork(for track: Track) async -> URL? {
+        loadConfigsFromDiskIfNeeded()
+        if let local = await cacheAlbumArtwork(for: track) { return local }
+        guard let cfg = configs.first(where: { $0.id == track.sourceID }),
+              cfg.proto != SourceProtocol.local.rawValue,
+              let client = makeClient(cfg),
+              let remote = track.remotePath, !remote.isEmpty else { return nil }
+        let path = RemotePath(displayPath: remote)
+        let ext = (remote as NSString).pathExtension
+
+        // Folder cover shared by the whole album directory.
+        let parentComponents = path.remotePathComponents.dropLast()
+        if !parentComponents.isEmpty {
+            let parent = RemotePath(displayPath: "/" + parentComponents.joined(separator: "/"))
+            if let entries = try? await client.list(parent),
+               let cover = entries.first(where: Self.isFolderCover),
+               let url = await cacheRemoteArtwork(from: cover, client: client) {
+                return url
+            }
+        }
+
+        // Embedded art via a ranged probe (+ exact hi-res read inside remoteArtwork).
+        var size = track.sizeBytes
+        if size == nil { size = (try? await client.stat(path))?.size }
+        guard let size, size > 0 else { return nil }
+        let probeLen = min(size, Int64(EmbeddedMetadataReader.defaultProbeLength))
+        let probe = try? await client.read(path, range: 0..<probeLen)
+        let entry = RemoteEntry(
+            name: (remote as NSString).lastPathComponent,
+            path: path,
+            kind: .file,
+            size: size,
+            modifiedAt: nil
+        )
+        if let art = await remoteArtwork(entry: entry, client: client, probe: probe, ext: ext) {
+            return cacheEmbeddedArtwork(art, key: "\(cfg.id)::\(track.albumID)")
+        }
+        return nil
+    }
+
+    /// Fetch covers for albums that have no on-disk artwork file yet, from the
+    /// remote source. Returns albumID → artwork URL for albums that gained art.
+    /// Bounded per call so a large library backfills across a few passes without
+    /// hammering the server. Also persists the URLs so they survive relaunch.
+    func backfillAlbumArtwork(for tracks: [Track], limit: Int = 40) async -> [String: URL] {
+        var hasArt: Set<String> = []
+        var representative: [String: Track] = [:]
+        for track in tracks where track.kind == .audio {
+            if let url = track.artworkURL, url.isFileURL,
+               FileManager.default.fileExists(atPath: url.path) {
+                hasArt.insert(track.albumID)
+            } else if representative[track.albumID] == nil {
+                representative[track.albumID] = track
+            }
+        }
+        let targets = representative.filter { !hasArt.contains($0.key) }.values.prefix(limit)
+        var result: [String: URL] = [:]
+        for track in targets {
+            if Task.isCancelled { break }
+            if let url = await remoteAlbumArtwork(for: track) {
+                result[track.albumID] = url
+            }
+        }
+        await applyAlbumArtwork(result)
+        return result
+    }
+
+    /// Apply backfilled covers to the in-memory library and persist the artwork
+    /// URLs (upsert by identity, so cache rows and ids are preserved).
+    private func applyAlbumArtwork(_ map: [String: URL]) async {
+        guard !map.isEmpty else { return }
+        var changed: [Track] = []
+        for i in allTracks.indices {
+            if let url = map[allTracks[i].albumID], allTracks[i].artworkURL != url {
+                allTracks[i].artworkURL = url
+                changed.append(allTracks[i])
+            }
+        }
+        guard !changed.isEmpty else { return }
+        _ = try? await mediaStore.upsertMediaItems(changed.map(mediaItem(from:)))
     }
 
     private func cacheRemoteArtwork(from entry: RemoteEntry, client: any RemoteFileSystemClient) async -> URL? {
@@ -993,8 +1082,8 @@ actor LibraryService {
             title: metadata.title,
             artist: metadata.artist,
             album: metadata.album,
-            albumID: "\(metadata.artist)::\(metadata.album)".lowercased(),
-            artistID: metadata.artist.lowercased(),
+            // albumID/artistID derived from folder + feat-stripped artist by the
+            // Track initializer (see MetadataGrouping) — do not key on raw artist.
             genre: metadata.genre,
             durationSeconds: metadata.durationSeconds,
             trackNumber: metadata.trackNumber,
@@ -1196,6 +1285,20 @@ actor LibraryService {
     /// Parse a leading track number off a filename and return the cleaned title.
     /// "05 Avantasia - Song" -> (5, "Avantasia - Song"). Years like "1979 x"
     /// (4+ digits) are left untouched.
+    /// Split a "Artist - Title" file-name stem (after the track number has been
+    /// removed) into its parts. Uses " - " (space-dash-space) so hyphenated names
+    /// ("AC-DC", "Jay-Z") aren't split. Returns nils when there's no separator or
+    /// either side is empty / purely numeric, so well-formed "NN - Title" names
+    /// (no embedded artist) fall through to folder-derived artist.
+    nonisolated static func splitArtistTitle(_ stem: String) -> (artist: String?, title: String?) {
+        guard let range = stem.range(of: " - ") else { return (nil, nil) }
+        let artist = String(stem[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+        let title = String(stem[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+        guard !artist.isEmpty, !title.isEmpty else { return (nil, nil) }
+        if artist.allSatisfy({ $0.isNumber }) { return (nil, title) }
+        return (artist, title)
+    }
+
     static func parseTrack(_ rawTitle: String) -> (number: Int?, title: String) {
         let trimmed = rawTitle.trimmingCharacters(in: .whitespaces)
         let digits = trimmed.prefix(while: { $0.isNumber })

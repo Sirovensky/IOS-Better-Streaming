@@ -36,6 +36,7 @@ final class AppModel {
     private var sourceHealth: [String: SourceHealth] = [:]
     private var sourceMessages: [String: String] = [:]
     private var startupMaintenanceTask: Task<Void, Never>?
+    private var artworkBackfillTask: Task<Void, Never>?
     /// Warms the next queued track so advancing/skip is instant. Cancelled and
     /// replaced whenever the current track changes.
     private var prefetchTask: Task<Void, Never>?
@@ -58,6 +59,10 @@ final class AppModel {
         let snapshot = await library.bootstrap()
         sourceConfigs = snapshot.configs
         tracks = snapshot.tracks
+        #if DEBUG
+        await applyTestCredentialsIfNeeded()
+        autoplayForTestingIfNeeded()
+        #endif
         rebuildIndex()
         for cfg in sourceConfigs where sourceHealth[cfg.id] == nil { sourceHealth[cfg.id] = .asleep }
         rebuildSources()
@@ -65,6 +70,38 @@ final class AppModel {
         isLoadingSavedLibrary = !sourceConfigs.isEmpty
         schedulePostLaunchMaintenance()
     }
+
+    #if DEBUG
+    /// Test-only: inject an SMB password from the launch environment so the
+    /// Simulator (no Keychain) can authenticate against the real server during
+    /// development. Inert unless `BETTERSTREAMING_TEST_SMB_PASSWORD` is set; the
+    /// value lives only in memory and is never logged or persisted.
+    private func applyTestCredentialsIfNeeded() async {
+        guard let password = ProcessInfo.processInfo.environment["BETTERSTREAMING_TEST_SMB_PASSWORD"],
+              !password.isEmpty else { return }
+        for cfg in sourceConfigs where cfg.proto != SourceProtocol.local.rawValue {
+            await library.debugSetSessionPassword(password, sourceID: cfg.id)
+        }
+    }
+
+    /// Test-only: auto-play a track on launch (title substring in the env var, or
+    /// the first track) so streaming can be exercised headlessly in the Simulator
+    /// without UI taps. Inert unless `BETTERSTREAMING_TEST_AUTOPLAY` is set.
+    private func autoplayForTestingIfNeeded() {
+        guard let query = ProcessInfo.processInfo.environment["BETTERSTREAMING_TEST_AUTOPLAY"],
+              !query.isEmpty else { return }
+        Task { @MainActor in
+            for _ in 0..<30 where audioTracks.isEmpty {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            let pool = audioTracks
+            guard let track = pool.first(where: { $0.title.localizedCaseInsensitiveContains(query) }) ?? pool.first
+            else { return }
+            streamLog.info("AUTOPLAY \(track.title, privacy: .public)")
+            play(track, in: tracks(forAlbum: track.albumID))
+        }
+    }
+    #endif
 
     private func schedulePostLaunchMaintenance() {
         startupMaintenanceTask?.cancel()
@@ -81,6 +118,7 @@ final class AppModel {
             self.rebuildSources()
             self.isLoadingSavedLibrary = false
             self.reconcileAutoCache()
+            self.backfillArtwork()
 
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             guard !Task.isCancelled else { return }
@@ -93,13 +131,22 @@ final class AppModel {
     }
 
     func rescan(_ sourceID: String) async {
+        // The scan and the artwork backfill share the one SMB connection; let the
+        // scan have it (backfill re-runs at the end of the scan).
+        artworkBackfillTask?.cancel()
         isScanning = true
         sourceMessages[sourceID] = "Scanning…"
         sourceHealth[sourceID] = .degraded
         rebuildSources()
         defer { isScanning = false }
         do {
-            let updated = try await library.scan(sourceID: sourceID)
+            let updated = try await library.scan(sourceID: sourceID) { [weak self] count in
+                Task { @MainActor in
+                    guard let self, self.isScanning else { return }
+                    self.sourceMessages[sourceID] = "Scanning… \(count) files"
+                    self.rebuildSources()
+                }
+            }
             tracks = updated
             rebuildIndex()
             sourceHealth[sourceID] = .online
@@ -114,6 +161,27 @@ final class AppModel {
         }
         rebuildSources()
         reconcileAutoCache()
+        backfillArtwork()
+    }
+
+    /// Progressively fetch album covers missing an on-disk file, straight from
+    /// the remote source (folder cover or embedded ranged read). Runs in bounded
+    /// passes so a large library fills in without one giant burst, and updates
+    /// the UI as covers arrive. Skipped while offline (no source to read from).
+    private func backfillArtwork() {
+        artworkBackfillTask?.cancel()
+        guard !offlineMode, !sourceConfigs.isEmpty else { return }
+        artworkBackfillTask = Task { [weak self] in
+            guard let self else { return }
+            for _ in 0..<12 {
+                if Task.isCancelled { return }
+                let map = await self.library.backfillAlbumArtwork(for: self.tracks)
+                if Task.isCancelled || map.isEmpty { return }
+                for i in self.tracks.indices where self.tracks[i].artworkURL == nil {
+                    if let url = map[self.tracks[i].albumID] { self.tracks[i].artworkURL = url }
+                }
+            }
+        }
     }
 
     // MARK: Onboarding / sources
@@ -195,7 +263,13 @@ final class AppModel {
 
     private func rebuildSources() {
         sources = sourceConfigs.map { cfg in
-            let count = tracks.filter { $0.sourceID == cfg.id }.count
+            let srcTracks = tracks.filter { $0.sourceID == cfg.id }
+            let count = srcTracks.count
+            let folders = Set(srcTracks.map { track -> String in
+                MetadataGrouping.albumFolderComponents(forPath: track.remotePath ?? track.folderPath)
+                    .joined(separator: "/")
+            }).count
+            let totalBytes = srcTracks.reduce(Int64(0)) { $0 + ($1.sizeBytes ?? 0) }
             let health = sourceHealth[cfg.id] ?? .asleep
             let message = sourceMessages[cfg.id]
             return LibrarySource(
@@ -206,9 +280,11 @@ final class AppModel {
                 share: cfg.share,
                 health: health,
                 trackCount: count,
-                folderCount: 0,
+                folderCount: folders,
                 lastScanLabel: message ?? (count > 0 ? "\(count) songs" : (health == .unreachable ? "Couldn’t connect" : "Not scanned")),
-                speedLabel: "—"
+                speedLabel: "—",
+                sizeLabel: totalBytes > 0 ? AutoCacheController.byteLabel(totalBytes) : "—",
+                basePath: cfg.proto == SourceProtocol.local.rawValue ? "" : cfg.rootPath
             )
         }
     }
@@ -237,52 +313,156 @@ final class AppModel {
             guard let first = group.first else { return nil }
             let anyCached = group.contains { $0.cacheState.isPlayableOffline }
             let artworkURL = group.compactMap(\.artworkURL).first
-            return Album(id: first.albumID, title: first.album, artist: first.artist, artistID: first.artistID,
+            // Display artist is the album's shared primary artist (or "Various
+            // Artists"), not whichever feat.-credited track happens to be first.
+            let displayArtist = MetadataGrouping.albumDisplayArtist(from: group.map(\.artist))
+            return Album(id: first.albumID, title: first.album, artist: displayArtist, artistID: first.artistID,
                          year: nil, trackCount: group.count, cacheState: anyCached ? .cached : .remoteOnly, artworkURL: artworkURL)
         }
         .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
     var artists: [Artist] {
-        var grouped: [String: [Track]] = [:]
-        for track in tracks where track.kind == .audio { grouped[track.artistID, default: []].append(track) }
-        return grouped.values.compactMap { group -> Artist? in
-            guard let first = group.first else { return nil }
-            return Artist(id: first.artistID, name: first.artist,
-                          albumCount: Set(group.map(\.albumID)).count, trackCount: group.count, artworkURL: nil)
+        // One entry per individual credited artist. A track credited to several
+        // artists (feat./collab) is counted under each, so a featured artist gets
+        // their own page listing that song while the album stays under its lead.
+        struct Acc { var name: String; var albums: Set<String> = []; var tracks = 0 }
+        var byID: [String: Acc] = [:]
+        for track in tracks where track.kind == .audio {
+            for name in MetadataGrouping.creditedArtists(track.artist) {
+                let id = MetadataGrouping.normalizeKey(name)
+                guard !id.isEmpty else { continue }
+                var acc = byID[id] ?? Acc(name: name)
+                acc.albums.insert(track.albumID)
+                acc.tracks += 1
+                byID[id] = acc
+            }
+        }
+        return byID.map { id, acc in
+            Artist(id: id, name: acc.name, albumCount: acc.albums.count, trackCount: acc.tracks, artworkURL: nil)
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Display name for an artist id (the first-seen credit spelling).
+    func artistName(_ artistID: String) -> String? {
+        for track in tracks where track.kind == .audio {
+            for name in MetadataGrouping.creditedArtists(track.artist)
+            where MetadataGrouping.normalizeKey(name) == artistID {
+                return name
+            }
+        }
+        return nil
+    }
+
+    /// Read-only library stats for the Home "Your Library" card (no setup/actions).
+    struct LibraryStats {
+        var songs: Int
+        var albums: Int
+        var artists: Int
+        var totalDurationSeconds: Double
+        var totalPlays: Int
+        var listenedSeconds: Double
+        var favorites: Int
+    }
+
+    var libraryStats: LibraryStats {
+        let audio = audioTracks
+        var totalDuration = 0.0
+        var totalPlays = 0
+        var listened = 0.0
+        var favorites = 0
+        for track in audio {
+            if track.durationSeconds > 0 { totalDuration += track.durationSeconds }
+            let plays = autoCache.stat(for: track.id).playCount
+            totalPlays += plays
+            if track.durationSeconds > 0 { listened += Double(plays) * track.durationSeconds }
+            if track.isFavorite { favorites += 1 }
+        }
+        return LibraryStats(
+            songs: audio.count,
+            albums: Set(audio.map(\.albumID)).count,
+            artists: artists.count,
+            totalDurationSeconds: totalDuration,
+            totalPlays: totalPlays,
+            listenedSeconds: listened,
+            favorites: favorites
+        )
     }
 
     func tracks(forAlbum albumID: String) -> [Track] {
         tracks.filter { $0.albumID == albumID }.sorted(by: albumTrackSort)
     }
 
-    func tracks(forArtist artistID: String) -> [Track] { tracks.filter { $0.artistID == artistID } }
+    func tracks(forArtist artistID: String) -> [Track] {
+        tracks.filter { $0.kind == .audio && $0.creditedArtistIDs.contains(artistID) }
+    }
+
+    /// Per-artist dominant genre family. An artist whose tracks are tagged with a
+    /// mix of sub-genres (Amaranthe: rock / symphonic metal / heavy metal) gets
+    /// one consensus family, so a station pulls their whole catalog.
+    var genreConsensusByArtist: [String: String] {
+        var counts: [String: [String: Int]] = [:]
+        for track in tracks where track.kind == .audio {
+            guard let g = MetadataGrouping.canonicalGenre(track.genre) else { continue }
+            counts[track.artistID, default: [:]][g, default: 0] += 1
+        }
+        var result: [String: String] = [:]
+        for (artist, byGenre) in counts {
+            if let best = byGenre.max(by: { $0.value < $1.value })?.key { result[artist] = best }
+        }
+        return result
+    }
 
     func tracks(forGenre genre: String) -> [Track] {
-        audioTracks.filter { $0.genre.localizedCaseInsensitiveCompare(genre) == .orderedSame }
+        let target = MetadataGrouping.canonicalGenre(genre) ?? MetadataGrouping.normalizeKey(genre)
+        let consensus = genreConsensusByArtist
+        return audioTracks.filter { track in
+            let effective = consensus[track.artistID] ?? MetadataGrouping.canonicalGenre(track.genre)
+            return effective == target
+        }
+    }
+
+    /// Canonical genre stations for Radio, by track count. Uses artist-consensus
+    /// genres so sub-genre tagging noise doesn't fragment a band across stations.
+    func genreStations(minTracks: Int = 2, limit: Int = 14) -> [(name: String, trackCount: Int)] {
+        let consensus = genreConsensusByArtist
+        var counts: [String: Int] = [:]
+        for track in audioTracks {
+            guard let g = consensus[track.artistID] ?? MetadataGrouping.canonicalGenre(track.genre) else { continue }
+            counts[g, default: 0] += 1
+        }
+        return counts
+            .filter { $0.value >= minTracks }
+            .map { (name: $0.key, trackCount: $0.value) }
+            .sorted { $0.trackCount != $1.trackCount ? $0.trackCount > $1.trackCount : $0.name < $1.name }
+            .prefix(limit)
+            .map { $0 }
     }
 
     var recentlyPlayed: [Track] { recentlyPlayedIDs.compactMap(track) }
     var recentlyAddedAlbums: [Album] {
-        var seen = Set<String>()
-        var result: [Album] = []
-        for track in tracks where track.kind == .audio {
-            guard seen.insert(track.albumID).inserted else { continue }
-            result.append(Album(
-                id: track.albumID,
-                title: track.album,
-                artist: track.artist,
-                artistID: track.artistID,
+        var grouped: [String: [Track]] = [:]
+        for track in tracks where track.kind == .audio { grouped[track.albumID, default: []].append(track) }
+        return grouped.values.compactMap { group -> (album: Album, recency: Double)? in
+            guard let first = group.first else { return nil }
+            let recency = group.compactMap(\.modifiedAtEpoch).max() ?? 0
+            let anyCached = group.contains { $0.cacheState.isPlayableOffline }
+            let album = Album(
+                id: first.albumID,
+                title: first.album,
+                artist: MetadataGrouping.albumDisplayArtist(from: group.map(\.artist)),
+                artistID: first.artistID,
                 year: nil,
-                trackCount: 0,
-                cacheState: track.cacheState.isPlayableOffline ? .cached : .remoteOnly,
-                artworkURL: tracks.first(where: { $0.albumID == track.albumID && $0.artworkURL != nil })?.artworkURL
-            ))
-            if result.count == 8 { break }
+                trackCount: group.count,
+                cacheState: anyCached ? .cached : .remoteOnly,
+                artworkURL: group.compactMap(\.artworkURL).first
+            )
+            return (album, recency)
         }
-        return result
+        .sorted { $0.recency > $1.recency }
+        .prefix(8)
+        .map(\.album)
     }
 
     // MARK: Playback intents
@@ -462,8 +642,16 @@ final class AppModel {
             return await self.library.playableURL(for: track, offline: self.offlineMode)
         }
         engine.loadArtwork = { [weak self] track in
-            if let self, let data = await self.library.artworkData(for: track), let image = UIImage(data: data) {
-                return image
+            if let self {
+                if let data = await self.library.artworkData(for: track), let image = UIImage(data: data) {
+                    return image
+                }
+                // Streamed track with no local file yet: pull the album cover
+                // from the remote source so the lock screen still shows art.
+                if let url = await self.library.remoteAlbumArtwork(for: track),
+                   let image = UIImage(contentsOfFile: url.path) {
+                    return image
+                }
             }
             return Artwork.image(for: track.albumID, glyph: track.kind == .video ? "film" : "music.note")
         }
@@ -483,7 +671,7 @@ final class AppModel {
                         self.tracks[i].cacheState = .prefetched
                     }
                 }
-                if let art = await self.library.cacheAlbumArtwork(for: track) {
+                if let art = await self.library.remoteAlbumArtwork(for: track) {
                     for idx in self.tracks.indices
                     where self.tracks[idx].albumID == track.albumID && self.tracks[idx].artworkURL == nil {
                         self.tracks[idx].artworkURL = art
@@ -559,6 +747,18 @@ final class AppModel {
         let localIDs = Set(sourceConfigs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
         let evictable = audioTracks.filter { !localIDs.contains($0.sourceID) }
         autoCache.scheduleReconcile(library: evictable, reachable: reachable && !offlineMode)
+    }
+
+    /// Recompute the auto-cache storage readout from what is actually on disk.
+    /// `reconcile` only refreshes this on a successful, reachable pass, so at
+    /// launch / offline / right after opening the Offline screen the number was
+    /// stale (often 0 despite cached files). The Offline view calls this on
+    /// appear so the "X of Y" readout always reflects real on-disk bytes.
+    func refreshAutoCacheUsage() {
+        Task { [weak self] in
+            guard let self else { return }
+            self.autoCache.setUsage(await self.library.autoCachedBytes())
+        }
     }
 
     private func isLocalSource(_ sourceID: String) -> Bool {

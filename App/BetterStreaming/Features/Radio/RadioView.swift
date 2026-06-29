@@ -14,23 +14,7 @@ struct RadioView: View {
     }
 
     private var genreStations: [GenreStation] {
-        let grouped = Dictionary(grouping: model.audioTracks) { track in
-            track.genre.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return grouped.compactMap { genre, tracks in
-            guard !genre.isEmpty,
-                  genre.localizedCaseInsensitiveCompare("Unknown") != .orderedSame,
-                  tracks.count > 1 else {
-                return nil
-            }
-            return GenreStation(name: genre, trackCount: tracks.count)
-        }
-        .sorted { lhs, rhs in
-            if lhs.trackCount != rhs.trackCount { return lhs.trackCount > rhs.trackCount }
-            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-        }
-        .prefix(12)
-        .map { $0 }
+        model.genreStations().map { GenreStation(name: $0.name, trackCount: $0.trackCount) }
     }
 
     private var seedTracks: [Track] {

@@ -56,7 +56,7 @@ struct SourcesView: View {
                 Divider().frame(height: 28).overlay(DesignTokens.borderSubtle.opacity(0.1))
                 metric("\(source.folderCount)", "folders")
                 Divider().frame(height: 28).overlay(DesignTokens.borderSubtle.opacity(0.1))
-                metric(source.speedLabel, "read")
+                metric(source.sizeLabel, "on server")
             }
 
             HStack {

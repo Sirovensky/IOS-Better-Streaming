@@ -12,8 +12,8 @@ struct HomeView: View {
                         heroSection
                         if !model.recentlyPlayed.isEmpty { recentlyPlayedRail }
                         heavyRotationRail
-                        madeForYouRail
-                        recentlyAddedGrid
+                        if !model.playlists.isEmpty { madeForYouRail }
+                        statsSection
                         sourceThread
                     } else {
                         emptyState
@@ -201,20 +201,65 @@ struct HomeView: View {
         }
     }
 
-    // MARK: Recently added
+    // MARK: Your library — fun read-only stats (no actions / setup)
 
-    private var recentlyAddedGrid: some View {
+    @ViewBuilder
+    private var statsSection: some View {
+        let stats = model.libraryStats
         VStack(alignment: .leading, spacing: 12) {
-            SectionHeader(title: "Recently Added", actionTitle: "All") { path.append(.allAlbums) }
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 18) {
-                ForEach(model.recentlyAddedAlbums) { album in
-                    Button { path.append(.album(album.id)) } label: {
-                        AlbumGridCellStatic(album: album)
-                    }
-                    .buttonStyle(.plain)
+            SectionHeader(title: "Your Library")
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                statTile(value: "\(stats.songs)", label: "Songs", glyph: "music.note")
+                statTile(value: "\(stats.albums)", label: "Albums", glyph: "square.stack")
+                statTile(value: "\(stats.artists)", label: "Artists", glyph: "music.mic")
+                if stats.totalDurationSeconds > 0 {
+                    statTile(value: Self.durationLabel(stats.totalDurationSeconds), label: "In your library", glyph: "clock")
+                }
+                if stats.totalPlays > 0 {
+                    statTile(value: "\(stats.totalPlays)", label: "Plays", glyph: "play.circle")
+                }
+                if stats.listenedSeconds > 0 {
+                    statTile(value: Self.durationLabel(stats.listenedSeconds), label: "Listened", glyph: "headphones")
+                }
+                if stats.favorites > 0 {
+                    statTile(value: "\(stats.favorites)", label: "Favorites", glyph: "star.fill")
                 }
             }
         }
+    }
+
+    private func statTile(value: String, label: String, glyph: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: glyph)
+                .font(.title3)
+                .foregroundStyle(DesignTokens.brandPrimary)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(value)
+                    .font(.headline.monospacedDigit())
+                    .foregroundStyle(DesignTokens.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(DesignTokens.textSecondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .surfaceCard(fill: DesignTokens.surfaceCard)
+    }
+
+    /// "12 hr", "1.2k hr", "45 min" — friendly, compact.
+    private static func durationLabel(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "—" }
+        let hours = seconds / 3600
+        if hours >= 1 {
+            if hours >= 1000 { return String(format: "%.1fk hr", hours / 1000) }
+            return "\(Int(hours.rounded())) hr"
+        }
+        return "\(Int((seconds / 60).rounded())) min"
     }
 
     // MARK: Quiet source thread (not a dashboard)

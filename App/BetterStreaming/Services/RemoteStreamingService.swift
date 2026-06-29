@@ -1,8 +1,13 @@
 import AVFoundation
 import BetterStreamingDomain
 import Foundation
+import os
 import RemoteFileSystem
 import UniformTypeIdentifiers
+
+/// Streaming diagnostics — captured by `log stream`/Console on both device and
+/// simulator (unlike `print`), so stalls can be diagnosed from real logs.
+let streamLog = Logger(subsystem: "com.betterstreaming.app", category: "streaming")
 
 /// Builds AVPlayerItems that stream remote files through AVAssetResourceLoader.
 ///
@@ -108,6 +113,7 @@ extension RemoteStreamingService: AVAssetResourceLoaderDelegate {
         let requestID = ObjectIdentifier(loadingRequest)
         let box = lock.withLock { activeRequests.removeValue(forKey: requestID) }
         box?.cancel()
+        streamLog.info("didCancel offset=\(loadingRequest.dataRequest?.requestedOffset ?? -1)")
     }
 
     private func removeActiveRequest(id: ObjectIdentifier) {
@@ -150,9 +156,15 @@ private actor RemoteStreamSession {
     private var didSizeCacheFile = false
     /// Set once the partial file has been copied into the regular media cache.
     private var promoted = false
-    #if DEBUG
-    private var debugRequestCount = 0
-    #endif
+    /// A transient remote read failure (timeout / dropped connection) retries a
+    /// few times before the loading request is failed, so one hiccup doesn't end
+    /// playback. The underlying client resets a wedged connection on timeout, so
+    /// the retry reads through a fresh transport.
+    private static let maxReadRetries = 3
+    private static let retryBackoffNanos: UInt64 = 350_000_000
+    /// Incremented each time an `allToEnd` fill request starts; an older fill loop
+    /// stops once a newer one supersedes it. Only `allToEnd` requests participate.
+    private var allToEndEpoch: UInt64 = 0
 
     init(
         id: String,
@@ -209,8 +221,9 @@ private actor RemoteStreamSession {
         // currentOffset is initialised to requestedOffset and advances as we
         // respond; start from wherever we've already delivered.
         let offset = max(dataRequest.currentOffset, 0)
+        let isAllToEnd = dataRequest.requestsAllDataToEndOfResource
         let upper: Int64
-        if dataRequest.requestsAllDataToEndOfResource {
+        if isAllToEnd {
             // Disregard requestedLength; serve to the true end of the file.
             upper = length
         } else {
@@ -223,20 +236,42 @@ private actor RemoteStreamSession {
             return
         }
 
-        #if DEBUG
-        if debugRequestCount < 10 {
-            debugRequestCount += 1
-            print("BETTERSTREAMING_STREAM request ext=\(fallbackExtension) offset=\(offset) upper=\(upper) allToEnd=\(dataRequest.requestsAllDataToEndOfResource) fileLength=\(length)")
+        // Bounded probe/seek requests are always served in full (AVPlayer keeps
+        // several alive at once and needs them all — killing one stalls its byte
+        // stream). But an `allToEnd` fill loop is the long-running, transport-
+        // hogging one: when AVPlayer issues a NEWER allToEnd request (a reposition
+        // after the first fill) and its `didCancel` for the old one doesn't fire
+        // (unreliable on-device), the orphaned old loop keeps contending for the
+        // one-at-a-time SMB connection and starves the new fill → stall. So an
+        // allToEnd loop yields the moment a newer allToEnd request supersedes it.
+        // Bounded requests neither bump nor check this, so a probe never aborts a
+        // fill (which was the earlier "stall at 0:38" regression).
+        let myAllToEndEpoch: UInt64
+        if isAllToEnd {
+            allToEndEpoch &+= 1
+            myAllToEndEpoch = allToEndEpoch
+        } else {
+            myAllToEndEpoch = 0
         }
-        #endif
 
-        do {
-            var cursor = offset
-            while cursor < upper {
-                if box.isCancelled { return }
-                let chunkUpper = min(upper, cursor + Self.readChunkSize)
-                let range = cursor..<chunkUpper
-                let data: Data
+        streamLog.info("request ext=\(self.fallbackExtension, privacy: .public) offset=\(offset) upper=\(upper) allToEnd=\(isAllToEnd) len=\(length)")
+
+        var cursor = offset
+        var failures = 0
+        var sinceLog: Int64 = 0
+        while cursor < upper {
+            if box.isCancelled {
+                streamLog.info("cancelled_exit reqOffset=\(offset) servedTo=\(cursor)")
+                return
+            }
+            if isAllToEnd, myAllToEndEpoch != allToEndEpoch {
+                streamLog.info("superseded reqOffset=\(offset) servedTo=\(cursor)")
+                return
+            }
+            let chunkUpper = min(upper, cursor + Self.readChunkSize)
+            let range = cursor..<chunkUpper
+            let data: Data
+            do {
                 if let cached = try cachedData(for: range) {
                     data = cached
                 } else {
@@ -246,26 +281,46 @@ private actor RemoteStreamSession {
                     }
                     data = fetched
                 }
+            } catch {
                 if box.isCancelled { return }
-                guard !data.isEmpty else {
-                    // EOF before reaching the requested end: the file is shorter
-                    // than advertised. Surface an error rather than a false EOF.
-                    request.finishLoading(with: StreamingError.shortRead)
-                    return
+                failures += 1
+                streamLog.error("read_error offset=\(cursor) attempt=\(failures) err=\(String(describing: error), privacy: .public)")
+                if failures <= Self.maxReadRetries {
+                    try? await Task.sleep(nanoseconds: Self.retryBackoffNanos)
+                    continue   // retry the same chunk (client reconnects on disconnect)
                 }
-                dataRequest.respond(with: data)
-                cursor += Int64(data.count)
+                if box.isCancelled { return }
+                streamLog.error("give_up offset=\(cursor) -> finishLoading(error)")
+                request.finishLoading(with: error)
+                return
             }
             if box.isCancelled { return }
-            request.finishLoading()
-            await maybePromote(totalLength: length)
-        } catch {
-            #if DEBUG
-            print("BETTERSTREAMING_STREAM error ext=\(fallbackExtension) offset=\(offset) upper=\(upper) error=\(error)")
-            #endif
-            if box.isCancelled { return }
-            request.finishLoading(with: error)
+            if data.isEmpty {
+                // A momentary empty read can be a transient SMB hiccup; retry a
+                // few times before treating it as a genuinely short file (which
+                // would otherwise be a false EOF and stop playback).
+                failures += 1
+                streamLog.error("empty_read offset=\(cursor) attempt=\(failures)")
+                if failures <= Self.maxReadRetries {
+                    try? await Task.sleep(nanoseconds: Self.retryBackoffNanos)
+                    continue
+                }
+                request.finishLoading(with: StreamingError.shortRead)
+                return
+            }
+            failures = 0
+            dataRequest.respond(with: data)
+            cursor += Int64(data.count)
+            sinceLog += Int64(data.count)
+            if sinceLog >= 4 * 1024 * 1024 {
+                sinceLog = 0
+                streamLog.info("served reqOffset=\(offset) cursor=\(cursor) upper=\(upper)")
+            }
         }
+        if box.isCancelled { return }
+        request.finishLoading()
+        streamLog.info("finished offset=\(offset) upper=\(upper)")
+        await maybePromote(totalLength: length)
     }
 
     private func fillContentInfo(_ contentInfo: AVAssetResourceLoadingContentInformationRequest?) {

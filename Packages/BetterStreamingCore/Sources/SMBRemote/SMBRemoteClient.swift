@@ -293,7 +293,7 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
                     )
                 }
         } catch {
-            throw Self.remoteFileSystemError(from: error, path: directory)
+            try handleFailure(error, path: directory)
         }
     }
 
@@ -309,7 +309,7 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
                 fileID: metadata.fileID
             )
         } catch {
-            throw Self.remoteFileSystemError(from: error, path: path)
+            try handleFailure(error, path: path)
         }
     }
 
@@ -332,8 +332,26 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
                 length: length
             )
         } catch {
-            throw Self.remoteFileSystemError(from: error, path: path)
+            try handleFailure(error, path: path)
         }
+    }
+
+    /// Map a thrown SMB error and, when it indicates the connection itself died,
+    /// drop the cached transport so the NEXT operation reconnects on a fresh one.
+    /// This recovers without ever abandoning an in-flight NWConnection operation
+    /// (abandoning corrupts the connection's receive buffer → an `EXC_BREAKPOINT`
+    /// in `ByteReader` — and leaves the send semaphore locked → permanent hang).
+    private func handleFailure(_ error: Error, path: RemotePath) throws -> Never {
+        let mapped = Self.remoteFileSystemError(from: error, path: path)
+        if let rfs = mapped as? RemoteFileSystemError {
+            switch rfs {
+            case .serverDisconnected, .timeout, .invalidResponse:
+                transport = nil
+            default:
+                break
+            }
+        }
+        throw mapped
     }
 
     public func download(_ path: RemotePath, to localURL: URL, progress: ProgressSink?) async throws {
@@ -495,6 +513,17 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
 
 private final class LiveSMBRemoteTransport: @unchecked Sendable, SMBRemoteTransport {
     private let client: SMBClient
+    /// Open `FileReader`s pooled by path. The SMB connection serves one request
+    /// at a time (a single mutex), so reopening a reader on every ranged read —
+    /// CREATE + READ + CLOSE = three serialized round-trips per chunk — throttles
+    /// streaming and lets a long fill loop starve a concurrent seek. Reusing an
+    /// open reader collapses that to one READ round-trip per chunk. `FileReader`
+    /// is not `Sendable`, so the pool is guarded by a lock (never held across an
+    /// await) and every reader is closed inline, never captured into a `Task`.
+    private let poolLock = NSLock()
+    private var readers: [String: FileReader] = [:]
+    private var readerOrder: [String] = []
+    private static let maxPooledReaders = 4
 
     private init(client: SMBClient) {
         self.client = client
@@ -538,15 +567,88 @@ private final class LiveSMBRemoteTransport: @unchecked Sendable, SMBRemoteTransp
         guard offset >= 0, length >= 0, length <= Int64(UInt32.max) else {
             throw RemoteFileSystemError.unsupportedRange
         }
-        let reader = client.fileReader(path: path)
         do {
-            let data = try await reader.read(offset: UInt64(offset), length: UInt32(length))
-            try await reader.close()
-            return data
+            return try await pooledRead(path: path, offset: offset, length: length)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
-            try? await reader.close()
+            // The pooled handle may be stale (server idle-closed it, or the
+            // session reconnected). `pooledRead` already dropped it; retry once
+            // with a fresh open before surfacing the failure, so pooling is never
+            // less reliable than opening per-read.
+            return try await pooledRead(path: path, offset: offset, length: length)
+        }
+    }
+
+    /// Read through the pooled reader for `path`. On any failure the pooled entry
+    /// is dropped (never leaving a stale handle cached) and the error rethrown
+    /// for the caller to retry or surface.
+    private func pooledRead(path: String, offset: Int64, length: Int64) async throws -> Data {
+        let reader = try await reader(for: path)
+        do {
+            return try await reader.read(offset: UInt64(offset), length: UInt32(length))
+        } catch {
+            if let dropped = dropReader(path: path, ifSameAs: reader) {
+                try? await dropped.close()
+            }
             throw error
         }
+    }
+
+    /// Return the pooled reader for `path`, opening (and pooling) one if needed.
+    /// Opening forces the lazy SMB CREATE so open errors surface here, not later.
+    private func reader(for path: String) async throws -> FileReader {
+        if let existing = cachedReader(path: path) { return existing }
+        let reader = client.fileReader(path: path)
+        _ = try await reader.fileSize   // force the lazy CREATE once
+        let stored = storeReader(reader, path: path)
+        if let loser = stored.loser { try? await loser.close() }
+        for evicted in stored.evicted { try? await evicted.close() }
+        return stored.winner
+    }
+
+    private func cachedReader(path: String) -> FileReader? {
+        poolLock.lock(); defer { poolLock.unlock() }
+        guard let reader = readers[path] else { return nil }
+        touchLocked(path)
+        return reader
+    }
+
+    /// Insert a freshly-opened reader. If another read opened one for the same
+    /// path concurrently, keep the incumbent and hand ours back as `loser` to be
+    /// closed. Returns any readers evicted to stay within the pool cap.
+    private func storeReader(
+        _ reader: FileReader,
+        path: String
+    ) -> (winner: FileReader, loser: FileReader?, evicted: [FileReader]) {
+        poolLock.lock(); defer { poolLock.unlock() }
+        if let existing = readers[path] {
+            touchLocked(path)
+            return (existing, reader, [])
+        }
+        readers[path] = reader
+        touchLocked(path)
+        var evicted: [FileReader] = []
+        while readerOrder.count > Self.maxPooledReaders {
+            let stale = readerOrder.removeFirst()
+            if let r = readers.removeValue(forKey: stale) { evicted.append(r) }
+        }
+        return (reader, nil, evicted)
+    }
+
+    /// Drop the pooled reader for `path` only if it is still the failing one (a
+    /// concurrent retry may have already replaced it). Returns it for closing.
+    private func dropReader(path: String, ifSameAs reader: FileReader) -> FileReader? {
+        poolLock.lock(); defer { poolLock.unlock() }
+        guard let current = readers[path], current === reader else { return nil }
+        readers.removeValue(forKey: path)
+        if let idx = readerOrder.firstIndex(of: path) { readerOrder.remove(at: idx) }
+        return current
+    }
+
+    private func touchLocked(_ path: String) {
+        if let idx = readerOrder.firstIndex(of: path) { readerOrder.remove(at: idx) }
+        readerOrder.append(path)
     }
 
     func download(path: String, to localURL: URL, progress: ProgressSink?) async throws {

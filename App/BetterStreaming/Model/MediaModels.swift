@@ -144,6 +144,131 @@ enum SourceProtocol: String, Codable, Sendable, Hashable, CaseIterable, Identifi
 // identity here is a stable opaque string derived from RemoteItemIdentity, never
 // a raw smb:// URL.
 
+// MARK: - Album / artist grouping
+//
+// Albums and artists are grouped by *derived* identity keys, not by the raw
+// per-track artist tag. Keying an album on `artist::album` shattered any album
+// whose tracks credit different artists — "Moonglow" split into one album per
+// "Avantasia feat. <singer>", and compilations ("F*** Me I'm Famous!") split
+// per DJ. The robust signal for a file library is the folder: one folder is one
+// album on a NAS. Artists drop featured-credit noise so a main artist's solo
+// and featured tracks land under one artist.
+
+enum MetadataGrouping {
+    /// Split a combined artist credit into the individual artists, in order, so
+    /// each one gets their own entry and every track is cross-listed under all of
+    /// them. "David Guetta feat. will.i.am & apl.de.ap" -> ["David Guetta",
+    /// "will.i.am", "apl.de.ap"]. The first is the main/primary artist.
+    ///
+    /// Caveat: this splits on "&" / "," / "vs." / "x", so a band whose NAME
+    /// contains one of those ("Above & Beyond", "Earth, Wind & Fire") is split
+    /// too. The target library is collaboration-heavy, where splitting is the
+    /// right default; known-band exceptions can be added later if needed.
+    static func creditedArtists(_ artist: String) -> [String] {
+        let trimmed = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        // Brackets around a feat. credit -> plain text so the names split out.
+        let debracketed = trimmed.replacingOccurrences(
+            of: #"[\(\)\[\]]"#, with: " ", options: .regularExpression
+        )
+        let separator = "\u{1}"
+        let flattened = debracketed.replacingOccurrences(
+            of: #"\s+(?:feat\.?|ft\.?|featuring|versus|vs\.?|with|x)\s+|\s*[&+]\s*|\s*,\s*"#,
+            with: separator,
+            options: [.regularExpression, .caseInsensitive]
+        )
+        var seen = Set<String>()
+        var result: [String] = []
+        for part in flattened.components(separatedBy: separator) {
+            let name = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = normalizeKey(name)
+            guard !key.isEmpty, seen.insert(key).inserted else { continue }
+            result.append(name)
+        }
+        return result.isEmpty ? [trimmed] : result
+    }
+
+    /// The main artist — the first credited name. Used for album grouping and an
+    /// album's display artist so feat./collab tracks group under their lead.
+    static func primaryArtist(_ artist: String) -> String {
+        creditedArtists(artist).first ?? artist.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Lowercased, whitespace-collapsed key for stable identity comparisons.
+    static func normalizeKey(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private static func isDiscFolder(_ name: String) -> Bool {
+        name.range(of: #"^(cd|disc|disk)\s*\d+$"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    /// The album folder for a file path, dropping the file name and collapsing a
+    /// trailing disc subfolder ("CD1", "Disc 2") so multi-disc sets stay one album.
+    static func albumFolderComponents(forPath path: String) -> [String] {
+        var comps = path
+            .replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        guard !comps.isEmpty else { return [] }
+        comps.removeLast()   // drop the file name -> its parent folder
+        if let last = comps.last, isDiscFolder(last) { comps.removeLast() }
+        return comps
+    }
+
+    /// Stable album identity: album folder + album title. Folder-keyed so feat.-
+    /// credited and various-artist albums in one folder stay a single album; the
+    /// title keeps two distinct albums in the same folder apart.
+    static func albumID(path: String, album: String) -> String {
+        let folder = albumFolderComponents(forPath: path).map(normalizeKey).joined(separator: "/")
+        let albumKey = normalizeKey(album)
+        return folder.isEmpty ? "album::\(albumKey)" : "\(folder)::\(albumKey)"
+    }
+
+    static func artistID(_ artist: String) -> String {
+        normalizeKey(primaryArtist(artist))
+    }
+
+    /// Collapse a noisy genre tag into a broad canonical family so a station
+    /// pulls related sub-genres together ("Symphonic Metal", "Heavy Metal",
+    /// "Power Metal" -> "Metal"). Returns nil for empty/"Unknown". Unknown tags
+    /// are Title-cased and kept as their own family rather than discarded.
+    static func canonicalGenre(_ raw: String) -> String? {
+        let g = normalizeKey(raw)
+        guard !g.isEmpty, g != "unknown", g != "other" else { return nil }
+        func has(_ needles: String...) -> Bool { needles.contains { g.contains($0) } }
+        if has("metal", "djent", "metalcore", "deathcore", "grindcore") { return "Metal" }
+        if has("punk") { return "Punk" }
+        if has("hip hop", "hip-hop", "hiphop", "rap", "trap") { return "Hip-Hop" }
+        if has("r&b", "rnb", "r & b", "soul", "funk", "motown") { return "R&B / Soul" }
+        if has("jazz", "swing", "bebop") { return "Jazz" }
+        if has("blues") { return "Blues" }
+        if has("classical", "orchestr", "symphon", "baroque", "opera", "concerto", "philharmon") { return "Classical" }
+        if has("country", "bluegrass", "americana") { return "Country" }
+        if has("reggae", "ska", "dancehall") { return "Reggae" }
+        if has("electro", "techno", "house", "trance", "dubstep", "edm", "drum and bass", "dnb", "synth", "ambient", "idm", "breakbeat") { return "Electronic" }
+        if has("dance") { return "Dance" }
+        if has("folk", "acoustic", "singer-songwriter") { return "Folk" }
+        if has("indie") { return "Indie" }
+        if has("rock", "grunge", "alternative", "britpop") { return "Rock" }
+        if has("pop") { return "Pop" }
+        if has("soundtrack", "score", "ost", "cinematic") { return "Soundtrack" }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines).capitalized
+    }
+
+    /// Album display artist from its tracks' artist tags: the shared primary
+    /// artist, or "Various Artists" when the primaries genuinely differ.
+    static func albumDisplayArtist(from artists: [String]) -> String {
+        let primaries = artists.map(primaryArtist).filter { !$0.isEmpty }
+        guard let first = primaries.first else { return "Unknown Artist" }
+        let distinct = Set(primaries.map(normalizeKey))
+        return distinct.count <= 1 ? first : "Various Artists"
+    }
+}
+
 struct Track: Identifiable, Hashable, Sendable, Codable {
     let id: String
     var title: String
@@ -201,8 +326,8 @@ struct Track: Identifiable, Hashable, Sendable, Codable {
         self.title = title
         self.artist = artist
         self.album = album
-        self.albumID = albumID ?? "\(artist)::\(album)".lowercased()
-        self.artistID = artistID ?? artist.lowercased()
+        self.albumID = albumID ?? MetadataGrouping.albumID(path: remotePath ?? folderPath, album: album)
+        self.artistID = artistID ?? MetadataGrouping.artistID(artist)
         self.genre = genre
         self.durationSeconds = durationSeconds
         self.trackNumber = trackNumber
@@ -222,6 +347,12 @@ struct Track: Identifiable, Hashable, Sendable, Codable {
     }
 
     var durationLabel: String { TimeFormat.clock(durationSeconds) }
+
+    /// Every artist credited on this track (primary + featured + collaborators),
+    /// as normalized identity keys, so the track is listed under each of them.
+    var creditedArtistIDs: [String] {
+        MetadataGrouping.creditedArtists(artist).map(MetadataGrouping.normalizeKey)
+    }
 
     var fileExtension: String { (folderPath as NSString).pathExtension.lowercased() }
 
@@ -283,8 +414,16 @@ struct LibrarySource: Identifiable, Hashable, Sendable {
     var folderCount: Int
     var lastScanLabel: String
     var speedLabel: String
+    /// Total size of the source's media on the server (e.g. "12.3 GB"), or "—".
+    var sizeLabel: String = "—"
+    /// Base path selected within the share (e.g. "Music"), shown after the share.
+    var basePath: String = ""
 
-    var detail: String { "\(proto.rawValue) · \(host)/\(share)" }
+    var detail: String {
+        let trimmed = basePath.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        let location = trimmed.isEmpty ? share : "\(share)/\(trimmed)"
+        return "\(proto.rawValue) · \(host)/\(location)"
+    }
 }
 
 // MARK: - Time formatting

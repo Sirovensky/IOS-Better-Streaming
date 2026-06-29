@@ -263,10 +263,15 @@ struct NowPlayingView: View {
                     .font(.title2.weight(.bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
-                Text(track.artist)
-                    .font(.title3)
-                    .foregroundStyle(.white.opacity(0.72))
-                    .lineLimit(1)
+                Button {
+                    detail = .artist(track.artistID)
+                } label: {
+                    Text(track.artist)
+                        .font(.title3)
+                        .foregroundStyle(.white.opacity(0.72))
+                        .lineLimit(1)
+                }
+                .buttonStyle(.plain)
             }
             Spacer(minLength: 8)
 
@@ -302,7 +307,6 @@ struct NowPlayingView: View {
             }
         }
         Button("Go to Album", systemImage: "square.stack") { detail = .album(track.albumID) }
-        Button("Go to Artist", systemImage: "music.mic") { detail = .artist(track.artistID) }
         Button("View Queue", systemImage: "list.bullet") { showQueue = true }
     }
 

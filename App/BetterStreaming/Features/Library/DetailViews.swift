@@ -43,9 +43,17 @@ private struct MediaDetailHeader: View {
     var glyph: String
     var title: String
     var subtitle: String
+    /// When set, the subtitle becomes a tappable link (e.g. album → artist).
+    var subtitleRoute: LibraryRoute? = nil
     var meta: String
     var playAction: () -> Void
     var shuffleAction: () -> Void
+
+    @ViewBuilder private var subtitleLabel: some View {
+        Text(subtitle)
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(DesignTokens.brandPrimary)
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -58,9 +66,19 @@ private struct MediaDetailHeader: View {
                     .font(.title2.weight(.bold))
                     .multilineTextAlignment(.center)
                     .foregroundStyle(DesignTokens.textPrimary)
-                Text(subtitle)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(DesignTokens.brandPrimary)
+                if let subtitleRoute {
+                    NavigationLink(value: subtitleRoute) {
+                        HStack(spacing: 3) {
+                            subtitleLabel
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(DesignTokens.brandPrimary.opacity(0.7))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    subtitleLabel
+                }
                 Text(meta)
                     .font(.caption)
                     .foregroundStyle(DesignTokens.textSecondary)
@@ -99,7 +117,8 @@ struct AlbumDetailView: View {
                         artworkURL: albumTracks.compactMap(\.artworkURL).first,
                         glyph: "music.note",
                         title: first.album,
-                        subtitle: first.artist,
+                        subtitle: MetadataGrouping.albumDisplayArtist(from: albumTracks.map(\.artist)),
+                        subtitleRoute: .artist(first.artistID),
                         meta: "\(albumTracks.count) songs",
                         playAction: { model.playAlbum(albumID) },
                         shuffleAction: { model.playAlbum(albumID, shuffled: true) }
@@ -133,7 +152,7 @@ struct ArtistDetailView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
-                if let name = artistTracks.first?.artist {
+                if let name = model.artistName(artistID) ?? artistTracks.first?.artist {
                     VStack(spacing: 12) {
                         ArtworkView(url: nil, artworkKey: artistID, glyph: "music.mic", cornerRadius: 80)
                             .frame(width: 140, height: 140)
@@ -184,7 +203,7 @@ struct ArtistDetailView: View {
             .padding(.bottom, 120)
         }
         .appScreenBackground()
-        .navigationTitle(artistTracks.first?.artist ?? "Artist")
+        .navigationTitle(model.artistName(artistID) ?? "Artist")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -254,23 +273,26 @@ struct PlaylistDetailView: View {
 
 struct AllSongsView: View {
     @Environment(AppModel.self) private var model
-    var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
-                PlayShuffleBar(
-                    play: { model.engine.setShuffle(false); model.engine.play(model.audioTracks) },
-                    shuffle: { model.shuffleAll() }
-                )
-                .disabled(model.audioTracks.isEmpty)
-                .padding(.bottom, 6)
 
-                ForEach(model.audioTracks) { track in
-                    TrackRowView(track: track, context: model.audioTracks)
-                    Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
-                }
+    private var sortedSongs: [Track] {
+        model.audioTracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    var body: some View {
+        let songs = sortedSongs
+        let sections = LibraryIndex.sections(songs) { $0.title }
+        AlphabetIndexedScroll(sections: sections) {
+            PlayShuffleBar(
+                play: { model.engine.setShuffle(false); model.engine.play(songs) },
+                shuffle: { model.engine.playShuffled(songs) }
+            )
+            .disabled(songs.isEmpty)
+            .padding(.bottom, 6)
+        } sectionContent: { section in
+            ForEach(section.items) { track in
+                TrackRowView(track: track, context: songs)
+                Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
             }
-            .padding(DesignTokens.phonePadding)
-            .padding(.bottom, 120)
         }
         .appScreenBackground()
         .navigationTitle("Songs")
@@ -298,19 +320,18 @@ struct PlayShuffleBar: View {
 
 struct AllAlbumsView: View {
     @Environment(AppModel.self) private var model
-    private let columns = [GridItem(.adaptive(minimum: 150), spacing: 16)]
+    private let columns = [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)]
     var body: some View {
-        ScrollView {
+        let sections = LibraryIndex.sections(model.albums) { $0.title }
+        AlphabetIndexedScroll(sections: sections) { section in
             LazyVGrid(columns: columns, spacing: 18) {
-                ForEach(model.albums) { album in
+                ForEach(section.items) { album in
                     NavigationLink(value: LibraryRoute.album(album.id)) {
                         AlbumGridCellStatic(album: album)
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(DesignTokens.phonePadding)
-            .padding(.bottom, 120)
         }
         .appScreenBackground()
         .navigationTitle("Albums")
@@ -320,30 +341,27 @@ struct AllAlbumsView: View {
 struct AllArtistsView: View {
     @Environment(AppModel.self) private var model
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
-                ForEach(model.artists) { artist in
-                    NavigationLink(value: LibraryRoute.artist(artist.id)) {
-                        HStack(spacing: 12) {
-                            ArtworkView(url: nil, artworkKey: artist.id, glyph: "music.mic", cornerRadius: 26)
-                                .frame(width: 52, height: 52)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(artist.name).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
-                                Text("\(artist.albumCount) albums · \(artist.trackCount) songs")
-                                    .font(.caption).foregroundStyle(DesignTokens.textSecondary)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right").font(.footnote).foregroundStyle(DesignTokens.textTertiary)
+        let sections = LibraryIndex.sections(model.artists) { $0.name }
+        AlphabetIndexedScroll(sections: sections) { section in
+            ForEach(section.items) { artist in
+                NavigationLink(value: LibraryRoute.artist(artist.id)) {
+                    HStack(spacing: 12) {
+                        ArtworkView(url: nil, artworkKey: artist.id, glyph: "music.mic", cornerRadius: 26)
+                            .frame(width: 52, height: 52)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(artist.name).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
+                            Text("\(artist.albumCount) albums · \(artist.trackCount) songs")
+                                .font(.caption).foregroundStyle(DesignTokens.textSecondary)
                         }
-                        .padding(.vertical, 6)
-                        .contentShape(Rectangle())
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.footnote).foregroundStyle(DesignTokens.textTertiary)
                     }
-                    .buttonStyle(.plain)
-                    Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
             }
-            .padding(DesignTokens.phonePadding)
-            .padding(.bottom, 120)
         }
         .appScreenBackground()
         .navigationTitle("Artists")

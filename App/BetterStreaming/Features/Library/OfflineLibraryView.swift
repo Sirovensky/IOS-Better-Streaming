@@ -6,8 +6,29 @@ import SwiftUI
 struct OfflineLibraryView: View {
     @Environment(AppModel.self) private var model
 
+    private enum Filter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case downloaded = "Downloaded"
+        case autoCached = "Auto-cached"
+        var id: String { rawValue }
+    }
+    @State private var filter: Filter = .all
+
     private var downloaded: [Track] { model.tracks.filter { $0.cacheState == .cached } }
     private var autoCached: [Track] { model.tracks.filter { $0.cacheState == .prefetched } }
+
+    /// One unified, sorted list of everything available offline. The per-row
+    /// availability glyph (download vs auto-cache) distinguishes them, so there's
+    /// no need for two stacked sections.
+    private var offlineTracks: [Track] {
+        let base: [Track]
+        switch filter {
+        case .all: base = model.tracks.filter { $0.cacheState == .cached || $0.cacheState == .prefetched }
+        case .downloaded: base = downloaded
+        case .autoCached: base = autoCached
+        }
+        return base.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
 
     var body: some View {
         ScrollView {
@@ -20,15 +41,37 @@ struct OfflineLibraryView: View {
                         detail: "Download songs or albums to keep them on this device. Auto-cache also keeps your most-played music ready without the source.",
                         systemImage: "arrow.down.circle"
                     )
+                } else {
+                    librarySection
                 }
-                if !downloaded.isEmpty { downloadedSection }
-                if !autoCached.isEmpty { autoCachedSection }
             }
             .padding(DesignTokens.phonePadding)
             .padding(.bottom, 120)
         }
         .appScreenBackground()
         .navigationTitle("Offline")
+        // Reconcile only updates the usage readout on a reachable pass; refresh
+        // from disk on appear so it's real at launch and while offline too.
+        .task { model.refreshAutoCacheUsage() }
+    }
+
+    @ViewBuilder
+    private var librarySection: some View {
+        // Only offer the filter when both kinds exist — otherwise it's noise.
+        if !downloaded.isEmpty && !autoCached.isEmpty {
+            Picker("Show", selection: $filter) {
+                ForEach(Filter.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+        }
+        let list = offlineTracks
+        VStack(alignment: .leading, spacing: 2) {
+            SectionHeader(title: "Available Offline", detail: "\(list.count) songs")
+            ForEach(list) { track in
+                TrackRowView(track: track, context: list)
+                Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+            }
+        }
     }
 
     private var offlineModeCard: some View {
@@ -73,23 +116,4 @@ struct OfflineLibraryView: View {
         .surfaceCard(fill: DesignTokens.surfaceCard)
     }
 
-    private var downloadedSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            SectionHeader(title: "Downloaded", detail: "\(downloaded.count) songs kept by you")
-            ForEach(downloaded) { track in
-                TrackRowView(track: track, context: downloaded)
-                Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
-            }
-        }
-    }
-
-    private var autoCachedSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            SectionHeader(title: "Auto-cached", detail: "Kept ready from your listening")
-            ForEach(autoCached) { track in
-                TrackRowView(track: track, context: autoCached)
-                Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
-            }
-        }
-    }
 }

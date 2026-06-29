@@ -354,11 +354,9 @@ final class PlaybackEngine {
                 case .failed:
                     self.isBuffering = false
                     self.lastErrorMessage = self.player.currentItem?.error?.localizedDescription ?? "Playback failed."
-                    #if DEBUG
                     let itemError = self.player.currentItem?.error?.localizedDescription ?? "nil"
-                    let log = self.player.currentItem?.errorLog()?.events.last
-                    print("BETTERSTREAMING_PLAY failed itemError=\(itemError) log=\(log?.errorStatusCode ?? 0):\(log?.errorComment ?? "nil")")
-                    #endif
+                    let errLog = self.player.currentItem?.errorLog()?.events.last
+                    streamLog.error("item_failed err=\(itemError, privacy: .public) log=\(errLog?.errorStatusCode ?? 0):\(errLog?.errorComment ?? "nil", privacy: .public)")
                     self.stopAfterFailure()
                 default:
                     break
@@ -459,11 +457,11 @@ final class PlaybackEngine {
 
     private func observeTimeControlStatus() {
         timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            let status = player.timeControlStatus.rawValue
+            let reason = player.reasonForWaitingToPlay?.rawValue ?? "none"
             Task { @MainActor in
                 guard let self else { return }
-                #if DEBUG
-                print("BETTERSTREAMING_PLAY timeControl=\(player.timeControlStatus.rawValue) reason=\(player.reasonForWaitingToPlay?.rawValue ?? "none") elapsed=\(self.elapsed)")
-                #endif
+                streamLog.info("timeControl=\(status) reason=\(reason, privacy: .public) elapsed=\(self.elapsed)")
             }
         }
     }
