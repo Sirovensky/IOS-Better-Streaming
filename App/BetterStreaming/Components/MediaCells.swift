@@ -187,11 +187,40 @@ struct LetterSection<Item>: Identifiable {
 }
 
 enum LibraryIndex {
-    /// Section key for a name: its first letter (works for Latin and Cyrillic),
-    /// or "#" for anything starting with a digit/symbol.
+    /// Section key for a name. Latin/Cyrillic/Greek fold to one shared Latin A–Z
+    /// index (so "Эпидемия" → E, "Король" → K — П=P, Г=G as requested). Scripts
+    /// that don't romanize to a Latin letter (CJK, Japanese, Korean, Arabic…)
+    /// keep their own character as the key and sort to the bottom. Digits/symbols
+    /// → "#".
     static func sectionKey(_ name: String) -> String {
-        guard let first = name.trimmingCharacters(in: .whitespacesAndNewlines).first else { return "#" }
-        return first.isLetter ? String(first).uppercased() : "#"
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first(where: { $0.isLetter || $0.isNumber }) else { return "#" }
+        if first.isNumber { return "#" }
+        if let scalar = first.unicodeScalars.first, isLatinReconcilable(scalar) {
+            // Romanize + strip diacritics → a plain A–Z letter.
+            if let folded = String(first)
+                .applyingTransform(.toLatin, reverse: false)?
+                .applyingTransform(.stripDiacritics, reverse: false)?
+                .uppercased()
+                .first(where: { $0.isLetter && $0.isASCII }) {
+                return String(folded)
+            }
+            if let c = String(first).uppercased().first, c.isASCII, c.isLetter { return String(c) }
+            return "#"
+        }
+        // Non-romanizable script: own group (sorts after Latin, before "#").
+        return String(first).uppercased()
+    }
+
+    /// Latin (+ extended), Cyrillic, and Greek romanize cleanly to Latin letters;
+    /// CJK/Hangul/Kana/etc. romanize to whole syllables, so we exclude them here
+    /// and keep them as their own index groups instead.
+    private static func isLatinReconcilable(_ s: Unicode.Scalar) -> Bool {
+        let v = s.value
+        return (0x0041...0x024F).contains(v)   // Latin: Basic + Latin-1 + Extended-A/B
+            || (0x0370...0x03FF).contains(v)   // Greek
+            || (0x0400...0x052F).contains(v)   // Cyrillic + Supplement
+            || (0x1E00...0x1EFF).contains(v)   // Latin Extended Additional
     }
 
     /// Group already-sorted items into A–Z sections, "#" last. Items must already
