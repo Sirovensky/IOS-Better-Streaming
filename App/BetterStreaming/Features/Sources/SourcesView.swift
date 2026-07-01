@@ -5,6 +5,7 @@ import UIKit
 struct SourcesView: View {
     @Environment(AppModel.self) private var model
     @State private var shareConfig: SharedSourceConfig?
+    @State private var sourceToRemove: LibrarySource?
 
     var body: some View {
         ScrollView {
@@ -38,6 +39,18 @@ struct SourcesView: View {
         }
         .sheet(item: $shareConfig) { config in
             SourceShareView(shared: config)
+        }
+        .confirmationDialog(
+            "Remove source?",
+            isPresented: Binding(get: { sourceToRemove != nil }, set: { if !$0 { sourceToRemove = nil } }),
+            presenting: sourceToRemove
+        ) { source in
+            Button("Remove \(source.name)", role: .destructive) {
+                model.removeSource(source.id)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { source in
+            Text("Removes this source and its \(source.trackCount) songs from this device. Your files on the server aren't touched.")
         }
     }
 
@@ -73,24 +86,26 @@ struct SourcesView: View {
                 } label: {
                     Label("Rescan", systemImage: "arrow.triangle.2.circlepath")
                         .labelStyle(.iconOnly)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 44, height: 44)
                 }
                 .disabled(model.isScanning)
                 Menu {
                     Button("Rescan", systemImage: "arrow.triangle.2.circlepath") {
                         Task { await model.rescan(source.id) }
                     }
+                    .disabled(model.isScanning)
                     if let config = model.exportableSource(source.id) {
                         Button("Share configuration", systemImage: "square.and.arrow.up") {
                             shareConfig = config
                         }
                     }
                     Button("Remove source", systemImage: "trash", role: .destructive) {
-                        model.removeSource(source.id)
+                        sourceToRemove = source
                     }
                 } label: {
-                    Image(systemName: "ellipsis").foregroundStyle(DesignTokens.textSecondary).frame(width: 30, height: 30)
+                    Image(systemName: "ellipsis").foregroundStyle(DesignTokens.textSecondary).frame(width: 44, height: 44)
                 }
+                .accessibilityLabel("More options")
             }
         }
         .padding(14)

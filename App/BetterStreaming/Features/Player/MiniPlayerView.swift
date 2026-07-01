@@ -31,6 +31,20 @@ struct MiniPlayerContent: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Playback error. \(message)")
                 Spacer(minLength: 8)
+                // Skip past the failed track instead of only offering "clear the whole
+                // queue" — one bad file shouldn't force a restart of a long queue.
+                if engine.hasNext {
+                    Button {
+                        engine.next()
+                    } label: {
+                        Image(systemName: "forward.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(DesignTokens.textSecondary)
+                            .frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Skip to next track")
+                }
                 Button {
                     engine.clearQueue()
                 } label: {
@@ -860,12 +874,16 @@ struct NowPlayingQueueView: View {
                             Image(systemName: "shuffle")
                                 .foregroundStyle(engine.shuffleEnabled ? DesignTokens.brandPrimary : DesignTokens.textSecondary)
                         }
+                        .accessibilityLabel("Shuffle")
+                        .accessibilityValue(engine.shuffleEnabled ? "On" : "Off")
                         Button {
                             engine.cycleRepeat()
                         } label: {
                             Image(systemName: engine.repeatMode.systemImage)
                                 .foregroundStyle(engine.repeatMode != .off ? DesignTokens.brandPrimary : DesignTokens.textSecondary)
                         }
+                        .accessibilityLabel("Repeat")
+                        .accessibilityValue(engine.repeatMode == .off ? "Off" : engine.repeatMode == .one ? "One song" : "All songs")
                     }
                 }
             }

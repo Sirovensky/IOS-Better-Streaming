@@ -419,8 +419,14 @@ private actor RemoteStreamSession {
         let fm = FileManager.default
         do {
             try fm.createDirectory(at: completeCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // Copy to a temp then atomically rename into place. A direct
+            // remove+copy could be interrupted (crash/kill) mid-copy, leaving a
+            // truncated file that `fileExists` reports as fully cached forever.
+            let tmp = completeCacheURL.appendingPathExtension("promote-part")
+            try? fm.removeItem(at: tmp)
+            try fm.copyItem(at: partialCacheURL, to: tmp)
             try? fm.removeItem(at: completeCacheURL)
-            try fm.copyItem(at: partialCacheURL, to: completeCacheURL)
+            try fm.moveItem(at: tmp, to: completeCacheURL)   // atomic rename on one volume
             promoted = true
             #if DEBUG
             print("BETTERSTREAMING_STREAM promoted ext=\(fallbackExtension) bytes=\(totalLength)")

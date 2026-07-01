@@ -39,6 +39,17 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "25DA23824F9BD2E4AE4378B2"
+               BuildableName = "BetterStreamingTests.xctest"
+               BlueprintName = "BetterStreamingTests"
+               ReferencedContainer = "container:BetterStreaming.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>

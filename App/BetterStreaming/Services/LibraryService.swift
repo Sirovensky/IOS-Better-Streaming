@@ -1176,8 +1176,17 @@ actor LibraryService {
         // Column-scoped artwork writes — never rewrite the text columns the overrides
         // overlay on (a full-row upsert here was poisoning "revert to file tags").
         for track in changed {
-            try? await mediaStore.setArtworkURL(track.artworkURL?.absoluteString, identityKey: track.id)
+            try? await mediaStore.setArtworkURL(artworkStorageString(track.artworkURL), identityKey: track.id)
         }
+    }
+
+    /// How a cached-artwork URL is persisted: the bare filename, never a
+    /// container-absolute path (whose data-container UUID changes on reinstall, which
+    /// is what stranded covers before). Remote http URLs are stored whole.
+    /// `resolvedArtworkURL` reads both this and any legacy absolute rows.
+    private func artworkStorageString(_ url: URL?) -> String? {
+        guard let url else { return nil }
+        return url.isFileURL ? url.lastPathComponent : url.absoluteString
     }
 
     private func cacheRemoteArtwork(from entry: RemoteEntry, client: any RemoteFileSystemClient) async -> URL? {
@@ -1262,8 +1271,12 @@ actor LibraryService {
         // If configs couldn't be read this launch, defer library loading rather
         // than risk pruning/migrating against an empty source list.
         guard configsOK else { return }
+        // Set the loaded-guard only after a SUCCESSFUL read: a transient DB throw must
+        // leave it unset so a later call retries, rather than stranding an empty library
+        // for the whole session.
+        guard let items = try? await mediaStore.listMediaItems() else { return }
         didLoadLibraryFromDisk = true
-        if let items = try? await mediaStore.listMediaItems(), !items.isEmpty {
+        if !items.isEmpty {
             let knownSourceIDs = Set(configs.compactMap { UUID(uuidString: $0.id) })
             let filteredItems = items.filter { knownSourceIDs.contains($0.identity.sourceID.rawValue) }
             // Only prune orphans when configs are authoritative (always true here
@@ -1703,14 +1716,16 @@ actor LibraryService {
         )
     }
 
-    /// Rebase a persisted artwork file URL onto the CURRENT artwork dir. The DB stores
-    /// absolute file URLs, but the app's data-container UUID changes on a delete+reinstall,
-    /// so an old absolute path is dead even though the `<hash>.jpg` still lives in artworkDir.
-    /// Match by filename against the current dir; drop it if the file is genuinely gone so
-    /// the backfill re-fetches. Non-file (remote) URLs pass through untouched.
+    /// Resolve a persisted artwork reference to a usable URL. Cached art is stored as a
+    /// bare filename (see `artworkStorageString`); older rows may hold an absolute file
+    /// URL whose data-container UUID has since changed on a delete+reinstall. Either way,
+    /// resolve by filename against the CURRENT artwork dir; drop it if the file is
+    /// genuinely gone so the backfill re-fetches. Remote http(s) URLs pass through.
     private func resolvedArtworkURL(_ url: URL?) -> URL? {
         guard let url else { return nil }
-        guard url.isFileURL else { return url }
+        if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+            return url
+        }
         let candidate = artworkDir.appendingPathComponent(url.lastPathComponent)
         return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
     }

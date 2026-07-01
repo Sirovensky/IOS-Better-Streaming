@@ -83,6 +83,16 @@ final class PlaybackEngine {
         currentIndex > 0 || elapsed > 3
     }
 
+    /// Track ids whose cached file must not be evicted: the currently-playing item and
+    /// any gapless-preloaded next item. Deleting their backing file mid-session breaks
+    /// the live item or the seamless advance. The auto-cache executor honours this.
+    var protectedTrackIDs: Set<String> {
+        var ids = Set<String>()
+        if let current = currentTrack { ids.insert(current.id) }
+        if let idx = preloadedNextIndex, queue.indices.contains(idx) { ids.insert(queue[idx].id) }
+        return ids
+    }
+
     var progressFraction: Double {
         guard duration > 0 else { return 0 }
         return min(max(elapsed / duration, 0), 1)
@@ -296,6 +306,9 @@ final class PlaybackEngine {
         if let current, let newIndex = queue.firstIndex(where: { $0.id == current.id }) {
             currentIndex = newIndex
         }
+        // Keep the shuffle-source in sync when not shuffled, so a manual reorder isn't
+        // discarded when shuffle is later toggled off (which restores unshuffledQueue).
+        if !shuffleEnabled { unshuffledQueue = queue }
         clearPreload(); preloadNextIfGapless()   // next may have changed
     }
 

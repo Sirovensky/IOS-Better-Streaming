@@ -1,5 +1,23 @@
 # Implementation log
 
+## Dead-code removal + polish evening-out — 2026-06-30 (eve)
+
+**Discussed/decided:** After a max-effort adversarial bird's-eye review, the user set the goal: commit current work as a revert point, clean up the binary (remove/merge unused code), and even out polish across visuals / core / other surfaces rather than obsessing over the player. Then run an adversary-review agent, fix, respawn until nothing surfaces.
+
+**What was implemented:**
+- Checkpoint commit `dfb647a` (25-bug batch + artwork drop) as the revert point.
+- Removed orphaned Core modules `PlaybackCore` (670 LOC) + `CacheManager` (756 LOC) — compiled into the app via the umbrella product but never imported (app runs `PlaybackEngine` + `LibraryService` instead). Deleted their sources + test targets. Package `swift test` 48 pass; app links + builds.
+- Added the app target's first XCTest bundle (`BetterStreamingTests`) with 8 AutoCacheController tests (pure scoring/planner logic that had shipped a bug). Wired via `project.yml` + `xcodegen generate`.
+- Two audit agents (foreground general-purpose; the first two background attempts flaked with 0 tool-uses) reviewed non-player UI + backend services and returned verified findings. All HIGH/MED fixed, most LOW fixed; see `CHANGELOG.md [2026-06-30 19:10]` for per-item detail.
+
+**Findings fixed:** TrackRowView VoiceOver menu (app-wide), album-detail download menu (user-flagged QUEUE item), remove-source confirmation, onboarding skip-hatch, mini-player skip-on-failure, queue toggle a11y, Sources a11y + tap target, eviction protects playing/preloaded track, atomic stream→complete promotion, moveQueueItem unshuffled sync, didLoadLibraryFromDisk guard ordering, artwork write-side stores filename, Offline stale-filter, Radio empty-state centering, folder-picker retry/disable, dead "coming soon" UI removal.
+
+**Deferred (with rationale):** queue duplicate-track-id current-item matching (needs a per-entry identity, refactor risk); `localRootURL` stale-bookmark surfacing (local-source edge); `Artwork.swift` remote downsample (latent — no live caller); iPad/landscape adaptive layout (product decision — recommend portrait-only iPhone or a real adaptive pass); HomeView `heavyRotation` per-render sort memoization (needs profiling; caching risks staleness).
+
+**Verification:** sim build + `xcodebuild test` green (core 48 + app 8); device build/install to follow. Status: complete pending adversary-review loop.
+
+
+
 ## Bughunt fix batch — 2026-06-30 (eve)
 
 **Discussed/decided:** User asked for a 5-Opus-agent bughunt over this session's uncommitted work, then set the goal "fix all found bugs." The hunt found 25 (2 HIGH / ~14 MED / ~9 LOW), triaged into `QUEUE.md` (`## BUGHUNT 2026-06-30`). All 25 fixed via 5 parallel implementation agents on disjoint file groups, plus one follow-up edge (crossfade raised mid-track dropping a staged preload).

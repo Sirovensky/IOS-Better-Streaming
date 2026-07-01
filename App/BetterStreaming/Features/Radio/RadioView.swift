@@ -30,19 +30,23 @@ struct RadioView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 24) {
-                    if model.audioTracks.isEmpty {
-                        emptyState
-                    } else {
-                        startStation
-                        if !artistStations.isEmpty { artistSection }
-                        if !genreStations.isEmpty { genreSection }
-                        if !seedTracks.isEmpty { similarSection }
+            Group {
+                if model.audioTracks.isEmpty {
+                    // Outside the ScrollView: Spacers collapse in a scroll view, so an
+                    // in-scroll empty state renders top-aligned instead of centered.
+                    emptyState
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 24) {
+                            startStation
+                            if !artistStations.isEmpty { artistSection }
+                            if !genreStations.isEmpty { genreSection }
+                            if !seedTracks.isEmpty { similarSection }
+                        }
+                        .padding(DesignTokens.phonePadding)
+                        .padding(.bottom, 120)
                     }
                 }
-                .padding(DesignTokens.phonePadding)
-                .padding(.bottom, 120)
             }
             .appScreenBackground()
             .navigationTitle("Radio")
@@ -50,8 +54,7 @@ struct RadioView: View {
     }
 
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Spacer(minLength: 40)
+        VStack(spacing: 14) {
             Image(systemName: "dot.radiowaves.left.and.right")
                 .font(.system(size: 52))
                 .foregroundStyle(DesignTokens.brandPrimary)
@@ -61,9 +64,10 @@ struct RadioView: View {
             Text("Scan a source to build stations from your own library.")
                 .font(.subheadline)
                 .foregroundStyle(DesignTokens.textSecondary)
-            Spacer()
+                .multilineTextAlignment(.center)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var startStation: some View {

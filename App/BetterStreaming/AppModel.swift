@@ -1536,7 +1536,10 @@ final class AppModel {
     private func wireAutoCache() {
         autoCache.applyPlan = { [weak self] plan in
             guard let self else { return }
-            for id in plan.evict {
+            // Never delete the file backing the currently-playing or gapless-preloaded
+            // track, even if the policy wants to evict it (budget filled by favourites).
+            let protected = self.engine.protectedTrackIDs
+            for id in plan.evict where !protected.contains(id) {
                 guard let target = self.track(id) else { continue }
                 await self.library.evict(target)
                 if let i = self.trackIndex[id], self.tracks[i].cacheState == .prefetched {

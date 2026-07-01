@@ -133,16 +133,8 @@ struct SourceSetupView: View {
                             Image(systemName: item.glyph).font(.title3)
                                 .foregroundStyle(DesignTokens.brandPrimary).frame(width: 30)
                             VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Text(item.rawValue).font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(DesignTokens.textPrimary)
-                                    if !item.hasAdapter {
-                                        Text("soon").font(.caption2.weight(.bold))
-                                            .foregroundStyle(DesignTokens.warning)
-                                            .padding(.horizontal, 6).padding(.vertical, 1)
-                                            .background(DesignTokens.warning.opacity(0.16), in: Capsule())
-                                    }
-                                }
+                                Text(item.rawValue).font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(DesignTokens.textPrimary)
                                 Text(item.subtitle).font(.caption).foregroundStyle(DesignTokens.textSecondary)
                             }
                             Spacer()
@@ -200,11 +192,8 @@ struct SourceSetupView: View {
                 .buttonStyle(SecondaryActionButtonStyle())
                 .disabled(isTesting || !canAdd)
             }
-        } else if proto.hasAdapter {
-            Text("\(proto.rawValue) connects when you add it — your library appears after the first scan.")
-                .font(.caption).foregroundStyle(DesignTokens.textSecondary)
         } else {
-            Text("\(proto.rawValue) support is coming soon. You can save it now; it’ll stay pending until the adapter ships.")
+            Text("\(proto.rawValue) connects when you add it — your library appears after the first scan.")
                 .font(.caption).foregroundStyle(DesignTokens.textSecondary)
         }
     }

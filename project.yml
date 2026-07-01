@@ -63,6 +63,19 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
 
+  BetterStreamingTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: App/BetterStreamingTests
+    dependencies:
+      - target: BetterStreaming
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.betterstreaming.tests
+        GENERATE_INFOPLIST_FILE: YES
+
 schemes:
   BetterStreaming:
     build:
@@ -72,3 +85,5 @@ schemes:
       config: Debug
     test:
       config: Debug
+      targets:
+        - BetterStreamingTests

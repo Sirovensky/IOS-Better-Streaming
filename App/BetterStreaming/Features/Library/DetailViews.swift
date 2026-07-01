@@ -173,12 +173,41 @@ struct AlbumDetailView: View {
         .toolbar {
             if !albumTracks.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        model.metadataEditTarget = .album(albumID)
+                    Menu {
+                        Button("Play Next", systemImage: "text.insert") { model.playAlbumNext(albumID) }
+                        Button("Add to Queue", systemImage: "text.append") { model.addAlbumToQueue(albumID) }
+
+                        Divider()
+
+                        if model.canManageAlbumDownload(albumID) {
+                            if model.albumHasDownloads(albumID) {
+                                Button("Remove Download", systemImage: "trash", role: .destructive) {
+                                    model.removeAlbumDownloads(albumID)
+                                }
+                            } else {
+                                Button("Download", systemImage: "arrow.down.circle") {
+                                    model.downloadAlbum(albumID)
+                                }
+                            }
+                        }
+                        Button {
+                            model.toggleAlbumFavorite(albumID)
+                        } label: {
+                            let fav = model.isAlbumFavorite(albumID)
+                            Label(fav ? "Unfavorite" : "Favorite", systemImage: fav ? "star.fill" : "star")
+                        }
+
+                        Divider()
+
+                        // Labelled "album info" and its editor footer says device-only,
+                        // so it's clear this doesn't retag the files on the server.
+                        Button("Edit Album Info", systemImage: "pencil") {
+                            model.metadataEditTarget = .album(albumID)
+                        }
                     } label: {
-                        Image(systemName: "pencil")
+                        Image(systemName: "ellipsis.circle")
                     }
-                    .accessibilityLabel("Edit album info")
+                    .accessibilityLabel("Album options")
                 }
             }
         }

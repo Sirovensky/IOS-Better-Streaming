@@ -23,8 +23,6 @@ let package = Package(
                 "BetterStreamingSources",
                 "MediaStore",
                 "LibraryIndexer",
-                "CacheManager",
-                "PlaybackCore",
                 "Diagnostics"
             ]
         ),
@@ -39,8 +37,6 @@ let package = Package(
         .library(name: "BetterStreamingSources", targets: ["BetterStreamingSources"]),
         .library(name: "MediaStore", targets: ["MediaStore"]),
         .library(name: "LibraryIndexer", targets: ["LibraryIndexer"]),
-        .library(name: "CacheManager", targets: ["CacheManager"]),
-        .library(name: "PlaybackCore", targets: ["PlaybackCore"]),
         .library(name: "Diagnostics", targets: ["Diagnostics"]),
         .library(name: "TestSupport", targets: ["TestSupport"]),
         .executable(name: "LiveSMBProbe", targets: ["LiveSMBProbe"])
@@ -129,24 +125,6 @@ let package = Package(
             ]
         ),
         .target(
-            name: "CacheManager",
-            dependencies: [
-                "BetterStreamingDomain",
-                "AppFoundation",
-                "RemoteFileSystem",
-                "MediaStore"
-            ]
-        ),
-        .target(
-            name: "PlaybackCore",
-            dependencies: [
-                "BetterStreamingDomain",
-                "AppFoundation",
-                "CacheManager",
-                "MediaStore"
-            ]
-        ),
-        .target(
             name: "Diagnostics",
             dependencies: ["BetterStreamingDomain", "AppFoundation"]
         ),
@@ -202,14 +180,6 @@ let package = Package(
         .testTarget(
             name: "LibraryIndexerTests",
             dependencies: ["LibraryIndexer", "TestSupport"]
-        ),
-        .testTarget(
-            name: "CacheManagerTests",
-            dependencies: ["CacheManager", "TestSupport"]
-        ),
-        .testTarget(
-            name: "PlaybackCoreTests",
-            dependencies: ["PlaybackCore"]
         ),
         .testTarget(
             name: "DiagnosticsTests",

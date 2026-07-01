@@ -1,5 +1,23 @@
 # Changelog
 
+## [2026-06-30 19:10]
+Dead-code removal + a polish pass evening the app out beyond the player. Build green on the simulator; core package (48) and new app tests (8) pass.
+
+- Dropped two orphaned Core modules that were compiled into the app but never used: PlaybackCore (a parallel playback controller the app doesn't run) and CacheManager (the app caches through LibraryService). About 1,400 lines out of the binary, and the suite no longer counts passing tests for code that doesn't ship.
+  - `Packages/BetterStreamingCore/Package.swift`; deleted `Sources/PlaybackCore`, `Sources/CacheManager`, and their test targets.
+- First tests on the app target: AutoCacheController's scoring and keep/evict planner, the one pure and bug-prone piece of app logic. 8 cases covering play-count vs recency order, bulk-play damping, budget bounds, favourite protection, windowed top-played.
+  - `App/BetterStreamingTests/AutoCacheControllerTests.swift`, `project.yml` (new test target).
+- Accessibility: every song row hid its context menu from VoiceOver (the row was one combined element) — Play Next / Queue / Favourite / Download are now rotor actions. The queue's shuffle/repeat toggles were colour-only and unlabeled; they announce state now. The Sources "more" button got a label and a 44pt target.
+  - `Components/MediaCells.swift`, `Features/Player/MiniPlayerView.swift`, `Features/Sources/SourcesView.swift`
+- Album detail had only a bare pencil and no way to download the album; it now has a full menu (Play Next, Add to Queue, Download/Remove, Favourite, Edit Album Info) matching the grid cell.
+  - `Features/Library/DetailViews.swift`
+- Removing a source now confirms first (it deletes the source and its songs from the device); it used to wipe everything on one tap. First-run onboarding gained a "Skip for now" so an unreachable server with no local music can't trap you in the modal. A failed track in the mini-player now offers Skip, not only "clear the whole queue".
+  - `Features/Sources/SourcesView.swift`, `Features/Onboarding/OnboardingView.swift`, `Features/Player/MiniPlayerView.swift`
+- Auto-cache eviction can no longer delete the file backing the currently-playing or gapless-preloaded track. Stream-to-complete promotion is atomic now (temp + rename) so a crash mid-copy can't leave a truncated file treated as fully cached. Manual queue reorder is no longer lost when shuffle is later toggled off. A transient DB read error at launch no longer strands an empty library for the session. Artwork persists as a bare filename instead of a container-absolute path.
+  - `AppModel.swift`, `Services/PlaybackEngine.swift`, `Services/RemoteStreamingService.swift`, `Services/LibraryService.swift`
+- Smaller polish: Offline no longer hides cached tracks behind a stale filter; Radio's empty state centers; the folder picker disables "Scan here" while loading / after an error and offers "Try again"; removed dead "coming soon" protocol UI.
+  - `Features/Library/OfflineLibraryView.swift`, `Features/Radio/RadioView.swift`, `Features/Sources/RemoteFolderPicker.swift`, `Features/Sources/SourceSetupView.swift`
+
 ## [2026-06-30 17:25]
 Album covers dropped after a reinstall. Built + installed to the iPhone 17 Pro.
 

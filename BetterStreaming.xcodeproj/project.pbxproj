@@ -11,20 +11,16 @@
 		08245D20643E9CDB6CCA67F2 /* Artwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12E89289617B809FA95582A3 /* Artwork.swift */; };
 		09CB91B7CE09CC0517254724 /* LibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */; };
 		0C2915DAA2525F4DC783977C /* PlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */; };
-		E9301FAA941716BF7F2C8515 /* AudioEnhancements.swift in Sources */ = {isa = PBXBuildFile; fileRef = C32FCBB5C450AFE0D0F7EC8D /* AudioEnhancements.swift */; };
-		7070077AE14564B5A28A59B4 /* AudioEQTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 199EA4FC8D5BBC1CD249D9B4 /* AudioEQTap.swift */; };
-		3C40B7057DD3A73AE78B94C2 /* CarPlaySceneController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67AE622562E8D0D8B5C27E22 /* CarPlaySceneController.swift */; };
-		79A25C9D28AA7EE72DD96DDF /* Lyrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E526507481B1CBEE44C69859 /* Lyrics.swift */; };
-		22020331366B4FDE2F38D21C /* OnlineArtworkClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5BA51BEC516B0D3E77816A8 /* OnlineArtworkClient.swift */; };
 		0E46E85BBB9BDEB1DE9A940F /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A775D9D0F736C93341DC053D /* LibraryView.swift */; };
 		18577502559950ADF1A0FE66 /* RadioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29D42752E6AB53570E3B5878 /* RadioView.swift */; };
 		2020D1F1D03AAD056E2AD787 /* MediaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EFDEF12E77AC32B75528948 /* MediaModels.swift */; };
+		234E83D6D6172A0B30BF7FCC /* AutoCacheControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B5C617273F118B35B977197 /* AutoCacheControllerTests.swift */; };
 		2A1D01B9DDF371E2E9F977E4 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8C350CC799F81C777E77341 /* SettingsView.swift */; };
+		3059D482892FFA87A775F6E0 /* AudioEnhancements.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4F4408F379A4170283260F8 /* AudioEnhancements.swift */; };
 		42C64E722C9F7E853D7EE8FF /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97CD9B642C6A08F1D3F191D1 /* KeychainStore.swift */; };
 		468504DA1212B2B35A621E1C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BCC2D943C5605432057942E /* HomeView.swift */; };
 		4A1CB58C63D7D548EDD339CB /* RootTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 584731D16BCF26BA499F4B56 /* RootTabView.swift */; };
 		529B9FC70BED296238A35C63 /* MiniPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A8917473AFA9BF5C2915EC1 /* MiniPlayerView.swift */; };
-		AABBCCDD0000000000000002 /* LiquidGlass.metal in Sources */ = {isa = PBXBuildFile; fileRef = AABBCCDD0000000000000001 /* LiquidGlass.metal */; };
 		5C71D3CAAA5CD1F93B68BAF6 /* BetterStreamingCore in Frameworks */ = {isa = PBXBuildFile; productRef = 4743CF64E2A785D31AEF908D /* BetterStreamingCore */; };
 		5CB5CB64A15E2539735641D0 /* SourceSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C015E25AF1FC6DB33905132F /* SourceSetupView.swift */; };
 		5FB88568190E9418CD7AFCB3 /* MediaCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67EC9B69AFFE0B8D3BE8D13D /* MediaCells.swift */; };
@@ -32,32 +28,45 @@
 		6D4FEB10C0FDC358627AB7D3 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E729D5CE64BA0A5E4011A6C7 /* AppModel.swift */; };
 		7516A90BA0C41FFE8B1874B3 /* DetailViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84FC29C090D662305B442FA /* DetailViews.swift */; };
 		A0492B51E450CBEC029BD4BE /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED4EC0B8A6A19AE086BC54A4 /* SearchView.swift */; };
+		A0B0748A83745ECBC83E8681 /* CarPlaySceneController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE692FF1F8C3D7B3AA3707F1 /* CarPlaySceneController.swift */; };
 		AA0AA5C8BC4671757B47D993 /* BetterStreamingApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA220FF41926FF26E0FBD844 /* BetterStreamingApp.swift */; };
 		AF692CF969F07A6B64577410 /* DesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2300EBA8131EE6AF7617A1F /* DesignTokens.swift */; };
 		B2B7B0DB65F0764A38B82548 /* RemoteFolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00A7302EDD3F93DA32911E53 /* RemoteFolderPicker.swift */; };
 		B5EF5E4C1F9FD30C4AFC38FE /* OfflineLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B85309C80C8120BB0FA8C25C /* OfflineLibraryView.swift */; };
 		E48911A655044AA9A1559265 /* SourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCDF8CD62C0F29867A2D1AED /* SourcesView.swift */; };
+		EB56E724BB488DBEB1FC7C42 /* OnlineArtworkClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2114B2D425EAA3BC44AFC9E2 /* OnlineArtworkClient.swift */; };
+		EF0AB18A978F072F6B97AA23 /* Lyrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 481C9E2042704673AD25F099 /* Lyrics.swift */; };
 		F6101C021E0759D3CCCABFF8 /* RemoteStreamingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C7A56D464C46BD86F239E4F /* RemoteStreamingService.swift */; };
+		F9579ED10BDBCF320CFC81E4 /* LiquidGlass.metal in Sources */ = {isa = PBXBuildFile; fileRef = B621594F0E68EFB78D43C47E /* LiquidGlass.metal */; };
+		FE269C56DBC57B895D4EC99F /* AudioEQTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00CA16D5B10556781744896D /* AudioEQTap.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		1EA8E48E033A4149B777CE0E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D9E6C17E5F966822464A83FF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E7CF131A139232C1E4DBC1AC;
+			remoteInfo = BetterStreaming;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		00A7302EDD3F93DA32911E53 /* RemoteFolderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFolderPicker.swift; sourceTree = "<group>"; };
+		00CA16D5B10556781744896D /* AudioEQTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEQTap.swift; sourceTree = "<group>"; };
 		12E89289617B809FA95582A3 /* Artwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Artwork.swift; sourceTree = "<group>"; };
+		1B5C617273F118B35B977197 /* AutoCacheControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoCacheControllerTests.swift; sourceTree = "<group>"; };
+		2114B2D425EAA3BC44AFC9E2 /* OnlineArtworkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineArtworkClient.swift; sourceTree = "<group>"; };
 		29D42752E6AB53570E3B5878 /* RadioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RadioView.swift; sourceTree = "<group>"; };
 		46FFD8508D86BB73EEB8878B /* BetterStreaming.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = BetterStreaming.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		481C9E2042704673AD25F099 /* Lyrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Lyrics.swift; sourceTree = "<group>"; };
 		4C690EE398FFC66BC3A5A3DF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		584731D16BCF26BA499F4B56 /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
 		5BCC2D943C5605432057942E /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		5C7A56D464C46BD86F239E4F /* RemoteStreamingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStreamingService.swift; sourceTree = "<group>"; };
 		67EC9B69AFFE0B8D3BE8D13D /* MediaCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCells.swift; sourceTree = "<group>"; };
 		6A8917473AFA9BF5C2915EC1 /* MiniPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerView.swift; sourceTree = "<group>"; };
-		AABBCCDD0000000000000001 /* LiquidGlass.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = LiquidGlass.metal; sourceTree = "<group>"; };
 		7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackEngine.swift; sourceTree = "<group>"; };
-		C32FCBB5C450AFE0D0F7EC8D /* AudioEnhancements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEnhancements.swift; sourceTree = "<group>"; };
-		199EA4FC8D5BBC1CD249D9B4 /* AudioEQTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEQTap.swift; sourceTree = "<group>"; };
-		67AE622562E8D0D8B5C27E22 /* CarPlaySceneController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarPlaySceneController.swift; sourceTree = "<group>"; };
-		E526507481B1CBEE44C69859 /* Lyrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Lyrics.swift; sourceTree = "<group>"; };
-		E5BA51BEC516B0D3E77816A8 /* OnlineArtworkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineArtworkClient.swift; sourceTree = "<group>"; };
 		7F28BFCB240C171BEBF1D73F /* BetterStreamingCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BetterStreamingCore; path = Packages/BetterStreamingCore; sourceTree = SOURCE_ROOT; };
 		82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryService.swift; sourceTree = "<group>"; };
 		8EFDEF12E77AC32B75528948 /* MediaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaModels.swift; sourceTree = "<group>"; };
@@ -67,13 +76,17 @@
 		A2300EBA8131EE6AF7617A1F /* DesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
 		A775D9D0F736C93341DC053D /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
 		A8C350CC799F81C777E77341 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		B621594F0E68EFB78D43C47E /* LiquidGlass.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = LiquidGlass.metal; sourceTree = "<group>"; };
 		B85309C80C8120BB0FA8C25C /* OfflineLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLibraryView.swift; sourceTree = "<group>"; };
 		BA220FF41926FF26E0FBD844 /* BetterStreamingApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BetterStreamingApp.swift; sourceTree = "<group>"; };
 		C015E25AF1FC6DB33905132F /* SourceSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceSetupView.swift; sourceTree = "<group>"; };
+		C4F4408F379A4170283260F8 /* AudioEnhancements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEnhancements.swift; sourceTree = "<group>"; };
 		C84FC29C090D662305B442FA /* DetailViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailViews.swift; sourceTree = "<group>"; };
 		CCDF8CD62C0F29867A2D1AED /* SourcesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourcesView.swift; sourceTree = "<group>"; };
+		E70689B5CEA75EEA1D8E2BED /* BetterStreamingTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = BetterStreamingTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E729D5CE64BA0A5E4011A6C7 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		ED4EC0B8A6A19AE086BC54A4 /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
+		FE692FF1F8C3D7B3AA3707F1 /* CarPlaySceneController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarPlaySceneController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -183,6 +196,7 @@
 			isa = PBXGroup;
 			children = (
 				46FFD8508D86BB73EEB8878B /* BetterStreaming.app */,
+				E70689B5CEA75EEA1D8E2BED /* BetterStreamingTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -191,15 +205,15 @@
 			isa = PBXGroup;
 			children = (
 				12E89289617B809FA95582A3 /* Artwork.swift */,
+				C4F4408F379A4170283260F8 /* AudioEnhancements.swift */,
+				00CA16D5B10556781744896D /* AudioEQTap.swift */,
 				97EC2A142AF43A4F4F8A5817 /* AutoCacheController.swift */,
+				FE692FF1F8C3D7B3AA3707F1 /* CarPlaySceneController.swift */,
 				97CD9B642C6A08F1D3F191D1 /* KeychainStore.swift */,
 				82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */,
+				481C9E2042704673AD25F099 /* Lyrics.swift */,
+				2114B2D425EAA3BC44AFC9E2 /* OnlineArtworkClient.swift */,
 				7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */,
-				C32FCBB5C450AFE0D0F7EC8D /* AudioEnhancements.swift */,
-				199EA4FC8D5BBC1CD249D9B4 /* AudioEQTap.swift */,
-				67AE622562E8D0D8B5C27E22 /* CarPlaySceneController.swift */,
-				E526507481B1CBEE44C69859 /* Lyrics.swift */,
-				E5BA51BEC516B0D3E77816A8 /* OnlineArtworkClient.swift */,
 				5C7A56D464C46BD86F239E4F /* RemoteStreamingService.swift */,
 			);
 			path = Services;
@@ -221,10 +235,20 @@
 			path = Model;
 			sourceTree = "<group>";
 		};
+		BA89438545CCF79F935148FC /* BetterStreamingTests */ = {
+			isa = PBXGroup;
+			children = (
+				1B5C617273F118B35B977197 /* AutoCacheControllerTests.swift */,
+			);
+			name = BetterStreamingTests;
+			path = App/BetterStreamingTests;
+			sourceTree = "<group>";
+		};
 		BC30D62D1B95C308E36A8CFB = {
 			isa = PBXGroup;
 			children = (
 				D3D54A4A6111288C1FDAA834 /* BetterStreaming */,
+				BA89438545CCF79F935148FC /* BetterStreamingTests */,
 				507E774FA4E9E037F8C93C83 /* Packages */,
 				6190E61D266B7D6D97B93855 /* Products */,
 			);
@@ -233,8 +257,8 @@
 		CFA566D0DF6B74A3E114C7B0 /* Player */ = {
 			isa = PBXGroup;
 			children = (
+				B621594F0E68EFB78D43C47E /* LiquidGlass.metal */,
 				6A8917473AFA9BF5C2915EC1 /* MiniPlayerView.swift */,
-				AABBCCDD0000000000000001 /* LiquidGlass.metal */,
 			);
 			path = Player;
 			sourceTree = "<group>";
@@ -259,6 +283,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		25DA23824F9BD2E4AE4378B2 /* BetterStreamingTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C01C0117EF3AB5B5B65667C9 /* Build configuration list for PBXNativeTarget "BetterStreamingTests" */;
+			buildPhases = (
+				499AF0E584DB39AADBF8C58E /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				00B4B1168893215AE22F0AE3 /* PBXTargetDependency */,
+			);
+			name = BetterStreamingTests;
+			packageProductDependencies = (
+			);
+			productName = BetterStreamingTests;
+			productReference = E70689B5CEA75EEA1D8E2BED /* BetterStreamingTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		E7CF131A139232C1E4DBC1AC /* BetterStreaming */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = A22E3DF7DD8ADAF0A75D9A44 /* Build configuration list for PBXNativeTarget "BetterStreaming" */;
@@ -307,6 +349,7 @@
 			projectRoot = "";
 			targets = (
 				E7CF131A139232C1E4DBC1AC /* BetterStreaming */,
+				25DA23824F9BD2E4AE4378B2 /* BetterStreamingTests */,
 			);
 		};
 /* End PBXProject section */
@@ -318,26 +361,26 @@
 			files = (
 				6D4FEB10C0FDC358627AB7D3 /* AppModel.swift in Sources */,
 				08245D20643E9CDB6CCA67F2 /* Artwork.swift in Sources */,
+				FE269C56DBC57B895D4EC99F /* AudioEQTap.swift in Sources */,
+				3059D482892FFA87A775F6E0 /* AudioEnhancements.swift in Sources */,
 				0014A58059C166B84F52F445 /* AutoCacheController.swift in Sources */,
 				AA0AA5C8BC4671757B47D993 /* BetterStreamingApp.swift in Sources */,
+				A0B0748A83745ECBC83E8681 /* CarPlaySceneController.swift in Sources */,
 				AF692CF969F07A6B64577410 /* DesignTokens.swift in Sources */,
 				7516A90BA0C41FFE8B1874B3 /* DetailViews.swift in Sources */,
 				468504DA1212B2B35A621E1C /* HomeView.swift in Sources */,
 				42C64E722C9F7E853D7EE8FF /* KeychainStore.swift in Sources */,
 				09CB91B7CE09CC0517254724 /* LibraryService.swift in Sources */,
 				0E46E85BBB9BDEB1DE9A940F /* LibraryView.swift in Sources */,
+				F9579ED10BDBCF320CFC81E4 /* LiquidGlass.metal in Sources */,
+				EF0AB18A978F072F6B97AA23 /* Lyrics.swift in Sources */,
 				5FB88568190E9418CD7AFCB3 /* MediaCells.swift in Sources */,
 				2020D1F1D03AAD056E2AD787 /* MediaModels.swift in Sources */,
 				529B9FC70BED296238A35C63 /* MiniPlayerView.swift in Sources */,
-				AABBCCDD0000000000000002 /* LiquidGlass.metal in Sources */,
 				B5EF5E4C1F9FD30C4AFC38FE /* OfflineLibraryView.swift in Sources */,
 				64A40EC9D5D6E532D7798D5E /* OnboardingView.swift in Sources */,
+				EB56E724BB488DBEB1FC7C42 /* OnlineArtworkClient.swift in Sources */,
 				0C2915DAA2525F4DC783977C /* PlaybackEngine.swift in Sources */,
-				E9301FAA941716BF7F2C8515 /* AudioEnhancements.swift in Sources */,
-				7070077AE14564B5A28A59B4 /* AudioEQTap.swift in Sources */,
-				3C40B7057DD3A73AE78B94C2 /* CarPlaySceneController.swift in Sources */,
-				79A25C9D28AA7EE72DD96DDF /* Lyrics.swift in Sources */,
-				22020331366B4FDE2F38D21C /* OnlineArtworkClient.swift in Sources */,
 				18577502559950ADF1A0FE66 /* RadioView.swift in Sources */,
 				B2B7B0DB65F0764A38B82548 /* RemoteFolderPicker.swift in Sources */,
 				F6101C021E0759D3CCCABFF8 /* RemoteStreamingService.swift in Sources */,
@@ -349,7 +392,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		499AF0E584DB39AADBF8C58E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				234E83D6D6172A0B30BF7FCC /* AutoCacheControllerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		00B4B1168893215AE22F0AE3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E7CF131A139232C1E4DBC1AC /* BetterStreaming */;
+			targetProxy = 1EA8E48E033A4149B777CE0E /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		9A23016054BFB992E1858B27 /* Debug */ = {
@@ -497,6 +556,24 @@
 			};
 			name = Debug;
 		};
+		D0477E69EC72B953485F5044 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.betterstreaming.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BetterStreaming.app/BetterStreaming";
+			};
+			name = Debug;
+		};
 		D21D771AF4280C0F373920C1 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -517,6 +594,24 @@
 			};
 			name = Release;
 		};
+		EAE7238B06FD9BDCF896FFB0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.betterstreaming.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BetterStreaming.app/BetterStreaming";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -534,6 +629,15 @@
 			buildConfigurations = (
 				9A23016054BFB992E1858B27 /* Debug */,
 				C59E869C450449A4698BCF63 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C01C0117EF3AB5B5B65667C9 /* Build configuration list for PBXNativeTarget "BetterStreamingTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D0477E69EC72B953485F5044 /* Debug */,
+				EAE7238B06FD9BDCF896FFB0 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

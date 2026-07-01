@@ -92,6 +92,15 @@ struct OnboardingView: View {
             }
             .buttonStyle(SecondaryActionButtonStyle())
 
+            // An escape hatch so a first-run user whose server is unreachable (and who
+            // has no local music) isn't trapped in the modal — the app's empty states
+            // guide them to add a source later.
+            Button("Skip for now") { model.completeOnboarding() }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(DesignTokens.textSecondary)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 2)
+
             Spacer(minLength: 12)
         }
         .fileImporter(isPresented: $showLocalImporter, allowedContentTypes: [.folder]) { result in
@@ -152,11 +161,8 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(SecondaryActionButtonStyle())
                 .disabled(isTesting || host.trimmed.isEmpty || share.trimmed.isEmpty)
-            } else if proto.hasAdapter {
-                Text("\(proto.rawValue) connects when you add it; your library appears after the first scan.")
-                    .font(.caption).foregroundStyle(DesignTokens.textSecondary)
             } else {
-                Text("\(proto.rawValue) support is coming soon — you can still save it now.")
+                Text("\(proto.rawValue) connects when you add it; your library appears after the first scan.")
                     .font(.caption).foregroundStyle(DesignTokens.textSecondary)
             }
 

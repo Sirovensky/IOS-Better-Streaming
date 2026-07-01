@@ -27,7 +27,11 @@ struct OfflineLibraryView: View {
         case .downloaded: base = downloaded
         case .autoCached: base = autoCached
         }
-        return base.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        // The filter picker only shows while both buckets are non-empty. If the chosen
+        // bucket empties out from under it (e.g. a download removed mid-view), fall back
+        // to everything so real offline tracks aren't hidden behind a stale filter.
+        let resolved = base.isEmpty ? (downloaded + autoCached) : base
+        return resolved.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
 
     var body: some View {

@@ -76,6 +76,22 @@ struct TrackRowView: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(track.title), \(track.artist), \(track.cacheState.label)")
+        // Combining the row hides the ellipsis Menu from VoiceOver, so surface the
+        // same actions as rotor custom actions (else they're unreachable).
+        .accessibilityActions {
+            Button("Play Next") { model.engine.playNext(track) }
+            Button("Add to Queue") { model.engine.addToQueue(track) }
+            Button(model.isFavorite(track.id) ? "Remove Favourite" : "Favourite") {
+                model.toggleFavorite(track.id)
+            }
+            if model.canManageDownload(track.id) {
+                if model.cacheState(track.id) == .cached {
+                    Button("Remove Download") { model.removeDownload(track.id) }
+                } else {
+                    Button("Download") { model.download(track.id) }
+                }
+            }
+        }
     }
 
     @ViewBuilder

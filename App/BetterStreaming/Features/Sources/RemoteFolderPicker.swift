@@ -35,8 +35,13 @@ struct RemoteFolderPicker: View {
                     if isLoading {
                         HStack { ProgressView(); Text("Loading…").foregroundStyle(DesignTokens.textSecondary) }
                     } else if let error {
-                        Label(error, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(DesignTokens.error)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label(error, systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(DesignTokens.error)
+                            Button("Try again") { Task { await load() } }
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(DesignTokens.brandPrimary)
+                        }
                     } else if folders.isEmpty {
                         Text("No sub-folders here.").foregroundStyle(DesignTokens.textSecondary)
                     } else {
@@ -70,6 +75,7 @@ struct RemoteFolderPicker: View {
                         dismiss()
                     }
                     .fontWeight(.semibold)
+                    .disabled(isLoading || error != nil)
                 }
             }
             .task(id: path) { await load() }
