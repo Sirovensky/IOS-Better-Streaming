@@ -1,5 +1,19 @@
 # Implementation log
 
+## Production-readiness sweep (whole-repo readthrough → fix everything) — 2026-07-01
+
+**Discussed/decided:** User asked for a full repo readthrough writing every needed task to QUEUE.md, then (second directive) to use Opus agents to fix all of it plus a deep UI/UX audit, aiming at "100% production-ready today." Fable orchestrated; Opus ran the fix/re-review subagents.
+
+**What was implemented:**
+1. **Audit:** 5 Fable review agents (playback / data / UI / protocol surfaces / cross-surface contract audit) + manual repo audit + manual UX audit of every screen → ~95 findings, written to QUEUE.md as READTHROUGH Parts 1-3 (bugs with file:line + build instructions, seam verdicts, 16 UX findings).
+2. **Fix waves (Opus, disjoint file ownership, all builds/tests verified per wave):** core packages (11 items + dead-module deletion + 42 new tests); UI views (14 items); playback engine (12 items + new queue APIs `updateQueueTracks`/`remapQueueTracks`/`jump`/`clearUpcoming`/`restore(unshuffled:)`); data layer (29 items incl. both P0s — override-poisoning on rescan, removeSource cache stranding — plus the identity-remap structural fix, fetch-before-evict, source-health demotion, engine sync); view features (Favorites screen, queue tap-to-jump/Clear, shuffle+repeat on player, row-menu Add-to-Playlist/Go-to, haptics, genre-filter browse, Top Songs, See All rails, playlist editing, and more); print→os.Logger migration (AppLog.swift, 33 sites, 0 prints left).
+3. **Manual (Fable):** AutoCacheController.remapKeys + moveInPlaylist handoffs; App Store pack — generated 1024px icon (CoreGraphics script; discovered and fixed that `resources:` was never a valid XcodeGen key, so the asset catalog wasn't in the project at all), PrivacyInfo.xcprivacy, ITSAppUsesNonExemptEncryption, ATS local networking, LSApplicationCategoryType, UIUserInterfaceStyle Dark, MARKETING_VERSION 1.0.0 + plist var alignment, DEVELOPMENT_TEAM/Automatic signing, swift-nio-ssh fork pinned to the audited revision, docs/ un-gitignored; format chip now shows kbps for lossy codecs (user request) classified by decoder mFormatID.
+4. **Re-review (Opus, 2 adversarial passes over the full diff):** 3 MED + 4 LOW confirmed → all fixed same session (MP4 front-moov range, SFTP connect/open races vs disconnect, WebDAV skip cap, per-source identity-remap handoff race, engine-queue remap so snapshots don't clobber, WebDAV 8080 heuristic rollback, favorite-haptic trigger, stream-teardown callback releasing the deterministic partial name). Everything else checked clean.
+
+**Verification:** package tests 48→88 green; app tests 29→36 green; sim + device builds green; installed to the iPhone (1.0.0) twice (pre- and post-re-review); sim screenshots of Home / full player / mini bar verified visually.
+
+**Status: complete** except the explicitly-deferred items listed in QUEUE.md's STATUS block (feature backlog needing product decisions, App Store Connect listing steps, and the human device-verify punch list).
+
 ## Artist search results + "Download All" for an artist — 2026-07-01
 
 **Discussed/decided:** User asked for (1) a "Download all" action for a specific artist, and (2) artists to appear as search results — first result — when a query matches the name, even loosely ("My chemical" → "My Chemical Romance").

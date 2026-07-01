@@ -1,5 +1,17 @@
 # Changelog
 
+## [2026-07-01 17:30]
+Production-readiness sweep: ~75 fixes + 16 features landed across five fix waves (packages, views, engine, data layer, view features), from a whole-repo readthrough (~95 findings, QUEUE.md READTHROUGH Parts 1-3).
+
+- **Correctness (P0):** metadata overrides no longer poison base rows on rescan ("Revert to file tags" is trustworthy again); removing a source deletes its downloaded files (plus a launch reconciliation sweep for orphans); a slow duration load can no longer stamp track A's duration onto track B; playback recovers properly after a resolve failure (no more replaying the previous track near-silent / stuck play state); lyrics reload on auto-advance; dead "Year" album sort removed.
+- **Identity remap:** when a rescan re-keys files (server-side re-tag/mtime drift), favorites, metadata overrides, playlists, recents, playback snapshot, classical credits, play stats/events, and the cached audio file all migrate to the new ids (unique path-match only). Previously all of it silently rotted.
+- **Engine/AppModel seams:** metadata edits now reach the playing queue + lock screen; gapless works for tracks prefetched after queue build; auto-cache evicts only after fetching (and never on a source that just went dark); source health demotes on failure; mostly-played promotion no longer mints un-evictable phantom pins; stream-complete updates the UI immediately; restored sessions can un-shuffle correctly.
+- **Protocol clients:** FTP no longer crashes on an out-of-range port and reads SIZE on the same connection; SFTP can't double-connect (leak), guards short reads, TOFU fails closed; WebDAV rejects non-WebDAV endpoints instead of showing an empty library, downloads in chunks (was byte-by-byte), streams ranged reads (was buffering whole files — jetsam risk), plain-http works on 80/5005/8080; MP4s with trailing moov (non-faststart) now get their tags; ID3 v2.3/2.4 per-frame flags handled.
+- **UI/UX + features:** Favorites screen; queue tap-to-jump + Clear; shuffle/repeat on the full player; Add to Playlist + Go to Album/Artist in every track row menu; playlist swipe-remove, drag-reorder, swipe-delete; haptics pass; pull-free genre browse (real filter, not text search); artist Top Songs; artist photos in list rows; See All on Home rails; current-track row opens the player; sleep-timer countdown; Offline Mode in Settings; search recents on tap; diacritic-insensitive search everywhere ("faure" finds Fauré's songs); A-Z index bubble + haptic; About shows version; Search keyboard no longer steals focus on every visit; VoiceOver can scrub.
+- **App Store pack:** app icon (the asset catalog was never even in the Xcode project — `resources:` is not a valid XcodeGen key; fixed), PrivacyInfo.xcprivacy, ITSAppUsesNonExemptEncryption, ATS local-networking, app category, dark UIUserInterfaceStyle, version 1.0.0 aligned, team + automatic signing, swift-nio-ssh fork pinned to the audited revision.
+- **Hygiene:** dead Diagnostics/Redactor/SourceRegistry/FolderSummary code deleted; `print()` logging migrated to os.Logger (Release stops leaking paths/titles); docs/ now versioned; +50 new tests (package 48→88, app 29→36+).
+- Files: everywhere. Details per item: QUEUE.md READTHROUGH sections with per-finding file:line.
+
 ## [2026-07-01 09:32]
 Adversary round-1 fixes on the artist features (efc34ad).
 
