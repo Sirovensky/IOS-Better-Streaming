@@ -22,6 +22,7 @@ struct SettingsView: View {
                 autoCacheSection
                 audioSection
                 artworkSection
+                librarySection
                 sourcesSection
                 aboutSection
             }
@@ -115,6 +116,15 @@ struct SettingsView: View {
                 .tint(DesignTokens.brandPrimary)
                 .padding(12)
 
+                if enhancements.replayGainEnabled {
+                    rowDivider
+                    Toggle(isOn: $enhancements.replayGainAlbumMode) {
+                        settingsLabel("Album gain", "Keep each album's track-to-track loudness", icon: "square.stack")
+                    }
+                    .tint(DesignTokens.brandPrimary)
+                    .padding(12)
+                }
+
                 rowDivider
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -172,11 +182,19 @@ struct SettingsView: View {
         }
         // Apply audio-enhancement changes to the CURRENTLY playing track, not just
         // the next one (debounced so dragging a slider re-preps once on release).
+        .onChange(of: enhancements.gaplessEnabled) { _, _ in model.engine.gaplessSettingChanged() }
         .onChange(of: enhancements.eqEnabled) { _, _ in scheduleEnhancementsApply() }
         .onChange(of: enhancements.eqBandsDB) { _, _ in scheduleEnhancementsApply() }
         .onChange(of: enhancements.preampDB) { _, _ in scheduleEnhancementsApply() }
         .onChange(of: enhancements.replayGainEnabled) { _, _ in scheduleEnhancementsApply() }
-        .onChange(of: enhancements.crossfadeSeconds) { _, _ in scheduleEnhancementsApply() }
+        .onChange(of: enhancements.replayGainAlbumMode) { _, _ in scheduleEnhancementsApply() }
+        .onChange(of: enhancements.crossfadeSeconds) { _, _ in
+            scheduleEnhancementsApply()
+            // Crossfade and gapless are mutually exclusive on a single player; raising
+            // crossfade above 0 must drop any already-staged gapless preload, else it
+            // would hard-advance once instead of crossfading.
+            model.engine.gaplessSettingChanged()
+        }
     }
 
     private static func bandLabel(_ freq: Double) -> String {
@@ -196,6 +214,86 @@ struct SettingsView: View {
                 }
                 .tint(DesignTokens.brandPrimary)
                 .padding(12)
+
+                rowDivider
+
+                Button { model.refreshArtwork() } label: {
+                    HStack(spacing: 12) {
+                        settingsLabel("Fetch missing covers", artworkStatusDetail,
+                                      icon: "arrow.triangle.2.circlepath")
+                        if model.isFetchingArtwork {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                    .padding(12)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isFetchingArtwork)
+            }
+            .surfaceCard(fill: DesignTokens.surfaceCard)
+
+            Text("Artist photos")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(DesignTokens.textSecondary)
+                .padding(.top, 6)
+            VStack(spacing: 0) {
+                ForEach(Array(ArtistImageSource.allCases.enumerated()), id: \.element.id) { idx, source in
+                    if idx > 0 { rowDivider }
+                    Toggle(isOn: artistSourceBinding(source)) {
+                        settingsLabel(source.title, source.detail, icon: "person.crop.circle")
+                    }
+                    .tint(DesignTokens.brandPrimary)
+                    .padding(12)
+                }
+            }
+            .surfaceCard(fill: DesignTokens.surfaceCard)
+        }
+    }
+
+    /// Live status for the artwork backfill row: scanning, all-covered, or a count
+    /// of albums still missing a cover.
+    private var artworkStatusDetail: String {
+        if model.isFetchingArtwork { return "Fetching covers…" }
+        let missing = model.albumsMissingArtworkCount
+        return missing == 0 ? "Every album has a cover" : "\(missing) albums still need one — tap to scan"
+    }
+
+    /// Read/write an artist-photo source toggle (per-source UserDefaults key).
+    /// Enabling one clears this session's photo misses so artist pages re-fetch.
+    private func artistSourceBinding(_ source: ArtistImageSource) -> Binding<Bool> {
+        Binding(
+            get: { ArtistImageSource.isOn(source) },
+            set: { newValue in
+                UserDefaults.standard.set(newValue, forKey: source.defaultsKey)
+                if newValue { model.resetArtistImageAttempts() }
+            }
+        )
+    }
+
+    // MARK: Library maintenance
+
+    private var librarySection: some View {
+        let needsFix = model.metadataNeedsAttention.count
+        return VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "Library", detail: "Fix tags your files got wrong")
+            VStack(spacing: 0) {
+                NavigationLink(value: LibraryRoute.fixMetadata) {
+                    HStack(spacing: 12) {
+                        settingsLabel("Fix metadata",
+                                      needsFix == 0 ? "Nothing needs attention" : "\(needsFix) tracks need attention",
+                                      icon: "pencil.and.list.clipboard")
+                        if needsFix > 0 {
+                            Text("\(needsFix)")
+                                .font(.caption.weight(.bold).monospacedDigit())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 8).padding(.vertical, 2)
+                                .background(DesignTokens.brandPrimary, in: Capsule())
+                        }
+                    }
+                    .padding(12)
+                }
+                .buttonStyle(.plain)
             }
             .surfaceCard(fill: DesignTokens.surfaceCard)
         }

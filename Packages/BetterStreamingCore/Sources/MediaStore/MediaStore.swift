@@ -16,6 +16,46 @@ public struct MediaStoreConfiguration: Sendable {
     }
 }
 
+/// A user-authored metadata correction, keyed by a media item's stable identity
+/// key. Stored in its own table and overlaid onto the file-scanned fields when
+/// items are read, so a later tag rescan (which rewrites the base row) never
+/// clobbers the user's fix. Only non-nil fields override; nil leaves the scanned
+/// value showing.
+public struct MetadataOverride: Sendable, Equatable {
+    public var identityKey: String
+    public var title: String?
+    public var artist: String?
+    public var album: String?
+    public var genre: String?
+    public var updatedAt: Date
+
+    public init(
+        identityKey: String,
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        genre: String? = nil,
+        updatedAt: Date = Date()
+    ) {
+        self.identityKey = identityKey
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.genre = genre
+        self.updatedAt = updatedAt
+    }
+
+    /// True when the override sets nothing — caller should delete the row instead
+    /// of persisting an inert record. Empty/whitespace-only fields count as unset,
+    /// so an override that only blanks a title is treated as inert (it would never
+    /// overlay anyway; see `applyOverride`).
+    public var isEmpty: Bool {
+        [title, artist, album, genre].allSatisfy {
+            ($0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) ?? true
+        }
+    }
+}
+
 public enum MediaStoreError: RedactableError, Equatable {
     case invalidStoredValue(table: String, column: String, value: String)
 
@@ -169,30 +209,82 @@ public actor MediaStore {
     public func mediaItem(id: MediaItemID) async throws -> MediaItem? {
         try migrateIfNeededLocked()
         return try await database().read { db in
-            try Row.fetchOne(
+            let overrides = try MediaStorePersistence.overrideIndex(in: db)
+            return try Row.fetchOne(
                 db,
                 sql: "SELECT * FROM media_items WHERE id = ?",
                 arguments: [MediaStorePersistence.uuidString(id.rawValue)]
             ).map(MediaStorePersistence.mediaItem(from:))
+                .map { MediaStorePersistence.applyOverride($0, overrides.resolve(forStableKey: $0.identity.stableKey)) }
         }
     }
 
     public func mediaItem(matching identity: RemoteItemIdentity) async throws -> MediaItem? {
+        try await mediaItem(identityKey: identity.stableKey)
+    }
+
+    /// Fetch a single media item by its stable identity key (== the app's track id),
+    /// with any user metadata override already overlaid.
+    public func mediaItem(identityKey: String) async throws -> MediaItem? {
         try migrateIfNeededLocked()
         return try await database().read { db in
-            try Row.fetchOne(
+            let overrides = try MediaStorePersistence.overrideIndex(in: db)
+            return try Row.fetchOne(
                 db,
                 sql: "SELECT * FROM media_items WHERE identity_key = ?",
-                arguments: [identity.stableKey]
+                arguments: [identityKey]
             ).map(MediaStorePersistence.mediaItem(from:))
+                .map { MediaStorePersistence.applyOverride($0, overrides.resolve(forStableKey: $0.identity.stableKey)) }
+        }
+    }
+
+    /// Update ONLY the duration of a base row, by identity. A full-row upsert
+    /// would rewrite the title/artist/album/genre columns from the (possibly
+    /// user-edited) in-memory copy, poisoning the file-tag base that metadata
+    /// overrides overlay on — so "revert to file tags" would restore the edit.
+    /// Column-scoped writes keep the base row = file-scanned values.
+    public func setDuration(_ seconds: Double, identityKey: String) async throws {
+        try migrateIfNeededLocked()
+        try await database().write { db in
+            try db.execute(
+                sql: "UPDATE media_items SET duration = ? WHERE identity_key = ?",
+                arguments: [seconds, identityKey]
+            )
+        }
+    }
+
+    /// Update ONLY the artwork URL of a base row, by identity. Same reason as
+    /// `setDuration(_:identityKey:)`: never touch the text columns the overrides
+    /// overlay on.
+    public func setArtworkURL(_ url: String?, identityKey: String) async throws {
+        try migrateIfNeededLocked()
+        try await database().write { db in
+            try db.execute(
+                sql: "UPDATE media_items SET artwork_url = ? WHERE identity_key = ?",
+                arguments: [url, identityKey]
+            )
+        }
+    }
+
+    /// Update ONLY the favorite flag of a base row, by identity. Same reason as
+    /// `setDuration(_:identityKey:)`.
+    public func setFavorite(_ isFavorite: Bool, identityKey: String) async throws {
+        try migrateIfNeededLocked()
+        try await database().write { db in
+            try db.execute(
+                sql: "UPDATE media_items SET is_favorite = ? WHERE identity_key = ?",
+                arguments: [isFavorite, identityKey]
+            )
         }
     }
 
     public func listMediaItems(sourceID: SourceID? = nil) async throws -> [MediaItem] {
         try migrateIfNeededLocked()
         return try await database().read { db in
+            let overrides = try MediaStorePersistence.overrideIndex(in: db)
+            let rows: [Row]
             if let sourceID {
-                return try Row.fetchAll(
+                rows = try Row.fetchAll(
                     db,
                     sql: """
                     SELECT * FROM media_items
@@ -200,13 +292,53 @@ public actor MediaStore {
                     ORDER BY source_id, share_id, sort_key, file_name
                     """,
                     arguments: [MediaStorePersistence.uuidString(sourceID.rawValue)]
-                ).map(MediaStorePersistence.mediaItem(from:))
+                )
+            } else {
+                rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT * FROM media_items ORDER BY source_id, share_id, sort_key, file_name"
+                )
             }
+            return try rows.map(MediaStorePersistence.mediaItem(from:))
+                .map { MediaStorePersistence.applyOverride($0, overrides.resolve(forStableKey: $0.identity.stableKey)) }
+        }
+    }
 
-            return try Row.fetchAll(
+    @discardableResult
+    public func upsertMetadataOverride(_ override: MetadataOverride) async throws -> MetadataOverride {
+        try migrateIfNeededLocked()
+        try await database().write { db in
+            try MediaStorePersistence.upsertMetadataOverride(override, in: db)
+        }
+        return override
+    }
+
+    public func deleteMetadataOverride(identityKey: String) async throws {
+        try migrateIfNeededLocked()
+        try await database().write { db in
+            try db.execute(
+                sql: "DELETE FROM metadata_overrides WHERE identity_key = ?",
+                arguments: [identityKey]
+            )
+        }
+    }
+
+    public func metadataOverride(identityKey: String) async throws -> MetadataOverride? {
+        try migrateIfNeededLocked()
+        return try await database().read { db in
+            try Row.fetchOne(
                 db,
-                sql: "SELECT * FROM media_items ORDER BY source_id, share_id, sort_key, file_name"
-            ).map(MediaStorePersistence.mediaItem(from:))
+                sql: "SELECT * FROM metadata_overrides WHERE identity_key = ?",
+                arguments: [identityKey]
+            ).map(MediaStorePersistence.metadataOverride(from:))
+        }
+    }
+
+    public func listMetadataOverrides() async throws -> [MetadataOverride] {
+        try migrateIfNeededLocked()
+        return try await database().read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM metadata_overrides")
+                .map(MediaStorePersistence.metadataOverride(from:))
         }
     }
 
@@ -249,6 +381,7 @@ public actor MediaStore {
     public func children(of folderID: FolderID?) async throws -> FolderChildren {
         try migrateIfNeededLocked()
         return try await database().read { db in
+            let overrides = try MediaStorePersistence.overrideIndex(in: db)
             let folderRows: [Row]
             let mediaRows: [Row]
             if let folderID {
@@ -277,6 +410,7 @@ public actor MediaStore {
             return FolderChildren(
                 folders: try folderRows.map(MediaStorePersistence.folder(from:)),
                 mediaItems: try mediaRows.map(MediaStorePersistence.mediaItem(from:))
+                    .map { MediaStorePersistence.applyOverride($0, overrides.resolve(forStableKey: $0.identity.stableKey)) }
             )
         }
     }
@@ -284,6 +418,7 @@ public actor MediaStore {
     public func search(_ query: LibrarySearchQuery) async throws -> LibrarySearchResult {
         try migrateIfNeededLocked()
         return try await database().read { db in
+            let overrides = try MediaStorePersistence.overrideIndex(in: db)
             let folders = try Row.fetchAll(db, sql: "SELECT * FROM folders ORDER BY sort_key, name")
                 .map(MediaStorePersistence.folder(from:))
                 .filter { MediaStorePersistence.matches($0, query: query) }
@@ -291,6 +426,7 @@ public actor MediaStore {
 
             let mediaItems = try Row.fetchAll(db, sql: "SELECT * FROM media_items ORDER BY sort_key, file_name")
                 .map(MediaStorePersistence.mediaItem(from:))
+                .map { MediaStorePersistence.applyOverride($0, overrides.resolve(forStableKey: $0.identity.stableKey)) }
                 .filter { MediaStorePersistence.matches($0, query: query) }
                 .prefix(max(query.limit, 0))
 
@@ -430,6 +566,18 @@ private enum MediaStorePersistence {
             for statement in schemaStatements {
                 try db.execute(sql: statement)
             }
+        }
+        migrator.registerMigration("metadata_overrides_v1") { db in
+            try db.execute(sql: """
+            CREATE TABLE metadata_overrides (
+                identity_key TEXT PRIMARY KEY NOT NULL,
+                title TEXT,
+                artist TEXT,
+                album TEXT,
+                genre TEXT,
+                updated_at REAL NOT NULL
+            )
+            """)
         }
         return migrator
     }
@@ -854,6 +1002,138 @@ private enum MediaStorePersistence {
         )
     }
 
+    // MARK: Metadata overrides
+
+    /// Lookup over the stored overrides that survives identity drift. Overrides are
+    /// keyed on a media item's full `stableKey` (which embeds size + mtime), but a
+    /// server re-tag or a NAS clock/mtime drift across reconnects mints a NEW full
+    /// stableKey for the SAME file — which would silently stop the override from
+    /// overlaying. So we also index every override by its PATH-STABLE prefix
+    /// (source + share + normalizedPath, no size/mtime) and fall back to that when
+    /// the exact key misses. This keeps the "edits survive a rescan" guarantee
+    /// without a schema migration.
+    struct OverrideIndex {
+        var byIdentityKey: [String: MetadataOverride]
+        var byPathPrefix: [String: MetadataOverride]
+
+        func resolve(forStableKey key: String) -> MetadataOverride? {
+            if let exact = byIdentityKey[key] { return exact }
+            guard let prefix = MediaStorePersistence.pathStablePrefix(ofStableKey: key) else { return nil }
+            return byPathPrefix[prefix]
+        }
+    }
+
+    /// Load every override, indexed both by exact identity_key and by path-stable
+    /// prefix. Overrides are sparse (only user-edited items), so this stays small
+    /// even for a large library. When two overrides collapse to the same path
+    /// prefix (an old + a re-tagged key for one file), the most recently edited wins.
+    static func overrideIndex(in db: Database) throws -> OverrideIndex {
+        var byKey: [String: MetadataOverride] = [:]
+        var byPrefix: [String: MetadataOverride] = [:]
+        for row in try Row.fetchAll(db, sql: "SELECT * FROM metadata_overrides") {
+            let override = try metadataOverride(from: row)
+            byKey[override.identityKey] = override
+            if let prefix = pathStablePrefix(ofStableKey: override.identityKey) {
+                if let existing = byPrefix[prefix], existing.updatedAt >= override.updatedAt { continue }
+                byPrefix[prefix] = override
+            }
+        }
+        return OverrideIndex(byIdentityKey: byKey, byPathPrefix: byPrefix)
+    }
+
+    /// The path-stable prefix of a `RemoteItemIdentity.stableKey`: source + share +
+    /// normalizedPath, dropping the volatile remoteFileID/size/mtime tail. A
+    /// stableKey is the concatenation of length-prefixed fields ("<utf8len>:<value>")
+    /// in a fixed order, so the path-stable key is literally the prefix spanning the
+    /// first three fields. Returns nil for a malformed key.
+    static func pathStablePrefix(ofStableKey key: String) -> String? {
+        let bytes = Array(key.utf8)
+        let zero = UInt8(ascii: "0"), nine = UInt8(ascii: "9"), colon = UInt8(ascii: ":")
+        var index = 0
+        for _ in 0..<3 {
+            var length = 0
+            var sawDigit = false
+            while index < bytes.count, bytes[index] >= zero, bytes[index] <= nine {
+                length = length * 10 + Int(bytes[index] - zero)
+                index += 1
+                sawDigit = true
+            }
+            guard sawDigit, index < bytes.count, bytes[index] == colon else { return nil }
+            index += 1 + length
+            guard index <= bytes.count else { return nil }
+        }
+        return String(decoding: bytes[0..<index], as: UTF8.self)
+    }
+
+    /// Overlay an override's set fields onto a scanned item. Empty/whitespace-only
+    /// fields are treated as unset so an inert override can't blank a real title.
+    static func applyOverride(_ item: MediaItem, _ override: MetadataOverride?) -> MediaItem {
+        guard let override else { return item }
+        var copy = item
+        if let title = nonBlank(override.title) { copy.title = title }
+        if let artist = nonBlank(override.artist) { copy.artist = artist }
+        if let album = nonBlank(override.album) { copy.album = album }
+        if let genre = nonBlank(override.genre) { copy.genre = genre }
+        return copy
+    }
+
+    /// nil for nil or empty/whitespace-only strings, otherwise the original value.
+    static func nonBlank(_ value: String?) -> String? {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return value
+    }
+
+    static func upsertMetadataOverride(_ override: MetadataOverride, in db: Database) throws {
+        try db.execute(
+            sql: """
+            INSERT INTO metadata_overrides (identity_key, title, artist, album, genre, updated_at)
+            VALUES (:identity_key, :title, :artist, :album, :genre, :updated_at)
+            ON CONFLICT(identity_key) DO UPDATE SET
+                title = excluded.title,
+                artist = excluded.artist,
+                album = excluded.album,
+                genre = excluded.genre,
+                updated_at = excluded.updated_at
+            """,
+            arguments: [
+                "identity_key": override.identityKey,
+                "title": nonBlank(override.title),
+                "artist": nonBlank(override.artist),
+                "album": nonBlank(override.album),
+                "genre": nonBlank(override.genre),
+                "updated_at": override.updatedAt.timeIntervalSince1970
+            ]
+        )
+    }
+
+    /// Drop overrides whose underlying file is gone. Matches on the path-stable
+    /// prefix, NOT the exact identity_key, so a rescan that changed a file's
+    /// size/mtime (new full stableKey) doesn't orphan a still-valid override that
+    /// the path-stable fallback would still overlay. A malformed key (no parseable
+    /// prefix) has no live file and is pruned. Runs inside the caller's transaction.
+    static func pruneOrphanedOverrides(in db: Database) throws {
+        let livePrefixes = Set(
+            try String.fetchAll(db, sql: "SELECT identity_key FROM media_items")
+                .compactMap(pathStablePrefix(ofStableKey:))
+        )
+        let overrideKeys = try String.fetchAll(db, sql: "SELECT identity_key FROM metadata_overrides")
+        for key in overrideKeys where !(pathStablePrefix(ofStableKey: key).map(livePrefixes.contains) ?? false) {
+            try db.execute(sql: "DELETE FROM metadata_overrides WHERE identity_key = ?", arguments: [key])
+        }
+    }
+
+    static func metadataOverride(from row: Row) throws -> MetadataOverride {
+        let updatedAtSeconds: Double = row["updated_at"]
+        return MetadataOverride(
+            identityKey: row["identity_key"],
+            title: row["title"],
+            artist: row["artist"],
+            album: row["album"],
+            genre: row["genre"],
+            updatedAt: Date(timeIntervalSince1970: updatedAtSeconds)
+        )
+    }
+
     static func upsertPlaylist(_ playlist: Playlist, in db: Database) throws -> Playlist {
         try db.execute(
             sql: """
@@ -1215,6 +1495,7 @@ private enum MediaStorePersistence {
         )
         try db.execute(sql: "DELETE FROM media_items WHERE source_id = ?", arguments: [source])
         try db.execute(sql: "DELETE FROM folders WHERE source_id = ?", arguments: [source])
+        try pruneOrphanedOverrides(in: db)
     }
 
     /// Delete only the source's media items whose identity_key is NOT in `keep`
@@ -1241,6 +1522,7 @@ private enum MediaStorePersistence {
         )
         try db.execute(sql: "DELETE FROM media_items WHERE \(absent)", arguments: [source])
         try db.execute(sql: "DROP TABLE _keep_identity_keys")
+        try pruneOrphanedOverrides(in: db)
     }
 
     static func deleteAllMediaItems(in db: Database) throws {
@@ -1248,6 +1530,7 @@ private enum MediaStorePersistence {
         try db.execute(sql: "DELETE FROM cache_entries")
         try db.execute(sql: "DELETE FROM media_items")
         try db.execute(sql: "DELETE FROM folders")
+        try db.execute(sql: "DELETE FROM metadata_overrides")
     }
 
     private static func folderExists(id: String, in db: Database) throws -> Bool {

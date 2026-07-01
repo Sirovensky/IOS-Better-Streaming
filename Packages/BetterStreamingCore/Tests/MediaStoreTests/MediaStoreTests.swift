@@ -209,6 +209,187 @@ import MediaStore
     #expect(loaded?.request.stableKey == request.stableKey)
 }
 
+@Test func metadataOverrideOverlaysAndSurvivesRescan() async throws {
+    let store = MediaStore(configuration: .inMemory())
+    let sourceID = SourceID()
+    let shareID = ShareID()
+    let id = identity(sourceID: sourceID, shareID: shareID, path: "Music/Track.mp3", size: 10)
+
+    let scanned = MediaItem(
+        identity: id, mediaKind: .audio, fileName: "Track.mp3",
+        title: "Bad Title", artist: "Unknown Artist", album: "Unknown", genre: "Unknown"
+    )
+    try await store.replaceMediaItems([scanned], for: sourceID)
+
+    // A partial override on the same identity key (title + artist only).
+    try await store.upsertMetadataOverride(
+        MetadataOverride(identityKey: id.stableKey, title: "Real Title", artist: "Real Artist", updatedAt: testDate(0))
+    )
+
+    // Overlay applies on list; un-overridden album keeps the scanned value.
+    let overlaid = try await store.listMediaItems().first
+    #expect(overlaid?.title == "Real Title")
+    #expect(overlaid?.artist == "Real Artist")
+    #expect(overlaid?.album == "Unknown")
+
+    // A rescan rewrites the base row from file tags...
+    try await store.replaceMediaItems([scanned], for: sourceID)
+    // ...but the override still overlays (the durability guarantee).
+    let afterRescan = try await store.mediaItem(identityKey: id.stableKey)
+    #expect(afterRescan?.title == "Real Title")
+    #expect(afterRescan?.artist == "Real Artist")
+
+    // Clearing the override restores the scanned values.
+    try await store.deleteMetadataOverride(identityKey: id.stableKey)
+    let cleared = try await store.mediaItem(identityKey: id.stableKey)
+    #expect(cleared?.title == "Bad Title")
+    #expect(try await store.listMetadataOverrides().isEmpty)
+}
+
+/// Regression: the maintenance writes (duration on play, artwork on backfill,
+/// favorite) must update ONLY their own column and never rewrite the base text
+/// columns from the edited overlay — otherwise "revert to file tags" would
+/// restore the edit instead of the original tags.
+@Test func columnScopedWritesDoNotPoisonBaseTextColumns() async throws {
+    let store = MediaStore(configuration: .inMemory())
+    let sourceID = SourceID()
+    let shareID = ShareID()
+    let id = identity(sourceID: sourceID, shareID: shareID, path: "Music/Track.mp3", size: 10)
+
+    let scanned = MediaItem(
+        identity: id, mediaKind: .audio, fileName: "Track.mp3",
+        title: "File Title", artist: "File Artist", album: "File Album", genre: "Rock"
+    )
+    try await store.replaceMediaItems([scanned], for: sourceID)
+
+    // User edits the tags → override overlays on the file-tag base row.
+    try await store.upsertMetadataOverride(
+        MetadataOverride(identityKey: id.stableKey, title: "Edited Title",
+                         artist: "Edited Artist", album: "Edited Album", updatedAt: testDate(0))
+    )
+    #expect(try await store.mediaItem(identityKey: id.stableKey)?.title == "Edited Title")
+
+    // Maintenance writes (these used to full-row upsert the edited in-memory values).
+    try await store.setDuration(321, identityKey: id.stableKey)
+    try await store.setArtworkURL("file:///art.jpg", identityKey: id.stableKey)
+    try await store.setFavorite(true, identityKey: id.stableKey)
+
+    // Overlay still shows the edit; the scoped columns took the new values.
+    let edited = try await store.mediaItem(identityKey: id.stableKey)
+    #expect(edited?.title == "Edited Title")
+    #expect(edited?.duration == 321)
+    #expect(edited?.isFavorite == true)
+
+    // Revert restores the ORIGINAL file tags (a poisoned base row would return the
+    // edited values here), and the scoped columns survive the revert.
+    try await store.deleteMetadataOverride(identityKey: id.stableKey)
+    let reverted = try await store.mediaItem(identityKey: id.stableKey)
+    #expect(reverted?.title == "File Title")
+    #expect(reverted?.artist == "File Artist")
+    #expect(reverted?.album == "File Album")
+    #expect(reverted?.duration == 321)
+    #expect(reverted?.isFavorite == true)
+    #expect(reverted?.artworkURL?.absoluteString == "file:///art.jpg")
+}
+
+/// Regression: a non-destructive rescan must preserve a surviving track's PK `id`
+/// AND its `cache_entries` row. The bulk test above only covers the swap-to-a-new
+/// -identity branch (insert + delete), never the survive branch.
+@Test func replaceMediaItemsPreservesSurvivingIDAndCacheEntry() async throws {
+    let store = MediaStore(configuration: .inMemory())
+    let sourceID = SourceID()
+    let shareID = ShareID()
+    let survivorIdentity = identity(sourceID: sourceID, shareID: shareID, path: "Music/Survivor.flac", size: 1)
+
+    let survivor = MediaItem(
+        identity: survivorIdentity, mediaKind: .audio, fileName: "Survivor.flac", title: "Survivor"
+    )
+    let stored = try await store.replaceMediaItems([survivor], for: sourceID).first
+    let survivorID = try #require(stored?.id)
+
+    try await store.upsertCacheEntry(
+        CacheEntry(
+            mediaItemID: survivorID,
+            identity: survivorIdentity,
+            state: .cached,
+            localFileURL: URL(fileURLWithPath: "/tmp/Survivor.flac"),
+            bytesTotal: 1,
+            bytesDone: 1,
+            requiredBy: [.manual]
+        )
+    )
+
+    // Rescan: the survivor returns (same identity) alongside a brand-new track.
+    let newcomer = MediaItem(
+        identity: identity(sourceID: sourceID, shareID: shareID, path: "Music/Newcomer.flac", size: 2),
+        mediaKind: .audio, fileName: "Newcomer.flac", title: "Newcomer"
+    )
+    try await store.replaceMediaItems([survivor, newcomer], for: sourceID)
+
+    // (a) the survivor kept its PK, and (b) its cache entry survived the rescan.
+    #expect(try await store.mediaItem(matching: survivorIdentity)?.id == survivorID)
+    #expect(try await store.cacheEntry(for: survivorID)?.state == .cached)
+    #expect(try await store.listMediaItems(sourceID: sourceID).count == 2)
+}
+
+/// Regression for the override durability guarantee under identity drift: a server
+/// re-tag or NAS mtime/size drift mints a NEW full `stableKey` for the same file.
+/// The override (keyed on the old key) must STILL overlay via the path-stable
+/// fallback, and must not be pruned by the rescan's delete pass.
+@Test func metadataOverrideSurvivesIdentityKeyChange() async throws {
+    let store = MediaStore(configuration: .inMemory())
+    let sourceID = SourceID()
+    let shareID = ShareID()
+    let original = identity(sourceID: sourceID, shareID: shareID, path: "Music/Track.mp3", size: 10)
+
+    let scanned = MediaItem(
+        identity: original, mediaKind: .audio, fileName: "Track.mp3",
+        title: "Bad Title", artist: "Unknown Artist"
+    )
+    try await store.replaceMediaItems([scanned], for: sourceID)
+    try await store.upsertMetadataOverride(
+        MetadataOverride(identityKey: original.stableKey, title: "Real Title", artist: "Real Artist", updatedAt: testDate(0))
+    )
+
+    // Same logical file, drifted size + mtime → a different stableKey.
+    let drifted = identity(sourceID: sourceID, shareID: shareID, path: "Music/Track.mp3", size: 20, modifiedAt: testDate(99))
+    #expect(drifted.stableKey != original.stableKey)
+    let rescanned = MediaItem(
+        identity: drifted, mediaKind: .audio, fileName: "Track.mp3",
+        title: "Bad Title", artist: "Unknown Artist"
+    )
+    try await store.replaceMediaItems([rescanned], for: sourceID)
+
+    // The override still overlays via the path-stable fallback, and wasn't pruned.
+    let overlaid = try await store.mediaItem(identityKey: drifted.stableKey)
+    #expect(overlaid?.title == "Real Title")
+    #expect(overlaid?.artist == "Real Artist")
+    #expect(try await store.listMetadataOverrides().count == 1)
+}
+
+/// An override whose fields are empty/whitespace-only must NOT blank the scanned
+/// values — empty fields count as unset on both write and overlay.
+@Test func emptyOverrideFieldsDoNotBlankScannedValues() async throws {
+    let store = MediaStore(configuration: .inMemory())
+    let sourceID = SourceID()
+    let shareID = ShareID()
+    let id = identity(sourceID: sourceID, shareID: shareID, path: "Music/Track.mp3", size: 10)
+
+    let scanned = MediaItem(
+        identity: id, mediaKind: .audio, fileName: "Track.mp3",
+        title: "File Title", artist: "File Artist"
+    )
+    try await store.replaceMediaItems([scanned], for: sourceID)
+
+    try await store.upsertMetadataOverride(
+        MetadataOverride(identityKey: id.stableKey, title: "  ", artist: "Real Artist", updatedAt: testDate(0))
+    )
+
+    let overlaid = try await store.mediaItem(identityKey: id.stableKey)
+    #expect(overlaid?.title == "File Title")   // blank override left the scanned title
+    #expect(overlaid?.artist == "Real Artist") // non-blank override applied
+}
+
 private func identity(
     sourceID: SourceID,
     shareID: ShareID,

@@ -15,6 +15,7 @@ final class AudioEnhancements {
     private let defaults: UserDefaults
     private enum Keys {
         static let replayGain = "audio.replayGain.enabled"
+        static let replayGainAlbumMode = "audio.replayGain.albumMode"
         static let preamp = "audio.preampDB"
         static let eqEnabled = "audio.eq.enabled"
         static let eqBands = "audio.eq.bands"
@@ -27,6 +28,10 @@ final class AudioEnhancements {
     nonisolated static let eqFrequencies: [Double] = [60, 230, 910, 3600, 14000]
 
     var replayGainEnabled: Bool { didSet { defaults.set(replayGainEnabled, forKey: Keys.replayGain) } }
+    /// Album-gain mode: prefer the album ReplayGain tag over the per-track tag, so a
+    /// record's tracks keep their relative loudness (the audiophile-correct choice
+    /// for listening to a whole album). Falls back to track gain when no album tag.
+    var replayGainAlbumMode: Bool { didSet { defaults.set(replayGainAlbumMode, forKey: Keys.replayGainAlbumMode) } }
     /// Manual preamp in dB (−12…+12). Also used as the EQ make-up/preamp.
     var preampDB: Double { didSet { defaults.set(preampDB, forKey: Keys.preamp) } }
     var eqEnabled: Bool { didSet { defaults.set(eqEnabled, forKey: Keys.eqEnabled) } }
@@ -44,6 +49,7 @@ final class AudioEnhancements {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         replayGainEnabled = defaults.bool(forKey: Keys.replayGain)
+        replayGainAlbumMode = defaults.bool(forKey: Keys.replayGainAlbumMode)
         preampDB = defaults.double(forKey: Keys.preamp)
         eqEnabled = defaults.bool(forKey: Keys.eqEnabled)
         if let saved = defaults.array(forKey: Keys.eqBands) as? [Double], saved.count == Self.eqFrequencies.count {
@@ -59,12 +65,21 @@ final class AudioEnhancements {
     /// dB → linear amplitude. `nonisolated` (pure) for the real-time tap.
     nonisolated static func linear(fromDB db: Double) -> Float { Float(pow(10.0, db / 20.0)) }
 
-    /// Parse a ReplayGain track-gain value (e.g. "-6.48 dB") from an AVAsset's
-    /// metadata (TXXX:replaygain_track_gain / Vorbis REPLAYGAIN_TRACK_GAIN).
-    static func replayGainDB(from metadata: [AVMetadataItem]) async -> Double? {
+    /// Parse a ReplayGain value (e.g. "-6.48 dB") from an AVAsset's metadata
+    /// (TXXX:replaygain_*_gain / Vorbis REPLAYGAIN_*_GAIN). In album mode the album
+    /// tag is preferred (falling back to track gain), otherwise the track tag is
+    /// preferred (falling back to album gain).
+    static func replayGainDB(from metadata: [AVMetadataItem], preferAlbum: Bool = false) async -> Double? {
+        let primary = preferAlbum ? "replaygain_album_gain" : "replaygain_track_gain"
+        let fallback = preferAlbum ? "replaygain_track_gain" : "replaygain_album_gain"
+        if let db = await gainValue(for: primary, in: metadata) { return db }
+        return await gainValue(for: fallback, in: metadata)
+    }
+
+    private static func gainValue(for tag: String, in metadata: [AVMetadataItem]) async -> Double? {
         for item in metadata {
             let key = (item.identifier?.rawValue ?? item.key?.description ?? "").lowercased()
-            guard key.contains("replaygain_track_gain") || key.contains("replaygain_album_gain") else { continue }
+            guard key.contains(tag) else { continue }
             if let value = try? await item.load(.stringValue), let db = parseGainString(value) {
                 return db
             }

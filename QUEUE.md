@@ -14,15 +14,89 @@ Goal: Apple-Music/Spotify-quality player over the user's own SMB/WebDAV/FTP/SFTP
 - **Supply chain:** `swift-nio-ssh` resolves to a fork `github.com/Wellz26/swift-nio-ssh` (Citadel 0.12.1 points there; we declare it directly for the SFTP host-key fix). Audit/replace when possible.
 - **SMBClient is now VENDORED** at `Packages/SMBClient/` (was remote `kishikawakatsumi/SMBClient` 0.3.1; `BetterStreamingCore/Package.swift` uses `.package(path: "../SMBClient")`). It is patched (bounds-checked `ByteReader`, `FileReader` no-progress break — see ACTIVE BUG #1 FIX 8). Do NOT revert to the remote dep without re-applying these patches, or the `EXC_BREAKPOINT` crash-loop returns. Re-pull the upstream only via a patch/merge that preserves them.
 
+## APP STORE — submission recon (2026-06-30, NOT yet actioned)
+
+Opus recon (repo inspect + web-verified 2026 process). Blockers ordered by what stops submission first:
+1. **No app icon** — `Assets.xcassets/AppIcon.appiconset/` has only `Contents.json`, no 1024×1024 PNG → Validate/upload rejected. Add a 1024px sRGB no-alpha PNG.
+2. **No `PrivacyInfo.xcprivacy`** — app uses required-reason API `UserDefaults` (6+ files) → ITMS-91053 rejection since May 2024. Add manifest: `NSPrivacyAccessedAPICategoryUserDefaults` reason `CA92.1`, `NSPrivacyTracking=false`, collected-data=[]. (swift-nio/swift-crypto/GRDB already ship their own; none on the signature-required list.)
+3. **`ITSAppUsesNonExemptEncryption` unset** in Info.plist → "Missing Compliance" blocks TestFlight every build. Set `NO` (SSH/TLS are standard/exempt crypto).
+4. **Distribution signing not configured** — `project.pbxproj` has `CODE_SIGN_IDENTITY="iPhone Developer"`, no `DEVELOPMENT_TEAM`/`CODE_SIGN_STYLE`. Set team `4HFQ952344` + Automatic.
+5. **ATS missing** — WebDAV uses http `URLSession`; no `NSAppTransportSecurity`. A plaintext LAN WebDAV box is blocked. Add `NSAllowsLocalNetworking=true` (no review justification; avoid blanket `NSAllowsArbitraryLoads`). SMB/FTP/SFTP are raw sockets, ATS-exempt.
+6. **Supply chain** — `Package.swift:57` depends on `github.com/Wellz26/swift-nio-ssh` over range `0.3.4..<0.4.0` (fork, pins rev a05e6bb). Pin exact rev or vendor it like SMBClient. Licenses all clean (Citadel/SMBClient/GRDB MIT, NIO/crypto Apache-2.0; no GPL).
+7. LOW: version metadata inconsistent (Info.plist literals `1.0`/`1` vs build settings `0.1.0`); no `LSApplicationCategoryType` (set `public.app-category.music`); verify `AutoCacheController.applyPlan` isn't a no-op (2.1 completeness).
+
+Good already: `NSLocalNetworkUsageDescription`+`NSBonjourServices` present; `UIBackgroundModes=[audio]`; creds Keychain-only (`kSecAttrAccessibleAfterFirstUnlock`), never UserDefaults/logs; no demo data; CarPlay inert (no entitlement in build → nothing to approve to submit).
+
+**Fastest to users = TestFlight internal** (≤100 testers, NO beta review, available after processing). External (≤10k public link) needs a one-time light Beta App Review. Full release also needs: screenshots (6.9"/6.5" iPhone + 13" iPad since `TARGETED_DEVICE_FAMILY=1,2`), App Privacy questionnaire ("Data Not Collected"), age rating, support URL + privacy-policy URL (both required). Build via Xcode Organizer Archive→Validate→Distribute, or Transporter for the IPA. Xcode 16+/iOS 26 SDK mandatory for new submissions from 2026-04-28. **Biggest review risk:** reviewer has no NAS → supply a demo server + creds (or a screen recording) in App Review notes, and state plainly it plays the user's OWN media over their OWN servers (pre-empt a 5.2.3 piracy reflex).
+
+## BUGHUNT 2026-06-30 (5 Opus agents) — ALL 25 FIXED + verified (build green, 63/63 tests). Uncommitted.
+
+Whole-app sweep over the uncommitted accurate-duration / crossfade / live-EQ / gapless / metadata-override / two-client work. 2 HIGH, ~14 MED, ~9 LOW — **all fixed this session** (see CHANGELOG `[2026-06-30 17:06]` + IMPLEMENT.md). App build SUCCEEDED on the sim; full core package suite 63/63 pass (3 new MediaStore tests). NOT yet installed to the device — device-verify the VoiceOver transport, gapless/crossfade interactions, download-badge refresh, and metadata-override survival across a re-tag. Original triage retained below for reference.
+
+**HIGH:**
+- **VoiceOver: mini-player transport is unreachable.** `MiniPlayerView.swift:103-104` `.accessibilityElement(children: .combine)` flattens the row → play/pause (:74-82) + next (:84-93) buttons vanish as actionable elements. VO user can't pause/skip from the mini bar at all. Same bug on the error-row dismiss/clear-queue button (:44-45 combine over :32-40). FIX: drop `.combine` (default containment), or expose buttons via `.accessibilityCustomAction`.
+- **Online-artwork rate-limiter reentrancy.** `OnlineArtworkClient.get` (:65-79) + `ArtistImageClient.get` (:166-176): reads `lastRequestAt`, awaits `Task.sleep`, THEN writes — two callers during one sleep compute delay off the same stale stamp → fire MusicBrainz simultaneously, violating the 1.1s contract (UA gets 503'd). Triggered by a live `remoteAlbumArtwork` racing the backfill. FIX: reserve the slot synchronously before sleeping (`let slot = max(now, last+1.1); lastRequestAt = slot`), no await between read and write.
+
+**MED — playback/audio (PlaybackEngine/AudioEnhancements):**
+- **Stale EQ on a gaplessly-advanced track.** `enhancementsDidChange` (:798-810) updates only `currentPlayerItem`; the already-preloaded next item keeps its old `audioMix`, and `gaplessAdvanced` (:567-602) deliberately skips `configureItemAudio`. Enable EQ mid-track → next (preloaded) track plays with NO EQ its whole duration. FIX: also `configureItemAudio(preloadedNextItem)` in `enhancementsDidChange`, or re-run it in `gaplessAdvanced`.
+- **Toggling Gapless OFF doesn't cancel a staged preload.** No `onChange(of: gaplessEnabled)` anywhere (`SettingsView.swift:185-190`); `enhancementsDidChange` never touches preload. One more gapless advance happens after disabling. FIX: onChange → `clearPreload(); preloadNextIfGapless()`.
+- **Crossfade + Gapless = silence dip, not crossfade.** `preloadNextIfGapless` (:534) has no crossfade guard → envelope fades A to 0, then AVQueuePlayer hard-advances to B which fades up from 0: a near-silent gap. FIX: skip preload when `crossfadeSeconds > 0.1`, or mutually exclude in Settings.
+
+**MED — networking/artwork (LibraryService/RemoteStreamingService):**
+- **Stream partial-cache file shared by track.id → eviction deletes a live file.** `streamCacheFileURL` keyed on `track.id` (`LibraryService.swift:1526-1529`); replay/re-resolve spins a 2nd `RemoteStreamSession` on the SAME `partialCacheURL`; evicting the old session at the 8-cap calls `teardown()` (`RemoteStreamingService.swift:194-196`) deleting the file the live session is reading → short/garbage reads, corruption/stall. FIX: key the scratch file on the session UUID, not track.id.
+- **Background teardown aborts in-flight downloads/artwork.** `handleEnteredBackground` (:1292-1298) guards only `!scanInProgress`; backgrounding mid-`download` disconnects `backgroundClient` → download throws, `.part` deleted, returns nil. FIX: add an `inFlightBackgroundOps` counter to the guard.
+- **Backfill marks transient-failed albums as "attempted."** `backfillAlbumArtwork` (:1011-1017) inserts into `attemptedArtworkAlbumIDs` BEFORE `remoteAlbumArtwork` runs → a timeout/disconnect marks a real-cover album done-for-the-session. FIX: only mark attempted on a conclusive result (success or confirmed-absent), not on a thrown op.
+
+**MED — app state (AppModel):**
+- **cacheState writes don't bump `libraryRevision` → `albums` serves a stale download badge.** 6+ sites: `download` :1321/:1325, `removeDownload` :1333, `downloadAlbum` :1383, `maybeCacheMostlyPlayed` :1441, `prefetchNextIfNeeded` :1593, `applyPlan` :1529/:1542, `onTrackStarted` :1506-1508. `computeAlbums` derives `album.cacheState` from these but the memoized getter short-circuits on the unchanged rev. Download an album → tile keeps showing "not downloaded" until an unrelated rev bump. FIX: bump rev after each cacheState write (or a `setCacheState` helper).
+- **`playAlbumNext`/`addAlbumToQueue` bypass the offline-playable filter.** :1341-1359 enqueue raw `tracks(forAlbum:)` not `playableContext(...)`; offline mode queues unplayable remote-only tracks → stall/skip. Every sibling intent routes through `playableContext`. FIX: wrap both.
+
+**MED — data store (MediaStore):**
+- **Overrides never deleted with their media item → orphan + silent resurrect.** `deleteMediaItems(keeping:)` :1429, `(sourceID:)` :1403, `deleteAllMediaItems` :1449 never touch `metadata_overrides` (keyed on `identity_key` string, no FK/cascade). Removing a source orphans every override; a file with the same `stableKey` reappearing re-applies a ghost override. FIX: `DELETE FROM metadata_overrides WHERE identity_key NOT IN (SELECT identity_key FROM media_items)` in each delete path, same txn.
+- **Override identity rides on volatile `stableKey` (size+mtime).** `Identity.swift:154-165` `stableKey` embeds size+modifiedAt and is BOTH `media_items.identity_key` and the override PK. A re-tag on the server (or NAS mtime drift across reconnects) mints a new key → the user's correction silently stops overlaying AND orphans. The "survives rescan" test (`MediaStoreTests.swift:236`) rescans a byte-identical item so it never exercises this. FIX: key overrides on a path-stable identity (source+share+normalizedPath) decoupled from size/mtime.
+
+**MED — views (MiniPlayerView):**
+- **Queue list breaks on duplicate tracks.** `ForEach(upcoming, id: \.element.id)` :829-845 keys by `track.id` but the queue allows dupes → `.onDelete`/`.onMove` hit the wrong row. FIX: key by the enumerated `.offset` (already in the tuple).
+- **Error-row dismiss unreachable under VoiceOver** (same combine bug as HIGH #1).
+
+**LOW (worth a cleanup pass):**
+- `playNext` inserts into `queue` at currentIndex+1 but APPENDS to `unshuffledQueue` → shuffle-off later loses the "play next" position (`PlaybackEngine.swift:253-260`).
+- `firstPlayedAtEpoch` written (`AutoCacheController.swift:9,124`) but never read in `score()` → documented new-bulk-play damping doesn't happen. Use or delete.
+- `scheduleReconcile` (:184-207) can't stop an in-flight reconcile past the 800ms sleep → rapid re-schedule can double-apply. Add an `isCancelled` check after `applyPlan`.
+- prefetch reachability check is global not per-source (`AppModel.swift:1581`) → can pull from a down source if any source is up. `reconcileAutoCache` :1599 same.
+- MusicBrainz query not Lucene-escaped (`OnlineArtworkClient.swift:38-41`) — `"`/operators in album/artist break the query.
+- Cover-art accepts a >512-byte HTML error page as `.jpg` (:57-62) — no magic-byte (JPEG FFD8 / PNG 89504E47) check.
+- No negative cache for genuinely cover-less albums on the direct `remoteAlbumArtwork` path (:905-922) → every replay re-lists the folder + re-probes + re-hits the online lookup.
+- Lyrics sheet renders blank if the track goes nil while open (`MiniPlayerView.swift:580-587`). Fall back to `ContentUnavailableView`.
+- Genre-filter menu passes an empty SF Symbol name for unselected rows (`DetailViews.swift:485`) — invalid-image log. Use two Labels / a Picker.
+- `applyOverride` treats `""` as a real override (`MediaStore.swift:1015-1023`) but `isEmpty` only checks nil → an empty-string field blanks the title and lingers. Treat empty/whitespace as nil on write.
+- FTS5 `media_search` maintained on every write but never `MATCH`ed (`MediaStore.swift:423-427` does an in-Swift scan) — dead write cost, and it'd surface stale base text (no overrides) if ever wired up. Wire or drop.
+
+**Test gaps:** the non-destructive `replaceMediaItems` (PK + `cache_entries` preservation for SURVIVING identities) has zero coverage — `mediaStoreCanBulkListReplaceAndDeleteMediaItems` only swaps to a different identity_key (insert+delete branch). Add: upsert item → attach a cache_entry → `replaceMediaItems` with the SAME identity → assert id unchanged AND cacheEntry survives.
+
+**Cleared as NOT bugs (don't re-investigate):** seek-coalescing/generation guards, retain cycles (all long-lived Tasks `[weak self]`), Swift-6 isolation (all 3 services `@MainActor`), empty-queue/repeat-one/nil-track edges, artwork-dedup `albumArtworkTasks` coalescing, scan reuse-key/prune, scrubber-vs-morph gesture scope, EQ band-count bounds, morph drag-fraction reset on track-nil, override overlay coverage (all read paths covered), `upsertMetadataOverride` ON-CONFLICT (caller does read-modify-write merge).
+
+## CURRENT STATE — 2026-06-30 (read first)
+
+**Reconciled top-7 (from IDEAS.md) — ALL IMPLEMENTED, VERIFIED IN THE iOS SIMULATOR, then built + INSTALLED to the device (iPhone 17 Pro 45FD6187…).** The phone was unavailable during the build, so each was verified on the booted sim (UDID F6BF298F-…) via the `-uiPreview` launch-arg harness + `simctl io screenshot`.
+
+- ✅ **#1 Resume hero + keep mini-bar.** Home hero gated on `engine.hasRestorableSession` (restored-not-resumed); tap → `engine.resume()` (seeks to saved elapsed) + opens player; hides once playing; mini-bar kept on all tabs (the `hideMiniBar`/`TabView(selection:)` approach was reverted). `MiniPlayerView` artist/album nav is now `.fullScreenCover` (`PlayerNavCover`), not a sheet.
+- ✅ **#2 Perf pass.** `AppModel.albums`/`libraryStats` are revision-keyed caches (`libraryRevision` bumped on every mutation site) instead of O(N) per render; search uses a prebuilt lowercased `searchHaystack`.
+- ✅ **#3 Rediscovery shelves.** `AutoCacheController` gained a bounded `playEvents` log (`topPlayed(sinceDays:limit:)`). Home rails: Haven't-Heard / Buried-Treasure / On-This-Day / Top-This-Month (each hidden when empty). Sim verified the populated Haven't-Heard rail; the 3 history-based shelves correctly hidden (no play history in sim).
+- ✅ **#4 Morph lag.** During a live drag (`dragFraction != nil`) the player swaps interactive Liquid-Glass + 3 screen-blend rim for a static `.ultraThinMaterial` (no per-frame lensing recompute over the resizing shape); real glass + rim return on settle.
+- ✅ **#5 In-app metadata repair.** New `metadata_overrides` table in MediaStore (migration `metadata_overrides_v1`), overlaid at READ time on every media-item fetch → survives a tag rescan (proven by unit test `metadataOverrideOverlaysAndSurvivesRescan`). Track + album editors (sheet via `model.metadataEditTarget`), "Revert to file tags", "Fix Metadata" review queue (Settings → Library).
+- ✅ **#6 Audiophile correctness (safe scope).** Album-gain mode (`replayGainAlbumMode`; `replayGainDB(preferAlbum:)`) + Settings toggle; codec/bit-depth/sample-rate badge (`engine.currentFormatDetail` from the decoded asset's ASBD). Sim verified "FLAC · 24-bit · 96 kHz" chip + the toggle.
+- ✅ **#7 Config-sharing + a11y.** Export a source as a QR + `.bettersource` JSON file (password EXCLUDED — `SourceConfig` never held it); import via file picker → prefills SourceSetupView, password re-entered. A11y: mini-bar Dynamic Type clamped (`...xxLarge`, protects the fixed 64pt morph geometry); VoiceOver combined labels on the resume hero, stat tiles, format chip. Sim verified QR view + legible mini-bar at AX5.
+
+**Deferred (second wave) — NOT done, by design:** hi-res **sample-rate switching** (spike — `AVPlayer` may ignore `preferredSampleRate`, needs device measurement); **gapless-for-streamed** (hard — SMB op-lock serialization; gapless stays cached-only); **QR _scanning_** (camera-only, no sim camera — export QR + file import is the cross-device path).
+
+**DEBUG-only sim harness added** (all `#if DEBUG`, gated on launch args, inert normally): `-editinfo`, `-settings`, `-share` (alongside existing `-uiPreview`/`-bar`/`-mid`/`-resume`).
+
+**Still open (deferred bug, user-reported 2026-06-29):** slow swipe-down from the full player on Home → can stick in a permanently half-open mini-player hiding half the screen (likely no final animation settle point). Not addressed this session.
+
+**Repo:** this session's 7 features are **uncommitted**. Touched: `Packages/BetterStreamingCore/Sources/MediaStore/MediaStore.swift` (+ `Tests/MediaStoreTests/MediaStoreTests.swift`), `App/BetterStreaming/{AppModel.swift, Navigation/RootTabView.swift, Services/{AutoCacheController, PlaybackEngine, AudioEnhancements, LibraryService}.swift, Features/{Home/HomeView, Player/MiniPlayerView, Settings/SettingsView, Sources/{SourcesView, SourceSetupView}, Library/DetailViews}.swift}`. Commit as `Pavel`, no AI trailer, `git pull --rebase` first.
+
 ## CURRENT STATE — 2026-06-29 (read first)
-
-**Streaming (prior work) — on device, user-verified:**
-- ✅ **Silent scrub fixed** — serialize SMB ops per client (FIX 6). User-verified.
-- ✅ **Underrun-skip fixed** — `AVPlayerItem.preferredForwardBufferDuration = 10` (FIX 6 buffer). User-verified.
-- ✅ **Rapid-scrub cushion** — post-seek pre-roll gate (FIX 7). User-verified 2026-06-29 ("rapid scrub is good").
-- ✅ **Crash-loop fixed** — vendored SMBClient + bounds-checked `ByteReader` (FIX 8). Launch-verified on device.
-
-(Mechanisms: see ACTIVE BUG #1, FIX 1–8.)
 
 **This session (2026-06-29) — NEXT TASKS #2–#7 ALL IMPLEMENTED, UNBUILT (no Mac/toolchain on the agent box this time — needs a Mac build + device verify before commit):**
 - ✅ #2 Connection-leak fix — per-source cached stream+background `SMBRemoteClient`, disconnect on removal/background, artwork dedup, download per-chunk timeout.
@@ -50,6 +124,46 @@ See NEXT TASKS entries for per-item detail + file lists + what to VERIFY.
 - ✅ **EQ below crossfade in Settings** — moved the Equalizer toggle under the Crossfade slider so toggle + bands sit together. `SettingsView.swift`.
 - ✅ **Only 100%-played songs cached** — `AppModel.maybeCacheMostlyPlayed()` (from `onPlaybackTick`): once ≥75% of a >60 s track is heard and it's `remoteOnly`, `ensureCached` the whole file (once per track, respects auto-cache toggle). VERIFY: play most of a streamed song → it becomes cached.
 
+**Player transition — liquid glass (IN ACTIVE VISUAL ITERATION on device):**
+- Rewritten as ONE morphing element (`MorphingPlayer` in MiniPlayerView.swift + `MiniPlayerContent`; old `MiniPlayerBar`/overlay removed). A single `glassEffect` surface (`LiquidShape`) grows from the mini bar's computed frame to full screen by drag fraction `p`, finger-tracked. Settle is critically damped (no spring/bounce — user requirement). Per user feedback so far: flat top (meniscus dome removed), **tint 0 / clear glass** (album tint hid the background refraction), player's own `backgroundGradient` cleared to a faint scrim (was an album-colour wall), settle sped to `response 0.4`. Knobs: `PlayerMorph.settle` response (RootTabView), corner bulge `* 18`, content resolve window `[0.6,1]` (MiniPlayerView). Still tuning the feel.
+- TODO maybe: album-art "hero" fly (small cover → big cover) — skipped to keep one-element/continuous; offer matchedGeometry version if wanted.
+
+**Light mode — NOT BUILT (requested 2026-06-29):**
+- App is dark-only. `NowPlayingView` forces `.preferredColorScheme(.dark)`; `DesignTokens` colours + `appScreenBackground` are dark literals. Need an adaptive theme: make DesignTokens resolve per color scheme (asset catalog colors or `Color(uiColor:)` dynamic providers), drop the forced dark, audit every hard-coded `.black`/`.white`/opacity for both schemes, verify the Liquid Glass player + lists in light. Sizeable; do as a focused pass (candidate for a subagent).
+
+**Album art — requested 2026-06-29:**
+- Manual "fetch album art" button (user-triggered art fetch, e.g. in Settings and/or album context menu).
+- Fetch status/progress shown in Settings (how many covers fetched / in progress / failed).
+- Auto album-cover reload on app update — covers currently require a manual server resync after every update; they should persist across updates and reload automatically. (Likely the artwork cache lives in a dir cleared/invalidated on update, or art isn't persisted in the DB — investigate `LibraryService` artwork cache + `backfillAlbumArtwork` + `attemptedArtworkAlbumIDs`.)
+
+**Album detail — overflow menu (requested 2026-06-29):** add a top-right three-dot (`ellipsis`) toolbar menu on the album screen (`DetailViews`, the album view with Play/Shuffle) with album-level actions: Download whole album, Favorite, Play Next, Add to Queue, Go to Artist, etc. (Album long-press menu already exists from #7; this is the same actions surfaced as a nav-bar `⋯` button.)
+
+**Album detail — top-right is an Edit button, want a Download button (requested 2026-06-30):** the album screen's top-right control is an **Edit** button (metadata edit). User wants a **Download** button there instead (download whole album for offline). Also the Edit button is **ambiguous**: unclear whether edits are **local-only or also pushed to the server**. Two parts: (a) swap/raise the top-right to a Download action (offline the album); (b) make the Edit destination scope explicit — label/copy stating "local override only, file/server tags unchanged" (metadata overrides ARE local-only per `metadata_overrides` table — they overlay at read time, never write back to files/server). Check `DetailViews` album header toolbar.
+
+**Player header too low — FIXED 2026-06-29:** removed the double safe-area inset (`NavigationStack` already insets; the morph also re-injected `safeTop`/`safeBottom`). Grabber/chevron/source now sit near the top.
+
+**Player full-open backdrop — FIXED 2026-06-29 (verified on Simulator; pending device confirm):**
+- ROOT CAUSE of "black at full open" (survived ~4 blind iterations): `NowPlayingView` wrapped its content in a `NavigationStack`, which paints an **opaque system background** (black in dark mode). It covered the Liquid-Glass backdrop at full opacity (transparent mid-morph → the exact "see-through mid-morph, black at p=1" symptom). Fix: dropped the NavigationStack from the player root (must stay transparent); artist/album nav now via a self-contained **`PlayerNavSheet`** (own stack + bg). `LibraryRoute` made `Identifiable` for `.sheet(item:)`.
+- Refraction runs on a **snapshot `UIImage`** of the app, NOT the live `TabView` (a UIKit-backed TabView can't rasterize for a `layerEffect` → SwiftUI's red "unrenderable" placeholder). Snapshot via window `drawHierarchy` on open, cleared on close; nil ⇒ plain clear-glass fallback.
+- Glass tuned to brief (see-through + MORE chromatic aberration + "whole-surface edge-like", not violent displacement): `LiquidGlass.metal` = whole-surface gentle lensing + edge-weighted prismatic RGB split; `GlassRimOverlay` = white bevel + prismatic AngularGradient rim + top light. Knobs in `RootTabView.RefractionStrength` (full=11, chroma=3.0, noise=0.28, maxOffset=40).
+- VALIDATED on the Simulator over REAL app content (full / mid-morph / collapsed all look premium): capture is now per-platform — `#if targetEnvironment(simulator)` uses `window.layer.render` (captures real content on the sim; `drawHierarchy` is black there), `#else` keeps the device-proven `drawHierarchy`. So the sim refracts the real Home (Good evening, library cards, tab bar) just like the device will.
+- LAST STEP: install on the physical device + eyeball it (can't screenshot a physical device via CLI). Device build is green; install was blocked only because the phone was disconnected — retry `devbuild_full.sh` + devicectl install when it's back.
+- Simulator visual-iteration harness (all `#if DEBUG`, `-uiPreview` gated, inert in normal launch): `RootTabView.task` + `AppModel.debugPreviewNowPlaying` + `PlaybackEngine.debugSeedNowPlaying` + `DebugBackdrop`. Args: `-uiPreview` (full), `-uiPreview -mid` (mid-morph), `-uiPreview -bar` (collapsed). Build `scratchpad/simrun.sh`; screenshot `xcrun simctl io <sim> screenshot`.
+
+**Player — FROSTED pivot + nav/home (2026-06-29 eve, ON DEVICE, uncommitted):**
+- Backdrop is now **frosted** (`glassEffect(.regular.tint(...).interactive())` samples the live app directly — no snapshot/`layerEffect`/Metal). The whole snapshot+refraction path (`BackdropCapture`, `RefractionStrength`, `DebugBackdrop`, `LiquidGlass.metal`, MorphingPlayer `backdrop`/`refractStrength` params) is now DEAD CODE — strip before/at commit. `backgroundGradient` = light white wash (top .2 → bottom .05) to BRIGHTEN the frosted backdrop while it stays very blurry (blur is the glass itself).
+- Perf: `NowPlayingView` render gated to `pc > 0.55`; fixed shadow radius; settle `response 0.26 dampingFraction 1.0`. Still **slightly laggy** (inherent to live frosted glass re-blurring a resizing frame each morph frame). Next perf step if wanted: morph via a SCALE transform on a fixed-size glass surface instead of resizing+reblur (bigger refactor).
+- **Sheets rejected by user.** Player artist/album nav is now a **`fullScreenCover`** (`PlayerNavCover`, renamed from `PlayerNavSheet`): full viewport, dismiss only via the explicit Close (`chevron.down`) button — a sheet's swipe-down would close a long artist list on an accidental drag. Supersedes the line-70 `PlayerNavSheet`/`.sheet(item:)` note. Library nav stays standard push (no frosted sheets). `MiniPlayerView.swift`.
+- **Home mini bar hidden:** the floating bar is a duplicate of Home's hero "NOW PLAYING" card, so it's hidden (`opacity 0` + `allowsHitTesting(false)`) when `selectedTab == .home && p == 0 && !presented`; shows on every other tab and as soon as it morphs open. Needed `TabView(selection:)` + `.tag(AppTab.x)` + `AppTab` enum in `RootTabView.swift`. Open from Home via the hero card (already sets `isNowPlayingPresented`). **← SUPERSEDED + caused a bug, see below.**
+
+**Home hero vs mini-player — DECISION CHANGED (2026-06-29 eve), NOT yet built:**
+- User reversed the "hide mini bar on Home" idea. New direction: **keep the mini-player on every tab**, AND keep a hero that **resumes the last song at its pause point**, but the hero must **stop being dominant/duplicate once a track is playing**.
+- BUG the hide introduced (user hit it): a slow drag-down from the full player **on Home sticks half-open** — `hideMiniBar` removed the collapse animation's landing target. Reverting the Home-hide fixes it.
+- Plan (full spec in **`IDEAS.md` §0 + Appendix**): gate the big hero on `engine.needsInitialLoad` (restored-not-yet-resumed session); hero tap calls `engine.resume()` (already seeks to saved elapsed — verified `PlaybackEngine.resume()` lines 299-302) instead of the current `play()`/open-only (which never resumes, and races to 0:00 if tapped before restore). Once playing, hide the big hero; mini-bar is the single now-playing surface. Revert `hideMiniBar`. Show "Resume at M:SS" on the card.
+- **`PlayerNavCover` (done this eve):** player artist/album nav is now a `fullScreenCover` (Close = `chevron.down`), not a sheet — user rejected sheets (a long artist list would close on an accidental swipe-down). Built + on device, uncommitted.
+
+**`IDEAS.md` (new, repo root) — curated product backlog (2026-06-29):** reconciled from 11 sub-agents (5 breadth + 1 feasibility critic + 2 fresh-lens + 2 build-ready designs) + code verification. **Reconciled top 7:** (1) resume-hero fix (above); (2) **perf pass on per-render computed props** (`AppModel.albums`/`libraryStats`/`rebuildIndex` recompute O(N) every SwiftUI render → cache+invalidate; wire search to the unused FTS5 — stutters a big library before any feature matters); (3) rediscovery shelves on Home (haven't-heard / buried-treasure / on-this-day buildable NOW off `AutoCacheController` stats; only "top this month"+stats need a new `play_events` table — full design captured); (4) morph-lag fix (morph resizes the glass frame per-frame → static blur during drag, profile first); (5) in-app metadata repair (rescan-proof via a `metadata_overrides` table keyed by `identity_key`, merged in `upsertMediaItem` so a rescan can't clobber edits; + review queue for mojibake/0-dur/junk-artist — full design captured); (6) audiophile correctness (hi-res **sample-rate switching** — session never sets `preferredSampleRate` so 24/96 downsamples to 48k; gapless-for-streamed; album-gain); (7) source-config sharing (QR/file, no password) + concrete a11y fixes (fixed-frame Dynamic Type breakage, VoiceOver read-order, contrast). Second wave: system presence/widgets, multi-select+search-scopes, offline manager (download-on-favorite is the cheap pull-forward), folder browse, library-state-on-server, scrobble. Plus a reliability sweep (gapless preload keyed by index not track-id; playcount double-count on stall-recovery). Full ranked list + MVP cut per item + risks + two build orders + the two build-ready designs are in IDEAS.md.
+
 **Still OPEN (deferred — need device logs / triage):**
 - ⏳ **Multi-scrub plays the previous scrub's audio; clock runs to the end** — scrub to 0:30 then immediately near-end → hear 0:30 while timer shows near-end / past real length. Seek-coalescing logic in `PlaybackEngine.performSeek` looks correct (latest target honoured via `pendingSeekSeconds`); suspect the resource loader serving stale cached bytes for the new range, OR a `resolveGeneration` bump abandoning the seek completion and stranding `isSeeking=true`. NEXT: capture `devicectl ... --console` (filter `BETTERSTREAMING_`) while reproducing.
 
@@ -61,8 +175,6 @@ See NEXT TASKS entries for per-item detail + file lists + what to VERIFY.
 ## NEXT TASKS — prioritized, with detail
 
 > Mirrored in the live task list (#7–#12). Streaming was heavily bug-hunted (62 findings / 124 verdicts captured); the highest-value confirmed follow-up is the connection leak (#9).
-
-1. ✅ **Rapid-scrub pre-roll** — user-verified 2026-06-29.
 
 2. ✅ **Connection-leak fix (#9) — IMPLEMENTED 2026-06-29, UNBUILT (needs Mac build + device verify).** Was: `LibraryService.makeClient` built a NEW `SMBRemoteClient` (TCP+NTLM+treeconnect) on EVERY call, never disconnected — streaming, stat, each prefetch/auto-cache download, artwork per-album, backfill (~hundreds/run) → exhausts NAS session table → unrecoverable stall. **Fix landed:**
    - **Per-source client cache, TWO clients per source** (`LibraryService.streamClients` + `backgroundClients`). `streamClient` serves `playableItem` (live reads) ONLY; `backgroundClient` serves scan + artwork + downloads. Split (not one shared) because `SMBRemoteClient.download` holds the per-client op-lock for the ENTIRE transfer — sharing one would stall the live stream during a prefetch download.

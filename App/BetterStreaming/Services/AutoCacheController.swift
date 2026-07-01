@@ -9,6 +9,14 @@ struct PlayStat: Codable, Sendable {
     var firstPlayedAtEpoch: Double = 0
 }
 
+/// A single timestamped play, used for windowed stats ("top this month") that the
+/// per-track aggregate `PlayStat` can't answer (it only keeps the latest play time).
+/// Kept bounded (most-recent N) so it stays cheap in UserDefaults.
+struct PlayEvent: Codable, Sendable {
+    var id: String
+    var at: Double
+}
+
 /// A single decision produced by the reconciler.
 struct CachePlan: Sendable {
     /// Tracks that should be fetched/kept (in priority order).
@@ -69,6 +77,9 @@ final class AutoCacheController {
 
     private let defaults: UserDefaults
     private var stats: [String: PlayStat]
+    /// Bounded most-recent play log for windowed stats. Capped at `maxPlayEvents`.
+    private var playEvents: [PlayEvent]
+    private static let maxPlayEvents = 8000
     private var reconcileTask: Task<Void, Never>?
 
     private enum Keys {
@@ -77,6 +88,7 @@ final class AutoCacheController {
         static let protectFavorites = "autocache.protectFavorites.v1"
         static let wifiOnly = "autocache.wifiOnly.v1"
         static let stats = "autocache.stats.v1"
+        static let playEvents = "autocache.playEvents.v1"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -93,6 +105,12 @@ final class AutoCacheController {
         } else {
             self.stats = [:]
         }
+        if let data = defaults.data(forKey: Keys.playEvents),
+           let decoded = try? JSONDecoder().decode([PlayEvent].self, from: data) {
+            self.playEvents = decoded
+        } else {
+            self.playEvents = []
+        }
     }
 
     // MARK: Play tracking
@@ -105,6 +123,10 @@ final class AutoCacheController {
         stat.lastPlayedAtEpoch = epoch
         if stat.firstPlayedAtEpoch == 0 { stat.firstPlayedAtEpoch = epoch }
         stats[trackID] = stat
+        playEvents.append(PlayEvent(id: trackID, at: epoch))
+        if playEvents.count > Self.maxPlayEvents {
+            playEvents.removeFirst(playEvents.count - Self.maxPlayEvents)
+        }
         persistStatsSoon()
     }
 
@@ -129,6 +151,14 @@ final class AutoCacheController {
 
     func stat(for trackID: String) -> PlayStat { stats[trackID] ?? PlayStat() }
 
+    /// A track whose whole play history fits inside this window counts as a single
+    /// bulk session (a playlist played straight through), not a track the user
+    /// keeps returning to.
+    private static let bulkSessionSeconds: Double = 30 * 60
+    /// Score multiplier applied to bulk-played-once tracks. Conservative: keeps them
+    /// in contention but below tracks with plays spread over time.
+    private static let bulkPlayDamping: Double = 0.7
+
     /// Frequency + recency score. Higher = keep.
     func score(for trackID: String, now: Date = Date()) -> Double {
         guard let stat = stats[trackID], stat.playCount > 0 else { return 0 }
@@ -140,7 +170,29 @@ final class AutoCacheController {
         let halfLifeSeconds = 14.0 * 24 * 3600
         let recency = pow(0.5, ageSeconds / halfLifeSeconds)
         // Weighted blend. Frequency dominates so returning listens beat one-offs.
-        return frequency * 1.6 + recency * 1.0
+        var score = frequency * 1.6 + recency * 1.0
+        // Damp bulk-played-once items: when every play landed in one short session,
+        // it's likely a playlist played once, so discount it so genuine repeats
+        // (plays spread across sessions) outrank it.
+        if stat.firstPlayedAtEpoch > 0 {
+            let span = stat.lastPlayedAtEpoch - stat.firstPlayedAtEpoch
+            if span >= 0, span < Self.bulkSessionSeconds {
+                score *= Self.bulkPlayDamping
+            }
+        }
+        return score
+    }
+
+    /// Track IDs played most in the last `sinceDays`, most-played first. Backs the
+    /// "Top this month" shelf, which the per-track `PlayStat` aggregate can't
+    /// answer because it only stores the latest play time, not a windowed count.
+    func topPlayed(sinceDays: Int, limit: Int, now: Date = Date()) -> [String] {
+        let cutoff = now.timeIntervalSince1970 - Double(sinceDays) * 24 * 3600
+        var counts: [String: Int] = [:]
+        for event in playEvents where event.at >= cutoff {
+            counts[event.id, default: 0] += 1
+        }
+        return counts.sorted { $0.value > $1.value }.prefix(limit).map(\.key)
     }
 
     // MARK: Reconciliation
@@ -167,8 +219,13 @@ final class AutoCacheController {
         }
 
         let plan = makePlan(library: library, now: now)
+        // A rapid re-schedule cancels reconcileTask, which cancels this awaiting
+        // call. Bail before the heavy fetch/evict (and again before clobbering the
+        // summary) so a superseded run can't double-apply over the newer one.
+        if Task.isCancelled { return }
         autoCachedBytes = plan.projectedBytes
         await applyPlan?(plan)   // applyPlan reports real on-disk usage via setUsage
+        if Task.isCancelled { return }
         lastReconcileSummary = "Keeping \(plan.keep.count) songs · \(Self.byteLabel(autoCachedBytes)) of \(Self.byteLabel(budgetBytes))"
     }
 
@@ -233,12 +290,17 @@ final class AutoCacheController {
     // MARK: Persistence
 
     private func persistStats() {
-        guard let data = try? JSONEncoder().encode(stats) else { return }
-        defaults.set(data, forKey: Keys.stats)
+        if let data = try? JSONEncoder().encode(stats) {
+            defaults.set(data, forKey: Keys.stats)
+        }
+        if let data = try? JSONEncoder().encode(playEvents) {
+            defaults.set(data, forKey: Keys.playEvents)
+        }
     }
 
     func resetStats() {
         stats = [:]
+        playEvents = []
         persistStats()
         autoCachedBytes = 0
         lastReconcileSummary = "Listening history cleared"

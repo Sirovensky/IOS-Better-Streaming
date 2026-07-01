@@ -114,6 +114,9 @@ extension RemoteStreamingService: AVAssetResourceLoaderDelegate {
         let box = lock.withLock { activeRequests.removeValue(forKey: requestID) }
         box?.cancel()
         streamLog.info("didCancel offset=\(loadingRequest.dataRequest?.requestedOffset ?? -1)")
+        #if DEBUG
+        print("BETTERSTREAMING_STREAM didCancel offset=\(loadingRequest.dataRequest?.requestedOffset ?? -1)")
+        #endif
     }
 
     private func removeActiveRequest(id: ObjectIdentifier) {
@@ -255,6 +258,9 @@ private actor RemoteStreamSession {
         }
 
         streamLog.info("request ext=\(self.fallbackExtension, privacy: .public) offset=\(offset) upper=\(upper) allToEnd=\(isAllToEnd) len=\(length)")
+        #if DEBUG
+        print("BETTERSTREAMING_STREAM request offset=\(offset) upper=\(upper) allToEnd=\(isAllToEnd) len=\(length)")
+        #endif
 
         var cursor = offset
         var failures = 0

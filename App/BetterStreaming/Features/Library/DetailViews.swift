@@ -3,9 +3,11 @@ import UniformTypeIdentifiers
 
 // MARK: - Routing
 
-enum LibraryRoute: Hashable {
+enum LibraryRoute: Hashable, Identifiable {
+    var id: LibraryRoute { self }
     case album(String)
     case artist(String)
+    case albumArtists(String)
     case playlist(String)
     case allSongs
     case allAlbums
@@ -14,6 +16,7 @@ enum LibraryRoute: Hashable {
     case offline
     case sources
     case settings
+    case fixMetadata
 }
 
 /// A push action injected by each NavigationStack host so deep views (e.g. an
@@ -47,6 +50,7 @@ extension View {
             switch route {
             case .album(let id): AlbumDetailView(albumID: id)
             case .artist(let id): ArtistDetailView(artistID: id)
+            case .albumArtists(let id): AlbumArtistsView(albumID: id)
             case .playlist(let id): PlaylistDetailView(playlistID: id)
             case .allSongs: AllSongsView()
             case .allAlbums: AllAlbumsView()
@@ -55,6 +59,7 @@ extension View {
             case .offline: OfflineLibraryView()
             case .sources: SourcesView()
             case .settings: SettingsView()
+            case .fixMetadata: FixMetadataView()
             }
         }
     }
@@ -143,7 +148,10 @@ struct AlbumDetailView: View {
                         glyph: "music.note",
                         title: first.album,
                         subtitle: MetadataGrouping.albumDisplayArtist(from: albumTracks.map(\.artist)),
-                        subtitleRoute: .artist(first.artistID),
+                        // Various-Artists album → a list of every performer; single
+                        // artist → straight to their page.
+                        subtitleRoute: model.creditedArtists(forAlbum: albumID).count > 1
+                            ? .albumArtists(albumID) : .artist(first.artistID),
                         meta: "\(albumTracks.count) songs",
                         playAction: { model.playAlbum(albumID) },
                         shuffleAction: { model.playAlbum(albumID, shuffled: true) }
@@ -162,7 +170,62 @@ struct AlbumDetailView: View {
         .appScreenBackground()
         .navigationTitle(albumTracks.first?.album ?? "Album")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if !albumTracks.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        model.metadataEditTarget = .album(albumID)
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .accessibilityLabel("Edit album info")
+                }
+            }
+        }
         .task { model.ensureAlbumArtwork(albumID) }
+    }
+}
+
+// MARK: - Album artists (Various Artists picker)
+
+/// Lists every distinct performer on an album so a "Various Artists" record (opera
+/// cast, compilation) doesn't dead-end on whoever was first. Each row opens that
+/// artist's page.
+struct AlbumArtistsView: View {
+    @Environment(AppModel.self) private var model
+    var albumID: String
+
+    private var artists: [Artist] { model.creditedArtists(forAlbum: albumID) }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(artists) { artist in
+                    NavigationLink(value: LibraryRoute.artist(artist.id)) {
+                        HStack(spacing: 12) {
+                            ArtworkView(url: nil, artworkKey: artist.id, glyph: "music.mic", cornerRadius: 26)
+                                .frame(width: 52, height: 52)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(artist.name).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
+                                Text("\(artist.albumCount) albums · \(artist.trackCount) songs")
+                                    .font(.caption).foregroundStyle(DesignTokens.textSecondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.footnote).foregroundStyle(DesignTokens.textTertiary)
+                        }
+                        .padding(.vertical, 8)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                }
+            }
+            .padding(DesignTokens.phonePadding)
+            .padding(.bottom, 120)
+        }
+        .appScreenBackground()
+        .navigationTitle("Artists")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -180,7 +243,7 @@ struct ArtistDetailView: View {
             LazyVStack(alignment: .leading, spacing: 18) {
                 if let name = model.artistName(artistID) ?? artistTracks.first?.artist {
                     VStack(spacing: 12) {
-                        ArtworkView(url: nil, artworkKey: artistID, glyph: "music.mic", cornerRadius: 80)
+                        ArtworkView(url: model.artistImage(artistID), artworkKey: artistID, glyph: "music.mic", cornerRadius: 80, maxPixel: 400)
                             .frame(width: 140, height: 140)
                         Text(name).font(.title.weight(.bold)).foregroundStyle(DesignTokens.textPrimary)
                         HStack(spacing: 12) {
@@ -207,7 +270,7 @@ struct ArtistDetailView: View {
                             HStack(spacing: 14) {
                                 ForEach(artistAlbums) { album in
                                     NavigationLink(value: LibraryRoute.album(album.id)) {
-                                        SquareArtTileStatic(artworkKey: album.id, title: album.title, subtitle: "\(album.trackCount) songs")
+                                        SquareArtTileStatic(artworkKey: album.id, url: album.artworkURL, title: album.title, subtitle: "\(album.trackCount) songs")
                                     }
                                     .buttonStyle(.plain)
                                 }
@@ -231,6 +294,7 @@ struct ArtistDetailView: View {
         .appScreenBackground()
         .navigationTitle(model.artistName(artistID) ?? "Artist")
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: artistID) { model.ensureArtistImage(artistID) }
     }
 }
 
@@ -324,20 +388,19 @@ struct PlaylistDetailView: View {
 
 enum SongSort: String, CaseIterable, Identifiable {
     case title = "Title"
-    case artist = "Artist"
     case recentlyAdded = "Recently Added"
     case mostPlayed = "Most Played"
     var id: String { rawValue }
     var systemImage: String {
         switch self {
         case .title: "textformat"
-        case .artist: "music.mic"
         case .recentlyAdded: "clock"
         case .mostPlayed: "flame"
         }
     }
     /// Alphabetical sorts keep the A-Z fast-scroll index; the others use a plain list.
-    var isAlphabetical: Bool { self == .title || self == .artist }
+    /// Browsing by artist lives in the Artists screen, not here.
+    var isAlphabetical: Bool { self == .title }
 }
 
 struct AllSongsView: View {
@@ -354,13 +417,6 @@ struct AllSongsView: View {
         switch sort {
         case .title:
             return base.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-        case .artist:
-            return base.sorted {
-                let c = $0.artist.localizedStandardCompare($1.artist)
-                return c == .orderedSame
-                    ? $0.title.localizedStandardCompare($1.title) == .orderedAscending
-                    : c == .orderedAscending
-            }
         case .recentlyAdded:
             return base.sorted { ($0.modifiedAtEpoch ?? 0) > ($1.modifiedAtEpoch ?? 0) }
         case .mostPlayed:
@@ -372,7 +428,7 @@ struct AllSongsView: View {
         let list = songs
         Group {
             if sort.isAlphabetical {
-                let sections = LibraryIndex.sections(list) { sort == .artist ? $0.artist : $0.title }
+                let sections = LibraryIndex.sections(list) { $0.title }
                 AlphabetIndexedScroll(sections: sections) {
                     header(list)
                 } sectionContent: { section in
@@ -426,7 +482,11 @@ struct AllSongsView: View {
                             Button {
                                 genreFilter = (genreFilter == genre) ? nil : genre
                             } label: {
-                                Label(genre, systemImage: genreFilter == genre ? "checkmark" : "")
+                                if genreFilter == genre {
+                                    Label(genre, systemImage: "checkmark")
+                                } else {
+                                    Text(genre)
+                                }
                             }
                         }
                     }
@@ -709,5 +769,274 @@ struct AlbumGridCellStatic: View {
             Divider()
             Button("Go to Artist", systemImage: "music.mic") { libraryNavigate(.artist(album.artistID)) }
         }
+    }
+}
+
+// MARK: - Metadata editor (track + album)
+
+/// Modal metadata editor for a single track or a whole album. Presented from the
+/// player menu, context menus, and the "Fix Metadata" review queue via
+/// `model.metadataEditTarget`. Edits persist as non-destructive overrides that
+/// survive a tag rescan (see AppModel.editTrackMetadata / LibraryService).
+struct MetadataEditorView: View {
+    @Environment(AppModel.self) private var model
+    let target: MetadataEditTarget
+
+    var body: some View {
+        switch target {
+        case .track(let id):
+            if let track = model.track(id) {
+                TrackMetadataForm(track: track)
+            } else {
+                unavailable
+            }
+        case .album(let id):
+            if let album = model.albums.first(where: { $0.id == id }) {
+                AlbumMetadataForm(album: album, initialGenre: model.tracks(forAlbum: id).first?.genre ?? "Unknown")
+            } else {
+                unavailable
+            }
+        }
+    }
+
+    private var unavailable: some View {
+        NavigationStack {
+            ContentUnavailableView("Not Available", systemImage: "questionmark",
+                                   description: Text("This item is no longer in your library."))
+        }
+    }
+}
+
+private struct TrackMetadataForm: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let track: Track
+    @State private var title: String
+    @State private var artist: String
+    @State private var album: String
+    @State private var genre: String
+
+    init(track: Track) {
+        self.track = track
+        _title = State(initialValue: track.title)
+        _artist = State(initialValue: track.artist)
+        _album = State(initialValue: track.album)
+        _genre = State(initialValue: track.genre)
+    }
+
+    private var canSave: Bool {
+        !title.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    MetadataField(label: "Title", text: $title)
+                    MetadataField(label: "Artist", text: $artist)
+                    MetadataField(label: "Album", text: $album)
+                    MetadataField(label: "Genre", text: $genre)
+                } footer: {
+                    Text("Saved on this device only — your files on the server aren't changed. Your edits are kept when the library is rescanned.")
+                }
+
+                Section {
+                    Button(role: .destructive) {
+                        model.revertTrackMetadata(track.id)
+                        dismiss()
+                    } label: {
+                        Label("Revert to File Tags", systemImage: "arrow.uturn.backward")
+                    }
+                }
+            }
+            .navigationTitle("Edit Info")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        model.editTrackMetadata(
+                            track.id,
+                            title: title.trimmingCharacters(in: .whitespaces),
+                            artist: artist.trimmingCharacters(in: .whitespaces),
+                            album: album.trimmingCharacters(in: .whitespaces),
+                            genre: genre.trimmingCharacters(in: .whitespaces)
+                        )
+                        dismiss()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+    }
+}
+
+private struct AlbumMetadataForm: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let album: Album
+    @State private var albumTitle: String
+    @State private var artist: String
+    @State private var genre: String
+
+    init(album: Album, initialGenre: String) {
+        self.album = album
+        _albumTitle = State(initialValue: album.title)
+        _artist = State(initialValue: album.artist)
+        _genre = State(initialValue: initialGenre)
+    }
+
+    private var canSave: Bool {
+        !albumTitle.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    MetadataField(label: "Album", text: $albumTitle)
+                    MetadataField(label: "Artist", text: $artist)
+                    MetadataField(label: "Genre", text: $genre)
+                } footer: {
+                    Text("Applies to every track on this album. Saved on this device only — your files on the server aren't changed.")
+                }
+            }
+            .navigationTitle("Edit Album")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        model.editAlbumMetadata(
+                            album.id,
+                            album: albumTitle.trimmingCharacters(in: .whitespaces),
+                            artist: artist.trimmingCharacters(in: .whitespaces),
+                            genre: genre.trimmingCharacters(in: .whitespaces)
+                        )
+                        dismiss()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+    }
+}
+
+private struct MetadataField: View {
+    let label: String
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(DesignTokens.textSecondary)
+            TextField(label, text: $text)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+        }
+    }
+}
+
+/// Review queue: tracks whose metadata likely needs a fix. Tapping a row opens the
+/// track editor (presented at the app root via `model.metadataEditTarget`).
+struct FixMetadataView: View {
+    @Environment(AppModel.self) private var model
+    @State private var fixing = false
+    @State private var fixedCount: Int?
+
+    var body: some View {
+        let items = model.metadataNeedsAttention
+        List {
+            Section {
+                Button {
+                    guard !fixing else { return }
+                    fixing = true
+                    fixedCount = nil
+                    Task {
+                        let n = await model.autoFixMetadataFromFiles()
+                        fixing = false
+                        fixedCount = n
+                    }
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "wand.and.stars")
+                            .foregroundStyle(DesignTokens.brandPrimary)
+                            .frame(width: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Auto-fix from file names & folders")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(DesignTokens.textPrimary)
+                            Text(autoFixSubtitle(itemCount: items.count))
+                                .font(.caption)
+                                .foregroundStyle(DesignTokens.textSecondary)
+                        }
+                        Spacer(minLength: 8)
+                        if fixing { ProgressView().controlSize(.small) }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(fixing || (items.isEmpty && fixedCount == nil))
+            } footer: {
+                Text("Fills only broken fields (missing artist, album that fell back to the source name, blank title) from the folder layout. Changes stay on this device and stay reversible per track.")
+            }
+
+            if items.isEmpty {
+                Section {
+                    ContentUnavailableView("All Clean", systemImage: "checkmark.seal",
+                                           description: Text("No tracks look like they need a metadata fix."))
+                }
+            } else {
+                Section {
+                    ForEach(items) { track in
+                        Button {
+                            model.metadataEditTarget = .track(track.id)
+                        } label: {
+                            fixRow(track)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("\(items.count) need attention")
+                }
+            }
+        }
+        .navigationTitle("Fix Metadata")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func autoFixSubtitle(itemCount: Int) -> String {
+        if fixing { return "Scanning file names and folders…" }
+        if let fixedCount {
+            return fixedCount == 0 ? "Nothing could be inferred from the files" : "Fixed \(fixedCount) tracks"
+        }
+        return itemCount == 0 ? "Nothing flagged right now" : "Try to fix all \(itemCount) automatically"
+    }
+
+    private func fixRow(_ track: Track) -> some View {
+        HStack(spacing: 12) {
+            ArtworkView(url: track.artworkURL, artworkKey: track.albumID, cornerRadius: 6)
+                .frame(width: 44, height: 44)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(track.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(DesignTokens.textPrimary)
+                    .lineLimit(1)
+                Text("\(track.artist) · \(track.album)")
+                    .font(.caption)
+                    .foregroundStyle(DesignTokens.textSecondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "pencil")
+                .font(.footnote)
+                .foregroundStyle(DesignTokens.brandPrimary)
+        }
+        .contentShape(Rectangle())
     }
 }

@@ -1,7 +1,10 @@
+import CoreImage.CIFilterBuiltins
 import SwiftUI
+import UIKit
 
 struct SourcesView: View {
     @Environment(AppModel.self) private var model
+    @State private var shareConfig: SharedSourceConfig?
 
     var body: some View {
         ScrollView {
@@ -32,6 +35,9 @@ struct SourcesView: View {
                     Image(systemName: "plus")
                 }
             }
+        }
+        .sheet(item: $shareConfig) { config in
+            SourceShareView(shared: config)
         }
     }
 
@@ -74,6 +80,11 @@ struct SourcesView: View {
                     Button("Rescan", systemImage: "arrow.triangle.2.circlepath") {
                         Task { await model.rescan(source.id) }
                     }
+                    if let config = model.exportableSource(source.id) {
+                        Button("Share configuration", systemImage: "square.and.arrow.up") {
+                            shareConfig = config
+                        }
+                    }
                     Button("Remove source", systemImage: "trash", role: .destructive) {
                         model.removeSource(source.id)
                     }
@@ -92,5 +103,87 @@ struct SourcesView: View {
             Text(label).font(.caption2).foregroundStyle(DesignTokens.textTertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Share a source's connection config to another device via a QR code or a
+/// `.bettersource` file. The password is never included — the other device
+/// re-enters it on import (see SourceSetupView's "Import from file").
+struct SourceShareView: View {
+    @Environment(\.dismiss) private var dismiss
+    let shared: SharedSourceConfig
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 22) {
+                    Text("Scan this on another device, or share the file. Your password is never included — you'll re-enter it on the other device.")
+                        .font(.subheadline)
+                        .foregroundStyle(DesignTokens.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let qr = Self.qrImage(for: shared) {
+                        Image(uiImage: qr)
+                            .interpolation(.none)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 260)
+                            .padding(16)
+                            .background(.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .accessibilityLabel("QR code for \(shared.name)")
+                    }
+
+                    VStack(spacing: 4) {
+                        Text(shared.name).font(.headline).foregroundStyle(DesignTokens.textPrimary)
+                        Text("\(shared.proto) · \(shared.host)")
+                            .font(.caption).foregroundStyle(DesignTokens.textSecondary)
+                    }
+
+                    if let file = Self.exportFile(for: shared) {
+                        ShareLink(item: file) {
+                            Label("Share File", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(PrimaryActionButtonStyle())
+                    }
+                }
+                .padding(DesignTokens.phonePadding)
+            }
+            .appScreenBackground()
+            .navigationTitle("Share Source")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    static func qrImage(for shared: SharedSourceConfig) -> UIImage? {
+        guard let data = try? JSONEncoder().encode(shared) else { return nil }
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = data
+        filter.correctionLevel = "M"
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+
+    /// Write the config to a temp `.bettersource` JSON file for ShareLink.
+    static func exportFile(for shared: SharedSourceConfig) -> URL? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(shared) else { return nil }
+        let safeName = shared.name.isEmpty ? "source" : shared.name.replacingOccurrences(of: "/", with: "-")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(safeName).bettersource")
+        do {
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            return nil
+        }
     }
 }

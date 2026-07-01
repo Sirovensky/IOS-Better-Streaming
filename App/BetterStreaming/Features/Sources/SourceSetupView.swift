@@ -25,6 +25,8 @@ struct SourceSetupView: View {
     @State private var localFolderURL: URL?
     @State private var localName = ""
     @State private var showLocalImporter = false
+    @State private var showConfigImporter = false
+    @State private var importError: String?
 
     private enum TestState: Equatable {
         case idle, success, failure(String)
@@ -39,6 +41,13 @@ struct SourceSetupView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                Button { showConfigImporter = true } label: {
+                    Label("Import from a shared file", systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SecondaryActionButtonStyle())
+                if let importError {
+                    Text(importError).font(.caption).foregroundStyle(DesignTokens.error)
+                }
                 protocolPicker
                 if proto == .local {
                     localForm
@@ -64,6 +73,12 @@ struct SourceSetupView: View {
                 localFolderURL = url
                 if localName.isEmpty { localName = url.lastPathComponent }
             }
+        }
+        .fileImporter(
+            isPresented: $showConfigImporter,
+            allowedContentTypes: [UTType(filenameExtension: "bettersource") ?? .json, .json]
+        ) { result in
+            if case .success(let url) = result { importConfig(from: url) }
         }
         .sheet(isPresented: $showFolderPicker) {
             RemoteFolderPicker(
@@ -237,6 +252,29 @@ struct SourceSetupView: View {
             rootPath: rootPath
         )
         dismiss()
+    }
+
+    /// Decode a `.bettersource` file and prefill the form (password left blank —
+    /// it's never shared). The user reviews, enters the password, and adds.
+    private func importConfig(from url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url),
+              let shared = try? JSONDecoder().decode(SharedSourceConfig.self, from: data),
+              let importedProto = SourceProtocol(rawValue: shared.proto) else {
+            importError = "Couldn't read that file. It may not be a valid source export."
+            return
+        }
+        importError = nil
+        proto = importedProto
+        host = shared.host
+        port = String(shared.port)
+        path = shared.share
+        username = shared.username ?? ""
+        domain = shared.domain ?? ""
+        rootPath = shared.rootPath
+        password = ""
+        testState = .idle
     }
 
     private func testConnection() {

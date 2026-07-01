@@ -24,6 +24,7 @@
 		468504DA1212B2B35A621E1C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BCC2D943C5605432057942E /* HomeView.swift */; };
 		4A1CB58C63D7D548EDD339CB /* RootTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 584731D16BCF26BA499F4B56 /* RootTabView.swift */; };
 		529B9FC70BED296238A35C63 /* MiniPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A8917473AFA9BF5C2915EC1 /* MiniPlayerView.swift */; };
+		AABBCCDD0000000000000002 /* LiquidGlass.metal in Sources */ = {isa = PBXBuildFile; fileRef = AABBCCDD0000000000000001 /* LiquidGlass.metal */; };
 		5C71D3CAAA5CD1F93B68BAF6 /* BetterStreamingCore in Frameworks */ = {isa = PBXBuildFile; productRef = 4743CF64E2A785D31AEF908D /* BetterStreamingCore */; };
 		5CB5CB64A15E2539735641D0 /* SourceSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C015E25AF1FC6DB33905132F /* SourceSetupView.swift */; };
 		5FB88568190E9418CD7AFCB3 /* MediaCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67EC9B69AFFE0B8D3BE8D13D /* MediaCells.swift */; };
@@ -50,6 +51,7 @@
 		5C7A56D464C46BD86F239E4F /* RemoteStreamingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStreamingService.swift; sourceTree = "<group>"; };
 		67EC9B69AFFE0B8D3BE8D13D /* MediaCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCells.swift; sourceTree = "<group>"; };
 		6A8917473AFA9BF5C2915EC1 /* MiniPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerView.swift; sourceTree = "<group>"; };
+		AABBCCDD0000000000000001 /* LiquidGlass.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = LiquidGlass.metal; sourceTree = "<group>"; };
 		7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackEngine.swift; sourceTree = "<group>"; };
 		C32FCBB5C450AFE0D0F7EC8D /* AudioEnhancements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEnhancements.swift; sourceTree = "<group>"; };
 		199EA4FC8D5BBC1CD249D9B4 /* AudioEQTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEQTap.swift; sourceTree = "<group>"; };
@@ -232,6 +234,7 @@
 			isa = PBXGroup;
 			children = (
 				6A8917473AFA9BF5C2915EC1 /* MiniPlayerView.swift */,
+				AABBCCDD0000000000000001 /* LiquidGlass.metal */,
 			);
 			path = Player;
 			sourceTree = "<group>";
@@ -326,6 +329,7 @@
 				5FB88568190E9418CD7AFCB3 /* MediaCells.swift in Sources */,
 				2020D1F1D03AAD056E2AD787 /* MediaModels.swift in Sources */,
 				529B9FC70BED296238A35C63 /* MiniPlayerView.swift in Sources */,
+				AABBCCDD0000000000000002 /* LiquidGlass.metal in Sources */,
 				B5EF5E4C1F9FD30C4AFC38FE /* OfflineLibraryView.swift in Sources */,
 				64A40EC9D5D6E532D7798D5E /* OnboardingView.swift in Sources */,
 				0C2915DAA2525F4DC783977C /* PlaybackEngine.swift in Sources */,

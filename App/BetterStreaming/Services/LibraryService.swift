@@ -42,6 +42,16 @@ struct SourceConfig: Codable, Sendable, Identifiable {
     var bookmark: String? = nil   // base64 security-scoped bookmark for local sources
 }
 
+/// One inferred metadata override in a bulk auto-fix. Only the non-nil fields are
+/// applied, so a broken artist can be filled without touching a good title.
+/// Sendable so it can be computed off the main actor and handed to the library.
+struct MetadataAutoFix: Sendable {
+    let id: String
+    var title: String?
+    var artist: String?
+    var album: String?
+}
+
 /// Bridges the Core package (SMB/WebDAV file access, recursive scan) to the
 /// app's presentation models. Owns source configs, the on-disk media cache, and
 /// cache-first playback resolution. Keeps all Core imports in this one file so
@@ -82,6 +92,10 @@ actor LibraryService {
     /// tear down the background client — that would interrupt the walk (forcing a
     /// reconnect mid-scan and risking skipped folders).
     private var scanInProgress = false
+    /// Background-client reads (downloads, artwork, lyrics) currently in flight.
+    /// While >0, app-background must NOT tear down the background client — doing so
+    /// mid-download makes the download throw, deletes the `.part`, and returns nil.
+    private var inFlightBackgroundOps = 0
     /// In-memory passwords for this session, set on add. Lets the first
     /// add→scan succeed even if the Keychain read lags/fails; Keychain remains
     /// the durable store for relaunches.
@@ -104,7 +118,11 @@ actor LibraryService {
     /// `loadArtwork` calls for a just-started track (and the backfill) don't each
     /// re-list the folder and re-read embedded art for the same album.
     private var albumArtworkURLCache: [String: URL] = [:]
-    private var albumArtworkTasks: [String: Task<URL?, Never>] = [:]
+    private var albumArtworkTasks: [String: Task<(url: URL?, conclusive: Bool), Never>] = [:]
+    /// Albums a remote lookup conclusively found NO cover for this session (folder
+    /// listed + probe completed, nothing found). Short-circuits the rate-limited
+    /// re-list/re-probe/online lookup on every replay. Cleared on rescan.
+    private var albumsWithNoRemoteArtwork: Set<String> = []
 
     init() {
         let fm = FileManager.default
@@ -112,10 +130,22 @@ actor LibraryService {
             ?? fm.temporaryDirectory
         let caches = (try? fm.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
             ?? fm.temporaryDirectory
-        cacheDir = caches.appendingPathComponent("Media", isDirectory: true)
+        // Downloads and album covers must PERSIST across app updates, so they live
+        // in Application Support, not Caches — iOS purges Caches under pressure and
+        // a reinstall wipes it, which was silently losing every downloaded song and
+        // cover on each update. One-time move from the old Caches location so a
+        // user's existing downloads/covers survive this transition too. Excluded
+        // from iCloud/iTunes backup since both are re-fetchable from the source.
+        cacheDir = support.appendingPathComponent("Media", isDirectory: true)
+        artworkDir = support.appendingPathComponent("Artwork", isDirectory: true)
+        Self.migrateDir(from: caches.appendingPathComponent("Media", isDirectory: true), to: cacheDir, fm: fm)
+        Self.migrateDir(from: caches.appendingPathComponent("Artwork", isDirectory: true), to: artworkDir, fm: fm)
         try? fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        artworkDir = caches.appendingPathComponent("Artwork", isDirectory: true)
         try? fm.createDirectory(at: artworkDir, withIntermediateDirectories: true)
+        Self.excludeFromBackup(cacheDir)
+        Self.excludeFromBackup(artworkDir)
+        // Per-session streaming scratch genuinely belongs in Caches (reclaimed each
+        // launch below).
         streamCacheDir = caches.appendingPathComponent("StreamingRanges", isDirectory: true)
         try? fm.createDirectory(at: streamCacheDir, withIntermediateDirectories: true)
         configsURL = support.appendingPathComponent("sources.json")
@@ -127,6 +157,23 @@ actor LibraryService {
         if let stale = try? fm.contentsOfDirectory(at: streamCacheDir, includingPropertiesForKeys: nil) {
             for url in stale { try? fm.removeItem(at: url) }
         }
+    }
+
+    /// One-time relocation of a whole cache directory from its old location to the
+    /// new one — only when the new location doesn't exist yet (so it runs once and
+    /// never clobbers already-migrated data).
+    private static func migrateDir(from old: URL, to new: URL, fm: FileManager) {
+        guard fm.fileExists(atPath: old.path), !fm.fileExists(atPath: new.path) else { return }
+        try? fm.moveItem(at: old, to: new)
+    }
+
+    /// Keep a re-fetchable cache dir out of iCloud/iTunes backups (it persists
+    /// locally, it just shouldn't bloat the user's backup).
+    private static func excludeFromBackup(_ url: URL) {
+        var url = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
     }
 
     // MARK: Load
@@ -280,6 +327,7 @@ actor LibraryService {
         )
         attemptedArtworkAlbumIDs.removeAll()   // re-attempt covers after a scan
         albumArtworkURLCache.removeAll()       // files may have changed; re-resolve
+        albumsWithNoRemoteArtwork.removeAll()  // a cover may have been added
 
         let classifier = MediaFileClassifier()
         var scanned: [Track] = []
@@ -685,6 +733,8 @@ actor LibraryService {
         if offline { return nil }
         guard let cfg = configs.first(where: { $0.id == track.sourceID }),
               let client = backgroundClient(for: cfg) else { return nil }
+        inFlightBackgroundOps += 1
+        defer { inFlightBackgroundOps -= 1 }
 
         let identity = remoteIdentity(for: track, cfg: cfg)
         let local = cacheFileURL(for: track)
@@ -826,6 +876,8 @@ actor LibraryService {
               cfg.proto != SourceProtocol.local.rawValue,
               let client = backgroundClient(for: cfg),
               let remote = track.remotePath, !remote.isEmpty else { return nil }
+        inFlightBackgroundOps += 1
+        defer { inFlightBackgroundOps -= 1 }
         let lrcPath = RemotePath(displayPath: (remote as NSString).deletingPathExtension + ".lrc")
         guard let meta = try? await client.stat(lrcPath), meta.kind == .file,
               let size = meta.size, size > 0, size < 1_000_000,
@@ -843,6 +895,20 @@ actor LibraryService {
         return FileManager.default.fileExists(atPath: dest.path) ? dest : nil
     }
 
+    /// Online artist photo, cached to the (persisted) artwork dir keyed by artist
+    /// id. Returns the cached file immediately when present (works offline); else
+    /// tries the user's enabled sources and caches the first hit. nil when no
+    /// source is on or none has a photo.
+    func artistImageURL(forArtist id: String, name: String, sources: [ArtistImageSource]) async -> URL? {
+        let dest = artworkDir.appendingPathComponent(Self.stableHash("artist::\(id)") + ".jpg")
+        if FileManager.default.fileExists(atPath: dest.path) { return dest }
+        guard !sources.isEmpty,
+              let data = await ArtistImageClient.shared.imageData(forArtist: name, sources: sources),
+              !data.isEmpty else { return nil }
+        try? data.write(to: dest, options: .atomic)
+        return FileManager.default.fileExists(atPath: dest.path) ? dest : nil
+    }
+
     /// Album artwork for a track fetched straight from the remote source —
     /// folder cover (cover.jpg/folder.jpg/…) first, then embedded art via a
     /// ranged read — so a cover can be obtained WITHOUT the whole track being
@@ -851,6 +917,9 @@ actor LibraryService {
     /// that an older scan never extracted (no full rescan needed).
     func remoteAlbumArtwork(for track: Track) async -> URL? {
         let albumID = track.albumID
+        // A prior conclusive "no cover" means don't re-list / re-probe / re-hit the
+        // rate-limited online lookup for this album again this session.
+        if albumsWithNoRemoteArtwork.contains(albumID) { return nil }
         // Reuse a cover already resolved this session for the album.
         if let url = albumArtworkURLCache[albumID] {
             if FileManager.default.fileExists(atPath: url.path) { return url }
@@ -859,37 +928,52 @@ actor LibraryService {
         // Coalesce duplicate concurrent requests for the same album (the
         // just-started track triggers both `onTrackStarted` and `loadArtwork`,
         // and the backfill may target the same album) onto one remote fetch.
-        if let task = albumArtworkTasks[albumID] { return await task.value }
+        if let task = albumArtworkTasks[albumID] { return await task.value.url }
         let task = Task { await self.computeRemoteAlbumArtwork(for: track) }
         albumArtworkTasks[albumID] = task
-        let url = await task.value
+        let outcome = await task.value
         albumArtworkTasks[albumID] = nil
-        if let url { albumArtworkURLCache[albumID] = url }
-        return url
+        if let url = outcome.url {
+            albumArtworkURLCache[albumID] = url
+        } else if outcome.conclusive {
+            albumsWithNoRemoteArtwork.insert(albumID)
+        }
+        return outcome.url
     }
 
     static let onlineArtworkKey = "onlineArtwork.enabled.v1"
 
-    private func computeRemoteAlbumArtwork(for track: Track) async -> URL? {
+    /// Resolves an album cover and reports whether the (negative) result is
+    /// CONCLUSIVE — i.e. an op didn't time out / disconnect along the way. A
+    /// transient failure returns `conclusive: false` so the album stays retryable
+    /// rather than being marked cover-less for the session.
+    private func computeRemoteAlbumArtwork(for track: Track) async -> (url: URL?, conclusive: Bool) {
         loadConfigsFromDiskIfNeeded()
-        if let local = await cacheAlbumArtwork(for: track) { return local }
+        if let local = await cacheAlbumArtwork(for: track) { return (local, true) }
 
+        var transientFailure = false
         // Remote source: folder cover, then embedded art via a ranged read — a
         // cover WITHOUT downloading the whole track.
         if let cfg = configs.first(where: { $0.id == track.sourceID }),
            cfg.proto != SourceProtocol.local.rawValue,
            let client = backgroundClient(for: cfg),
            let remote = track.remotePath, !remote.isEmpty {
+            inFlightBackgroundOps += 1
+            defer { inFlightBackgroundOps -= 1 }
             let path = RemotePath(displayPath: remote)
             let ext = (remote as NSString).pathExtension
 
             let parentComponents = path.remotePathComponents.dropLast()
             if !parentComponents.isEmpty {
                 let parent = RemotePath(displayPath: "/" + parentComponents.joined(separator: "/"))
-                if let entries = try? await client.list(parent),
-                   let cover = entries.first(where: Self.isFolderCover),
-                   let url = await cacheRemoteArtwork(from: cover, client: client) {
-                    return url
+                do {
+                    let entries = try await client.list(parent)
+                    if let cover = entries.first(where: Self.isFolderCover),
+                       let url = await cacheRemoteArtwork(from: cover, client: client) {
+                        return (url, true)
+                    }
+                } catch {
+                    transientFailure = true   // couldn't list — not a real "no cover"
                 }
             }
 
@@ -897,13 +981,17 @@ actor LibraryService {
             if size == nil { size = (try? await client.stat(path))?.size }
             if let size, size > 0 {
                 let probeLen = min(size, Int64(EmbeddedMetadataReader.defaultProbeLength))
-                let probe = try? await client.read(path, range: 0..<probeLen)
                 let entry = RemoteEntry(
                     name: (remote as NSString).lastPathComponent,
                     path: path, kind: .file, size: size, modifiedAt: nil
                 )
-                if let art = await remoteArtwork(entry: entry, client: client, probe: probe, ext: ext) {
-                    return cacheEmbeddedArtwork(art, key: "\(cfg.id)::\(track.albumID)")
+                do {
+                    let probe = try await client.read(path, range: 0..<probeLen)
+                    if let art = await remoteArtwork(entry: entry, client: client, probe: probe, ext: ext) {
+                        return (cacheEmbeddedArtwork(art, key: "\(cfg.id)::\(track.albumID)"), true)
+                    }
+                } catch {
+                    transientFailure = true   // probe read failed — retry later
                 }
             }
         }
@@ -916,16 +1004,26 @@ actor LibraryService {
             if (try? data.write(to: dest, options: .atomic)) != nil,
                FileManager.default.fileExists(atPath: dest.path) {
                 applyPlaybackFileProtection(dest)
-                return dest
+                return (dest, true)
             }
         }
-        return nil
+        return (nil, !transientFailure)
     }
 
     /// Fetch covers for albums that have no on-disk artwork file yet, from the
     /// remote source. Returns albumID → artwork URL for albums that gained art.
     /// Bounded per call so a large library backfills across a few passes without
     /// hammering the server. Also persists the URLs so they survive relaunch.
+    /// Forget which albums were already attempted (and the session URL cache) so a
+    /// user-triggered rescan genuinely retries them — otherwise the per-session
+    /// "don't re-hit the server for cover-less albums" guard makes a manual
+    /// "Fetch missing covers" a no-op after the first automatic pass.
+    func resetArtworkAttempts() {
+        attemptedArtworkAlbumIDs.removeAll()
+        albumArtworkURLCache.removeAll()
+        albumsWithNoRemoteArtwork.removeAll()
+    }
+
     func backfillAlbumArtwork(for tracks: [Track], limit: Int = 40) async -> [String: URL] {
         var hasArt: Set<String> = []
         var representative: [String: Track] = [:]
@@ -948,9 +1046,15 @@ actor LibraryService {
         var result: [String: URL] = [:]
         for (albumID, track) in targets {
             if Task.isCancelled { break }
-            attemptedArtworkAlbumIDs.insert(albumID)
+            // Mark attempted ONLY on a conclusive outcome — a found cover, or a
+            // confirmed "no cover" (recorded in `albumsWithNoRemoteArtwork` by the
+            // lookup). A transient failure (timeout/disconnect) leaves it unmarked
+            // so it's retried, instead of permanently skipping a real-cover album.
             if let url = await remoteAlbumArtwork(for: track) {
+                attemptedArtworkAlbumIDs.insert(albumID)
                 result[albumID] = url
+            } else if albumsWithNoRemoteArtwork.contains(albumID) {
+                attemptedArtworkAlbumIDs.insert(albumID)
             }
         }
         await applyAlbumArtwork(result)
@@ -964,7 +1068,9 @@ actor LibraryService {
               let i = allTracks.firstIndex(where: { $0.id == id }),
               abs(allTracks[i].durationSeconds - seconds) > 0.5 else { return }
         allTracks[i].durationSeconds = seconds
-        _ = try? await mediaStore.upsertMediaItems([mediaItem(from: allTracks[i])])
+        // Column-scoped: a full-row upsert here would rewrite the base text columns
+        // from the (maybe user-edited) in-memory track, breaking "revert to file tags".
+        try? await mediaStore.setDuration(seconds, identityKey: id)
     }
 
     /// Persist a favorite toggle so it survives relaunch (a tag-only rescan would
@@ -973,7 +1079,86 @@ actor LibraryService {
         guard let i = allTracks.firstIndex(where: { $0.id == id }),
               allTracks[i].isFavorite != isFavorite else { return }
         allTracks[i].isFavorite = isFavorite
-        _ = try? await mediaStore.upsertMediaItems([mediaItem(from: allTracks[i])])
+        try? await mediaStore.setFavorite(isFavorite, identityKey: id)
+    }
+
+    /// Persist a user metadata edit as a non-destructive override. It survives a
+    /// tag rescan (which rewrites the base row from file tags) because the store
+    /// overlays overrides at read time. Mutates the in-memory track so the UI
+    /// updates immediately, and merges with any existing override so editing one
+    /// field later doesn't drop an earlier field's fix. nil = leave that field.
+    func setMetadataOverride(forTrack id: String, title: String?, artist: String?, album: String?, genre: String?) async {
+        guard let i = allTracks.firstIndex(where: { $0.id == id }) else { return }
+        if let title { allTracks[i].title = title }
+        if let artist {
+            allTracks[i].artist = artist
+            allTracks[i].artistID = MetadataGrouping.artistID(artist)
+        }
+        if let album {
+            allTracks[i].album = album
+            allTracks[i].albumID = MetadataGrouping.albumID(path: allTracks[i].remotePath ?? allTracks[i].folderPath, album: album)
+        }
+        if let genre { allTracks[i].genre = genre }
+
+        var merged = (try? await mediaStore.metadataOverride(identityKey: id)) ?? MetadataOverride(identityKey: id)
+        if let title { merged.title = title }
+        if let artist { merged.artist = artist }
+        if let album { merged.album = album }
+        if let genre { merged.genre = genre }
+        merged.updatedAt = Date()
+        if merged.isEmpty {
+            try? await mediaStore.deleteMetadataOverride(identityKey: id)
+        } else {
+            _ = try? await mediaStore.upsertMetadataOverride(merged)
+        }
+    }
+
+    /// Apply a batch of inferred overrides in a single pass. Builds the id→index
+    /// map ONCE (O(N+edits), not O(N×edits) like calling `setMetadataOverride` in a
+    /// loop), and each edit merges with any existing override exactly as the
+    /// single-track path does. Only the non-nil fields of each fix are written.
+    func applyMetadataOverrides(_ fixes: [MetadataAutoFix]) async {
+        guard !fixes.isEmpty else { return }
+        var indexByID: [String: Int] = [:]
+        indexByID.reserveCapacity(allTracks.count)
+        for (i, t) in allTracks.enumerated() { indexByID[t.id] = i }
+
+        for fix in fixes {
+            if let i = indexByID[fix.id] {
+                if let title = fix.title { allTracks[i].title = title }
+                if let artist = fix.artist {
+                    allTracks[i].artist = artist
+                    allTracks[i].artistID = MetadataGrouping.artistID(artist)
+                }
+                if let album = fix.album {
+                    allTracks[i].album = album
+                    allTracks[i].albumID = MetadataGrouping.albumID(path: allTracks[i].remotePath ?? allTracks[i].folderPath, album: album)
+                }
+            }
+            var merged = (try? await mediaStore.metadataOverride(identityKey: fix.id)) ?? MetadataOverride(identityKey: fix.id)
+            if let title = fix.title { merged.title = title }
+            if let artist = fix.artist { merged.artist = artist }
+            if let album = fix.album { merged.album = album }
+            merged.updatedAt = Date()
+            if !merged.isEmpty { _ = try? await mediaStore.upsertMetadataOverride(merged) }
+        }
+    }
+
+    /// Remove a track's override and restore the file-scanned values. Returns the
+    /// restored fields so the caller can refresh its own in-memory copy (runtime
+    /// state like cache/artwork is left untouched), or nil if the row is gone.
+    func clearMetadataOverride(forTrack id: String) async -> (title: String, artist: String, album: String, genre: String)? {
+        try? await mediaStore.deleteMetadataOverride(identityKey: id)
+        guard let i = allTracks.firstIndex(where: { $0.id == id }),
+              let item = try? await mediaStore.mediaItem(identityKey: id) else { return nil }
+        let fresh = track(fromMediaItem: item)
+        allTracks[i].title = fresh.title
+        allTracks[i].artist = fresh.artist
+        allTracks[i].artistID = fresh.artistID
+        allTracks[i].album = fresh.album
+        allTracks[i].albumID = fresh.albumID
+        allTracks[i].genre = fresh.genre
+        return (fresh.title, fresh.artist, fresh.album, fresh.genre)
     }
 
     /// Apply backfilled covers to the in-memory library and persist the artwork
@@ -988,7 +1173,11 @@ actor LibraryService {
             }
         }
         guard !changed.isEmpty else { return }
-        _ = try? await mediaStore.upsertMediaItems(changed.map(mediaItem(from:)))
+        // Column-scoped artwork writes — never rewrite the text columns the overrides
+        // overlay on (a full-row upsert here was poisoning "revert to file tags").
+        for track in changed {
+            try? await mediaStore.setArtworkURL(track.artworkURL?.absoluteString, identityKey: track.id)
+        }
     }
 
     private func cacheRemoteArtwork(from entry: RemoteEntry, client: any RemoteFileSystemClient) async -> URL? {
@@ -1143,8 +1332,9 @@ actor LibraryService {
     /// scan/artwork/download sessions are returned to the server. Stream clients
     /// are kept: audio keeps playing in the background. They reconnect lazily.
     func handleEnteredBackground() async {
-        // Don't cut a scan's connection out from under it.
-        guard !scanInProgress else { return }
+        // Don't cut a scan's — or an in-flight download/artwork/lyrics read's —
+        // connection out from under it.
+        guard !scanInProgress, inFlightBackgroundOps == 0 else { return }
         let clients = Array(backgroundClients.values)
         backgroundClients.removeAll()
         for client in clients { await client.disconnect() }
@@ -1376,9 +1566,13 @@ actor LibraryService {
         return FileManager.default.fileExists(atPath: local.path) ? local : nil
     }
 
+    /// A fresh, per-session partial-scratch path. Keyed on a unique UUID (NOT
+    /// `track.id`) so replaying / re-resolving the same track gets a distinct file:
+    /// otherwise two `RemoteStreamSession`s share one path and the older one's
+    /// teardown deletes the file out from under the live newer session.
     private func streamCacheFileURL(for track: Track) -> URL {
         let ext = track.fileExtension.isEmpty ? "dat" : track.fileExtension
-        return streamCacheDir.appendingPathComponent("\(Self.stableHash(track.id)).\(ext)")
+        return streamCacheDir.appendingPathComponent("\(UUID().uuidString).\(ext)")
     }
 
     private func refreshCacheStates() {
@@ -1501,12 +1695,24 @@ actor LibraryService {
             sourceID: sourceID,
             sourceName: sourceName,
             folderPath: path,
-            artworkURL: item.artworkURL,
+            artworkURL: resolvedArtworkURL(item.artworkURL),
             shareID: item.identity.shareID.rawValue.uuidString,
             remotePath: path,
             sizeBytes: item.identity.size,
             modifiedAtEpoch: item.identity.modifiedAt?.timeIntervalSince1970
         )
+    }
+
+    /// Rebase a persisted artwork file URL onto the CURRENT artwork dir. The DB stores
+    /// absolute file URLs, but the app's data-container UUID changes on a delete+reinstall,
+    /// so an old absolute path is dead even though the `<hash>.jpg` still lives in artworkDir.
+    /// Match by filename against the current dir; drop it if the file is genuinely gone so
+    /// the backfill re-fetches. Non-file (remote) URLs pass through untouched.
+    private func resolvedArtworkURL(_ url: URL?) -> URL? {
+        guard let url else { return nil }
+        guard url.isFileURL else { return url }
+        let candidate = artworkDir.appendingPathComponent(url.lastPathComponent)
+        return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
     }
 
     private func applyPlaybackFileProtection(_ url: URL) {
@@ -1535,7 +1741,7 @@ actor LibraryService {
         return (artist, title)
     }
 
-    static func parseTrack(_ rawTitle: String) -> (number: Int?, title: String) {
+    nonisolated static func parseTrack(_ rawTitle: String) -> (number: Int?, title: String) {
         let trimmed = rawTitle.trimmingCharacters(in: .whitespaces)
         let digits = trimmed.prefix(while: { $0.isNumber })
         guard !digits.isEmpty, digits.count <= 3, let number = Int(digits) else { return (nil, trimmed) }

@@ -6,6 +6,37 @@ import UIKit
 /// auto-cache controller, and global offline mode. Library data comes only from
 /// the user's own sources via `LibraryService` (SMB/WebDAV scan → cache-first
 /// playback). No demo/sample content.
+/// What the metadata editor sheet is currently editing. Stores ids (not value
+/// copies) so the sheet always reads the live track/album.
+enum MetadataEditTarget: Identifiable, Hashable {
+    case track(String)
+    case album(String)
+    var id: String {
+        switch self {
+        case .track(let id): "track:" + id
+        case .album(let id): "album:" + id
+        }
+    }
+}
+
+/// A shareable source definition: everything needed to re-add a remote source on
+/// another device EXCEPT the password, which is never exported and is re-entered on
+/// import. Serialised to a `.bettersource` JSON file / QR code (#7).
+struct SharedSourceConfig: Codable, Hashable, Identifiable {
+    var kind = "bettersource"
+    var version = 1
+    var name: String
+    var proto: String
+    var host: String
+    var port: Int
+    var share: String
+    var username: String?
+    var domain: String?
+    var rootPath: String
+
+    var id: String { "\(proto)://\(host):\(port)/\(share)?\(rootPath)" }
+}
+
 @Observable
 @MainActor
 final class AppModel {
@@ -17,6 +48,8 @@ final class AppModel {
     private(set) var tracks: [Track] = []
     private(set) var playlists: [Playlist] = []
     private(set) var recentlyPlayedIDs: [String] = []
+    /// Recent search queries (most-recent first), shown on the empty Search screen.
+    private(set) var recentSearches: [String] = []
     private(set) var isBootstrapping = true
     private(set) var isLoadingSavedLibrary = false
     private(set) var isScanning = false
@@ -30,6 +63,8 @@ final class AppModel {
 
     private(set) var hasCompletedOnboarding: Bool
     var isNowPlayingPresented = false
+    /// When non-nil, the metadata editor sheet is presented for this track/album.
+    var metadataEditTarget: MetadataEditTarget?
 
     private var trackIndex: [String: Int] = [:]
     /// Artist index, built once per library change in `rebuildIndex` — so artist
@@ -38,6 +73,23 @@ final class AppModel {
     private var artistTrackIDs: [String: [String]] = [:]
     private var artistDisplayNames: [String: String] = [:]
     private var artistList: [Artist] = []
+    /// Bumped on any change that affects derived collections (library scan, play
+    /// counts, favorites, artwork/duration). `albums` and `libraryStats` cache their
+    /// result keyed on this, so they recompute at most once per change instead of on
+    /// every SwiftUI render — the per-render O(N) regroup/stats hitched large libraries.
+    private(set) var libraryRevision = 0
+    @ObservationIgnored private var _albumsCacheRev = -1
+    @ObservationIgnored private var _albumsCache: [Album] = []
+    @ObservationIgnored private var _needsAttentionCacheRev = -1
+    @ObservationIgnored private var _needsAttentionCache: [Track] = []
+    @ObservationIgnored private var _statsCacheRev = -1
+    @ObservationIgnored private var _statsCache = LibraryStats(
+        songs: 0, albums: 0, artists: 0, totalDurationSeconds: 0,
+        totalPlays: 0, listenedSeconds: 0, favorites: 0)
+    /// Lowercased "title artist album genre folder" per track id, rebuilt in
+    /// `rebuildIndex`, so search is one substring scan per track instead of five
+    /// locale-aware `contains` calls per track per keystroke.
+    @ObservationIgnored private var searchHaystack: [String: String] = [:]
     /// Last track id counted as a play, so a stall-recovery re-resolve of the
     /// SAME track (which re-fires onTrackStarted) doesn't double-count it.
     private var lastNotedPlayID: String?
@@ -46,6 +98,16 @@ final class AppModel {
     private var sourceMessages: [String: String] = [:]
     private var startupMaintenanceTask: Task<Void, Never>?
     private var artworkBackfillTask: Task<Void, Never>?
+    @ObservationIgnored private var artworkGen = 0
+    /// True while the artwork backfill is actively fetching covers — drives the
+    /// status line + spinner in Settings. Written only here, observed by the UI.
+    private(set) var isFetchingArtwork = false
+    /// Resolved online artist photos by artist id (observed → artist header updates
+    /// as they arrive). Backed by files in the persisted artwork dir.
+    private(set) var artistImageURLs: [String: URL] = [:]
+    /// Artist ids whose online-photo lookup already came up empty this session, so
+    /// reopening their page doesn't re-hit the network every time.
+    @ObservationIgnored private var attemptedArtistImageIDs: Set<String> = []
     /// Warms the next queued track so advancing/skip is instant. Cancelled and
     /// replaced whenever the current track changes.
     private var prefetchTask: Task<Void, Never>?
@@ -53,6 +115,25 @@ final class AppModel {
     var hasSources: Bool { !sources.isEmpty }
     var hasLibrary: Bool { !tracks.isEmpty }
     var needsOnboarding: Bool { !isBootstrapping && !hasCompletedOnboarding && sources.isEmpty }
+
+#if DEBUG
+    /// Bypasses onboarding and seeds a mock now-playing track for Simulator-only
+    /// visual iteration on the player (no SMB needed). Triggered by `-uiPreview`.
+    func debugPreviewNowPlaying(restorable: Bool = false) {
+        hasCompletedOnboarding = true
+        let mock = Track(
+            id: "preview.track",
+            title: "I Tame the Storm",
+            artist: "Avantasia",
+            album: "The Scarecrow",
+            durationSeconds: 233,
+            sourceID: "preview",
+            sourceName: "Preview",
+            folderPath: "Avantasia/The Scarecrow/I Tame the Storm.flac"
+        )
+        engine.debugSeedNowPlaying(mock, elapsed: 84, restorable: restorable)
+    }
+#endif
 
     /// Weak shared reference so a CarPlay scene (a separate UIKit scene with no
     /// SwiftUI environment) can reach the live model. Set on creation.
@@ -62,6 +143,7 @@ final class AppModel {
         offlineMode = UserDefaults.standard.bool(forKey: "offlineMode.v1")
         hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "onboarded.v1")
         recentlyPlayedIDs = UserDefaults.standard.stringArray(forKey: Self.recentlyPlayedKey) ?? []
+        recentSearches = UserDefaults.standard.stringArray(forKey: Self.recentSearchesKey) ?? []
         loadPlaylists()
         AppModel.shared = self
         wireEngine()
@@ -72,6 +154,23 @@ final class AppModel {
     // MARK: Persisted playback state
 
     private static let recentlyPlayedKey = "recentlyPlayed.v1"
+    private static let recentSearchesKey = "recentSearches.v1"
+
+    /// Remember a search query (most-recent first, deduped, capped). Backs the
+    /// Recent list on the empty Search screen.
+    func recordSearch(_ raw: String) {
+        let q = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard q.count >= 2 else { return }
+        var list = recentSearches.filter { $0.caseInsensitiveCompare(q) != .orderedSame }
+        list.insert(q, at: 0)
+        recentSearches = Array(list.prefix(12))
+        UserDefaults.standard.set(recentSearches, forKey: Self.recentSearchesKey)
+    }
+
+    func clearRecentSearches() {
+        recentSearches = []
+        UserDefaults.standard.removeObject(forKey: Self.recentSearchesKey)
+    }
     private static let playbackSnapshotKey = "playback.snapshot.v1"
     /// Last on-disk save of the playback position, for throttling the 0.5s tick.
     private var lastSnapshotSave = Date.distantPast
@@ -258,11 +357,21 @@ final class AppModel {
     /// the remote source (folder cover or embedded ranged read). Runs in bounded
     /// passes so a large library fills in without one giant burst, and updates
     /// the UI as covers arrive. Skipped while offline (no source to read from).
-    private func backfillArtwork() {
+    private func backfillArtwork(forceRetry: Bool = false) {
         artworkBackfillTask?.cancel()
         guard !offlineMode, !sourceConfigs.isEmpty else { return }
+        artworkGen &+= 1
+        let gen = artworkGen
+        isFetchingArtwork = true
         artworkBackfillTask = Task { [weak self] in
             guard let self else { return }
+            // Only clear the flag if a newer backfill hasn't superseded this one —
+            // a cancelled-but-still-draining task must not turn off the spinner the
+            // new task just turned on.
+            defer { if self.artworkGen == gen { self.isFetchingArtwork = false } }
+            // A manual rescan forgets prior per-session failures so cover-less albums
+            // are tried again (e.g. right after the user enables online artwork).
+            if forceRetry { await self.library.resetArtworkAttempts() }
             for _ in 0..<12 {
                 if Task.isCancelled { return }
                 let map = await self.library.backfillAlbumArtwork(for: self.tracks)
@@ -270,8 +379,24 @@ final class AppModel {
                 for i in self.tracks.indices where self.tracks[i].artworkURL == nil {
                     if let url = map[self.tracks[i].albumID] { self.tracks[i].artworkURL = url }
                 }
+                self.libraryRevision &+= 1
             }
         }
+    }
+
+    /// Albums with no cover yet (no on-disk file, no fetched URL). Drives the
+    /// artwork status line in Settings.
+    var albumsMissingArtworkCount: Int {
+        albums.reduce(into: 0) { count, album in
+            if album.artworkURL == nil { count += 1 }
+        }
+    }
+
+    /// User-triggered "fetch missing covers" — re-runs the backfill on demand and
+    /// forces a retry of albums that came up empty earlier this session (e.g. after
+    /// the user turns online artwork on).
+    func refreshArtwork() {
+        backfillArtwork(forceRetry: true)
     }
 
     // MARK: Onboarding / sources
@@ -310,6 +435,30 @@ final class AppModel {
             rebuildSources()
             await rescan(cfg.id)
         }
+    }
+
+    // MARK: Source config sharing (#7)
+
+    /// A shareable config for a remote source, or nil for local/Files sources
+    /// (they rely on a device-only security-scoped bookmark that can't transfer).
+    /// The password is never included — `SourceConfig` doesn't even hold it.
+    func exportableSource(_ id: String) -> SharedSourceConfig? {
+        guard let cfg = sourceConfigs.first(where: { $0.id == id }),
+              cfg.bookmark == nil else { return nil }
+        return SharedSourceConfig(
+            name: cfg.name, proto: cfg.proto, host: cfg.host, port: cfg.port,
+            share: cfg.share, username: cfg.username, domain: cfg.domain, rootPath: cfg.rootPath
+        )
+    }
+
+    /// Add a source from an imported shared config plus a freshly-entered password.
+    func importSource(_ shared: SharedSourceConfig, password: String?) {
+        guard let proto = SourceProtocol(rawValue: shared.proto) else { return }
+        addSource(
+            name: shared.name, proto: proto, host: shared.host, port: shared.port,
+            share: shared.share, username: shared.username, password: password,
+            domain: shared.domain, rootPath: shared.rootPath
+        )
     }
 
     /// Browse a server's folders with transient credentials (folder picker).
@@ -420,6 +569,14 @@ final class AppModel {
                    trackCount: trackIDs[id]?.count ?? 0, artworkURL: nil)
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
+        var haystack: [String: String] = [:]
+        haystack.reserveCapacity(tracks.count)
+        for track in tracks {
+            haystack[track.id] = "\(track.title) \(track.artist) \(track.album) \(track.genre) \(track.folderPath)".lowercased()
+        }
+        searchHaystack = haystack
+        libraryRevision &+= 1   // invalidate albums/stats caches
     }
 
     // MARK: Derived collections
@@ -436,6 +593,12 @@ final class AppModel {
     var offlineTracks: [Track] { tracks.filter { $0.cacheState.isPlayableOffline } }
 
     var albums: [Album] {
+        let rev = libraryRevision   // registers observation; recompute once per change
+        if _albumsCacheRev != rev { _albumsCache = computeAlbums(); _albumsCacheRev = rev }
+        return _albumsCache
+    }
+
+    private func computeAlbums() -> [Album] {
         var grouped: [String: [Track]] = [:]
         for track in tracks where track.kind == .audio { grouped[track.albumID, default: []].append(track) }
         return grouped.values.compactMap { group -> Album? in
@@ -469,6 +632,12 @@ final class AppModel {
     }
 
     var libraryStats: LibraryStats {
+        let rev = libraryRevision   // registers observation; recompute once per change
+        if _statsCacheRev != rev { _statsCache = computeLibraryStats(); _statsCacheRev = rev }
+        return _statsCache
+    }
+
+    private func computeLibraryStats() -> LibraryStats {
         let audio = audioTracks
         var totalDuration = 0.0
         var totalPlays = 0
@@ -496,6 +665,26 @@ final class AppModel {
         tracks.filter { $0.albumID == albumID }.sorted(by: albumTrackSort)
     }
 
+    /// Distinct credited performers on an album, in first-seen order — so a
+    /// "Various Artists" album (opera cast, compilation) can list every singer to
+    /// open instead of dead-ending on whoever happened to be first. Each maps to
+    /// the same artist id the index uses, so the rows route to a real artist page.
+    func creditedArtists(forAlbum albumID: String) -> [Artist] {
+        let byID = Dictionary(artistList.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var seen = Set<String>()
+        var result: [Artist] = []
+        for track in tracks(forAlbum: albumID) {
+            for name in MetadataGrouping.creditedArtists(track.artist) {
+                let id = MetadataGrouping.normalizeKey(name)
+                guard !id.isEmpty, seen.insert(id).inserted else { continue }
+                result.append(byID[id] ?? Artist(id: id, name: artistDisplayNames[id] ?? name,
+                                                 albumCount: 0, trackCount: artistTrackIDs[id]?.count ?? 0,
+                                                 artworkURL: nil))
+            }
+        }
+        return result
+    }
+
     /// Fetch + apply an album cover on demand (folder → embedded → online, per the
     /// source and the online-artwork setting). Called when an album with no art is
     /// opened, so the user doesn't have to wait for a background backfill pass.
@@ -509,11 +698,38 @@ final class AppModel {
             where self.tracks[i].albumID == albumID && self.tracks[i].artworkURL == nil {
                 self.tracks[i].artworkURL = url
             }
+            self.libraryRevision &+= 1
         }
     }
 
     func tracks(forArtist artistID: String) -> [Track] {
         (artistTrackIDs[artistID] ?? []).compactMap(track)
+    }
+
+    /// Cached online artist photo for the header, or nil (→ placeholder glyph).
+    func artistImage(_ artistID: String) -> URL? { artistImageURLs[artistID] }
+
+    /// Fetch + cache an artist photo from the user's enabled sources, once. The
+    /// cached-file check inside the library means a previously fetched photo shows
+    /// offline too; a genuine miss is remembered for the session so the page open
+    /// doesn't re-hit the network each time.
+    func ensureArtistImage(_ artistID: String) {
+        guard artistImageURLs[artistID] == nil, !attemptedArtistImageIDs.contains(artistID) else { return }
+        let sources = ArtistImageSource.enabled
+        guard !sources.isEmpty, let name = artistName(artistID) ?? tracks(forArtist: artistID).first?.artist else { return }
+        attemptedArtistImageIDs.insert(artistID)
+        Task { [weak self] in
+            guard let self else { return }
+            if let url = await self.library.artistImageURL(forArtist: artistID, name: name, sources: sources) {
+                self.artistImageURLs[artistID] = url
+            }
+        }
+    }
+
+    /// Forget this session's artist-photo misses so a user-triggered retry (e.g.
+    /// after enabling a source) re-fetches.
+    func resetArtistImageAttempts() {
+        attemptedArtistImageIDs.removeAll()
     }
 
     /// Per-artist dominant genre family. An artist whose tracks are tagged with a
@@ -586,6 +802,67 @@ final class AppModel {
         .sorted { $0.recency > $1.recency }
         .prefix(8)
         .map(\.album)
+    }
+
+    // MARK: Rediscovery shelves (Home)
+
+    /// Audio you imported but never played. Sorted by a per-session-stable key so
+    /// the rail spreads across the library yet doesn't reshuffle while scrolling.
+    var haveNotHeard: [Track] {
+        audioTracks
+            .filter { autoCache.stat(for: $0.id).playCount == 0 }
+            .sorted { $0.id.hashValue < $1.id.hashValue }
+            .prefix(12)
+            .map { $0 }
+    }
+
+    /// Tracks you used to play but haven't returned to in 90+ days, ranked so
+    /// former favourites (more historical plays) surface first.
+    var buriedTreasure: [Track] {
+        let cutoff = Date().timeIntervalSince1970 - 90 * 24 * 3600
+        return audioTracks
+            .compactMap { track -> (Track, Double)? in
+                let stat = autoCache.stat(for: track.id)
+                guard stat.playCount > 0, stat.lastPlayedAtEpoch > 0,
+                      stat.lastPlayedAtEpoch < cutoff else { return nil }
+                return (track, log2(Double(stat.playCount) + 1))
+            }
+            .sorted { $0.1 > $1.1 }
+            .prefix(12)
+            .map(\.0)
+    }
+
+    /// Albums added to the library on this calendar day in a previous year.
+    var onThisDayAlbums: [Album] {
+        let calendar = Calendar.current
+        let now = Date()
+        let today = calendar.dateComponents([.month, .day], from: now)
+        let currentYear = calendar.component(.year, from: now)
+        var grouped: [String: [Track]] = [:]
+        for track in tracks where track.kind == .audio {
+            guard let epoch = track.modifiedAtEpoch else { continue }
+            let comps = calendar.dateComponents([.month, .day, .year], from: Date(timeIntervalSince1970: epoch))
+            guard comps.month == today.month, comps.day == today.day,
+                  let year = comps.year, year < currentYear else { continue }
+            grouped[track.albumID, default: []].append(track)
+        }
+        return grouped.values.compactMap { group -> Album? in
+            guard let first = group.first else { return nil }
+            let anyCached = group.contains { $0.cacheState.isPlayableOffline }
+            return Album(
+                id: first.albumID, title: first.album,
+                artist: MetadataGrouping.albumDisplayArtist(from: group.map(\.artist)),
+                artistID: first.artistID, year: nil, trackCount: group.count,
+                cacheState: anyCached ? .cached : .remoteOnly,
+                artworkURL: group.compactMap(\.artworkURL).first
+            )
+        }
+        .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    }
+
+    /// Most-played tracks over the last 30 days, from the windowed play log.
+    var topThisMonth: [Track] {
+        autoCache.topPlayed(sinceDays: 30, limit: 12).compactMap(track)
     }
 
     // MARK: Playback intents
@@ -885,6 +1162,153 @@ final class AppModel {
         reconcileAutoCache()
     }
 
+    // MARK: Metadata repair
+
+    /// Apply a user metadata edit to one track. Recomputes the derived album/artist
+    /// grouping keys (so a corrected album/artist regroups correctly) and rebuilds
+    /// the indexes. The change is persisted as a non-destructive override that
+    /// survives a tag rescan.
+    func editTrackMetadata(_ id: String, title: String, artist: String, album: String, genre: String) {
+        guard let i = trackIndex[id] else { return }
+        tracks[i].title = title
+        tracks[i].artist = artist
+        tracks[i].album = album
+        tracks[i].genre = genre
+        tracks[i].albumID = MetadataGrouping.albumID(path: tracks[i].remotePath ?? tracks[i].folderPath, album: album)
+        tracks[i].artistID = MetadataGrouping.artistID(artist)
+        Task { await library.setMetadataOverride(forTrack: id, title: title, artist: artist, album: album, genre: genre) }
+        rebuildIndex()
+    }
+
+    /// Apply album/artist/genre to every track in an album in one pass (one index
+    /// rebuild), e.g. fixing a misnamed album for the whole record at once.
+    func editAlbumMetadata(_ albumID: String, album: String, artist: String, genre: String) {
+        let targets = tracks.indices.filter { tracks[$0].albumID == albumID }
+        guard !targets.isEmpty else { return }
+        for i in targets {
+            let id = tracks[i].id
+            tracks[i].album = album
+            tracks[i].artist = artist
+            tracks[i].genre = genre
+            tracks[i].albumID = MetadataGrouping.albumID(path: tracks[i].remotePath ?? tracks[i].folderPath, album: album)
+            tracks[i].artistID = MetadataGrouping.artistID(artist)
+            Task { await library.setMetadataOverride(forTrack: id, title: nil, artist: artist, album: album, genre: genre) }
+        }
+        rebuildIndex()
+    }
+
+    /// Drop a track's override and restore the file-scanned values.
+    func revertTrackMetadata(_ id: String) {
+        Task {
+            guard let restored = await library.clearMetadataOverride(forTrack: id),
+                  let i = trackIndex[id] else { return }
+            tracks[i].title = restored.title
+            tracks[i].artist = restored.artist
+            tracks[i].album = restored.album
+            tracks[i].genre = restored.genre
+            tracks[i].albumID = MetadataGrouping.albumID(path: tracks[i].remotePath ?? tracks[i].folderPath, album: restored.album)
+            tracks[i].artistID = MetadataGrouping.artistID(restored.artist)
+            rebuildIndex()
+        }
+    }
+
+    /// Tracks whose metadata is genuinely broken: missing artist, an album that
+    /// fell back to the source name (no real album tag), or an empty title. Backs
+    /// the review queue. A missing GENRE is deliberately NOT flagged — most files
+    /// lack one, and it's low value, so flagging it drowned the queue.
+    var metadataNeedsAttention: [Track] {
+        // Cached revision-keyed: this is read in SettingsView.body, which also
+        // re-evaluates on every EQ-slider frame — an uncached O(N) scan over ~3k
+        // tracks there was a per-frame hitch.
+        let rev = libraryRevision
+        if _needsAttentionCacheRev != rev {
+            _needsAttentionCache = audioTracks.filter { track in
+                track.artist == "Unknown Artist"
+                    || track.artist == "Unknown"
+                    || track.album == track.sourceName
+                    || track.title.trimmingCharacters(in: .whitespaces).isEmpty
+            }
+            _needsAttentionCacheRev = rev
+        }
+        return _needsAttentionCache
+    }
+
+    /// Bulk-infer artist/album/title for broken tracks from their file names and
+    /// folder layout (Artist/Album/NN Title.ext, or "Artist - Title" filenames).
+    /// Fills ONLY broken fields — never overwrites a real tag — writes reversible
+    /// per-track overrides in one batched pass, and rebuilds the index once.
+    /// Returns the count changed. The inference runs off the main actor (it's a
+    /// pure scan over the whole library), so the UI stays responsive.
+    @discardableResult
+    func autoFixMetadataFromFiles() async -> Int {
+        let snapshot = tracks
+        let fixes = await Task.detached(priority: .userInitiated) {
+            AppModel.computeAutoFixEdits(snapshot)
+        }.value
+        guard !fixes.isEmpty else { return 0 }
+
+        // Apply to the in-memory copy by an id→index map (O(N+edits)).
+        var indexByID: [String: Int] = [:]
+        indexByID.reserveCapacity(tracks.count)
+        for (i, t) in tracks.enumerated() { indexByID[t.id] = i }
+        for fix in fixes {
+            guard let i = indexByID[fix.id] else { continue }
+            if let title = fix.title { tracks[i].title = title }
+            if let artist = fix.artist {
+                tracks[i].artist = artist
+                tracks[i].artistID = MetadataGrouping.artistID(artist)
+            }
+            if let album = fix.album {
+                tracks[i].album = album
+                tracks[i].albumID = MetadataGrouping.albumID(path: tracks[i].remotePath ?? tracks[i].folderPath, album: album)
+            }
+        }
+        await library.applyMetadataOverrides(fixes)
+        rebuildIndex()
+        return fixes.count
+    }
+
+    /// Pure inference used by `autoFixMetadataFromFiles` — `nonisolated static` so
+    /// it can run off the main actor over a `Track` snapshot. Each returned fix has
+    /// non-nil values ONLY for the fields that were broken.
+    nonisolated private static func computeAutoFixEdits(_ tracks: [Track]) -> [MetadataAutoFix] {
+        var fixes: [MetadataAutoFix] = []
+        for t in tracks where t.kind == .audio {
+            let path = t.remotePath ?? t.folderPath
+            let comps = path.split(separator: "/").map(String.init)
+            guard let fileName = comps.last else { continue }
+            let stem = (fileName as NSString).deletingPathExtension
+            let parsed = LibraryService.parseTrack(stem)
+            let split = LibraryService.splitArtistTitle(parsed.title)
+            // Disc-stripped folder chain ([…, Artist, Album]) — never picks up a
+            // "CD1"/"Disc 2" subfolder as the album or the album as the artist.
+            let folders = MetadataGrouping.albumFolderComponents(forPath: path)
+
+            var newArtist: String?
+            var newAlbum: String?
+            var newTitle: String?
+
+            // Artist: from an "Artist - Title" filename, else the folder above the album.
+            if t.artist == "Unknown Artist" || t.artist == "Unknown" {
+                if let inferred = split.artist { newArtist = inferred }
+                else if folders.count >= 2 { newArtist = folders[folders.count - 2] }
+            }
+            // Album: the album folder, when the album fell back to the source name.
+            if t.album == t.sourceName, let albumFolder = folders.last {
+                newAlbum = albumFolder
+            }
+            // Title: ONLY when the current title is blank. A non-empty title is a
+            // real tag and must never be overwritten by a filename guess.
+            if t.title.trimmingCharacters(in: .whitespaces).isEmpty, let inferredTitle = split.title {
+                newTitle = inferredTitle
+            }
+            if newArtist != nil || newAlbum != nil || newTitle != nil {
+                fixes.append(MetadataAutoFix(id: t.id, title: newTitle, artist: newArtist, album: newAlbum))
+            }
+        }
+        return fixes
+    }
+
     func cacheState(_ id: String) -> CacheState { track(id)?.cacheState ?? .remoteOnly }
 
     func canManageDownload(_ id: String) -> Bool {
@@ -892,13 +1316,24 @@ final class AppModel {
         return !isLocalSource(target.sourceID)
     }
 
+    /// Write a track's cache state by id and bump `libraryRevision` so the
+    /// revision-keyed `albums` cache recomputes — otherwise the album tile keeps
+    /// showing the stale download badge after a download/evict completes. For a
+    /// batch that writes many tracks in one synchronous loop, write directly and
+    /// bump the revision ONCE afterwards instead of calling this per track.
+    private func setCacheState(trackID id: String, _ state: CacheState) {
+        guard let i = trackIndex[id], tracks.indices.contains(i) else { return }
+        tracks[i].cacheState = state
+        libraryRevision &+= 1
+    }
+
     func download(_ id: String) {
         guard let i = trackIndex[id], canManageDownload(id) else { return }
-        tracks[i].cacheState = .downloading
+        setCacheState(trackID: id, .downloading)
         let target = tracks[i]
         Task {
             let ok = await library.ensureCached(target)
-            if let j = trackIndex[id] { tracks[j].cacheState = ok ? .cached : .failed }
+            setCacheState(trackID: id, ok ? .cached : .failed)
         }
     }
 
@@ -906,7 +1341,7 @@ final class AppModel {
         guard let i = trackIndex[id], canManageDownload(id) else { return }
         let target = tracks[i]
         Task { await library.evict(target) }
-        tracks[i].cacheState = .remoteOnly
+        setCacheState(trackID: id, .remoteOnly)
     }
 
     func toggleOfflineMode() { offlineMode.toggle() }
@@ -915,7 +1350,7 @@ final class AppModel {
 
     /// Insert the whole album right after the current track, in album order.
     func playAlbumNext(_ albumID: String) {
-        let album = tracks(forAlbum: albumID)
+        let album = playableContext(tracks(forAlbum: albumID))
         guard !album.isEmpty else { return }
         // On an empty queue the first `playNext` auto-starts playback, which with
         // the reversed feed would start on the album's LAST track — just play it
@@ -931,7 +1366,9 @@ final class AppModel {
 
     /// Append the whole album to the end of the queue, in album order.
     func addAlbumToQueue(_ albumID: String) {
-        for track in tracks(forAlbum: albumID) { engine.addToQueue(track) }
+        let album = playableContext(tracks(forAlbum: albumID))
+        guard !album.isEmpty else { return }
+        for track in album { engine.addToQueue(track) }
     }
 
     /// A remote album (at least one track can be downloaded/pinned).
@@ -952,11 +1389,12 @@ final class AppModel {
         // Mark all queued, then download sequentially in ONE task — not N
         // fire-and-forget tasks all contending for the source's background client.
         for t in targets where trackIndex[t.id] != nil { tracks[trackIndex[t.id]!].cacheState = .downloading }
+        libraryRevision &+= 1   // one rebuild for the whole batch, not per track
         Task { [weak self] in
             guard let self else { return }
             for t in targets {
                 let ok = await self.library.ensureCached(t)
-                if let i = self.trackIndex[t.id] { self.tracks[i].cacheState = ok ? .cached : .remoteOnly }
+                self.setCacheState(trackID: t.id, ok ? .cached : .remoteOnly)
             }
         }
     }
@@ -987,15 +1425,11 @@ final class AppModel {
     // MARK: Search
 
     func searchResults(_ query: String) -> [Track] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !trimmed.isEmpty else { return [] }
-        return tracks.filter {
-            $0.title.localizedCaseInsensitiveContains(trimmed)
-                || $0.artist.localizedCaseInsensitiveContains(trimmed)
-                || $0.album.localizedCaseInsensitiveContains(trimmed)
-                || $0.genre.localizedCaseInsensitiveContains(trimmed)
-                || $0.folderPath.localizedCaseInsensitiveContains(trimmed)
-        }
+        // Scan the precomputed lowercased haystack (built in rebuildIndex) instead of
+        // five locale-aware `contains` per track on every keystroke.
+        return tracks.filter { (searchHaystack[$0.id] ?? "").contains(trimmed) }
     }
 
     // MARK: Wiring
@@ -1017,8 +1451,8 @@ final class AppModel {
         partialCacheTriggeredID = track.id
         Task { [weak self] in
             guard let self else { return }
-            if await self.library.ensureCached(track, auto: true), let j = self.trackIndex[track.id] {
-                self.tracks[j].cacheState = .cached
+            if await self.library.ensureCached(track, auto: true) {
+                self.setCacheState(trackID: track.id, .cached)
             }
         }
     }
@@ -1051,6 +1485,7 @@ final class AppModel {
                   abs(self.tracks[i].durationSeconds - seconds) > 0.5 else { return }
             self.tracks[i].durationSeconds = seconds
             Task { await self.library.setDuration(seconds, forTrack: id) }
+            self.libraryRevision &+= 1
         }
         engine.onPlaybackTick = { [weak self] in
             guard let self else { return }
@@ -1082,9 +1517,9 @@ final class AppModel {
                     case .cached, .prefetched:
                         break
                     case .downloading:
-                        self.tracks[i].cacheState = .cached
+                        self.setCacheState(trackID: track.id, .cached)
                     default:
-                        self.tracks[i].cacheState = .prefetched
+                        self.setCacheState(trackID: track.id, .prefetched)
                     }
                 }
                 if let art = await self.library.remoteAlbumArtwork(for: track) {
@@ -1092,6 +1527,7 @@ final class AppModel {
                     where self.tracks[idx].albumID == track.albumID && self.tracks[idx].artworkURL == nil {
                         self.tracks[idx].artworkURL = art
                     }
+                    self.libraryRevision &+= 1
                 }
             }
         }
@@ -1104,7 +1540,7 @@ final class AppModel {
                 guard let target = self.track(id) else { continue }
                 await self.library.evict(target)
                 if let i = self.trackIndex[id], self.tracks[i].cacheState == .prefetched {
-                    self.tracks[i].cacheState = .remoteOnly
+                    self.setCacheState(trackID: id, .remoteOnly)
                 }
             }
             var downloaded = 0
@@ -1117,7 +1553,7 @@ final class AppModel {
                 // playback while still converging on the hot set.
                 if downloaded >= 3 { moreToFetch = true; break }
                 if await self.library.ensureCached(target, auto: true) {
-                    if let i = self.trackIndex[id] { self.tracks[i].cacheState = .prefetched }
+                    self.setCacheState(trackID: id, .prefetched)
                     downloaded += 1
                 }
             }
@@ -1156,7 +1592,7 @@ final class AppModel {
         let localIDs = Set(sourceConfigs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
         guard !localIDs.contains(next.sourceID) else { return }
         guard next.cacheState == .remoteOnly else { return }
-        guard sourceHealth.values.contains(where: { $0.isReachable }) else { return }
+        guard sourceHealth[next.sourceID]?.isReachable == true else { return }
         prefetchTask = Task { [weak self] in
             guard let self else { return }
             // Let the live stream establish its initial buffer before pulling the
@@ -1168,7 +1604,7 @@ final class AppModel {
             let ok = await self.library.ensureCached(next, auto: true)
             if Task.isCancelled { return }
             if ok, let i = self.trackIndex[next.id], self.tracks[i].cacheState == .remoteOnly {
-                self.tracks[i].cacheState = .prefetched
+                self.setCacheState(trackID: next.id, .prefetched)
             }
         }
     }
@@ -1179,6 +1615,7 @@ final class AppModel {
         let localIDs = Set(sourceConfigs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
         let evictable = audioTracks.filter { !localIDs.contains($0.sourceID) }
         autoCache.scheduleReconcile(library: evictable, reachable: reachable && !offlineMode)
+        libraryRevision &+= 1   // favorites / cache-state / play-count may have changed
     }
 
     /// Recompute the auto-cache storage readout from what is actually on disk.

@@ -3,11 +3,14 @@ import MediaPlayer
 import SwiftUI
 import UIKit
 
-// MARK: - Mini player bar (mounted above the tab bar)
+// MARK: - Mini player content (the collapsed-state row)
 
-struct MiniPlayerBar: View {
+/// The collapsed-state content only: artwork + title/artist + transport (or an
+/// error row). It carries NO background, shadow or gesture — those belong to the
+/// single `MorphingPlayer` surface, so the SAME glass element flows from bar to
+/// full screen. Sized to ~`MorphingPlayer.barHeight`.
+struct MiniPlayerContent: View {
     @Environment(AppModel.self) private var model
-
     private var engine: PlaybackEngine { model.engine }
 
     var body: some View {
@@ -25,6 +28,8 @@ struct MiniPlayerBar: View {
                         .foregroundStyle(DesignTokens.textSecondary)
                         .lineLimit(2)
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Playback error. \(message)")
                 Spacer(minLength: 8)
                 Button {
                     engine.clearQueue()
@@ -35,17 +40,10 @@ struct MiniPlayerBar: View {
                         .frame(width: 36, height: 36)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .playerGlassBackground(cornerRadius: 14)
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(DesignTokens.borderSubtle.opacity(0.12), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.22), radius: 14, y: 6)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Playback error. \(message)")
         } else if let track = engine.currentTrack {
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
@@ -71,6 +69,8 @@ struct MiniPlayerBar: View {
                             .foregroundStyle(DesignTokens.textSecondary)
                             .lineLimit(1)
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Now playing \(track.title) by \(track.artist)")
 
                     Spacer(minLength: 8)
 
@@ -83,6 +83,7 @@ struct MiniPlayerBar: View {
                             .frame(width: 40, height: 40)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
 
                     Button {
                         engine.next()
@@ -94,6 +95,7 @@ struct MiniPlayerBar: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(!engine.hasNext)
+                    .accessibilityLabel("Next track")
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
@@ -103,20 +105,202 @@ struct MiniPlayerBar: View {
                     .padding(.horizontal, 10)
                     .padding(.bottom, 6)
             }
-            .playerGlassBackground(cornerRadius: 14)
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(DesignTokens.borderSubtle.opacity(0.12), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.22), radius: 14, y: 6)
-            .contentShape(Rectangle())
-            // Tap opens (reliable); the interactive up-drag-to-expand is owned by
-            // the host container (RootTabView) so it can track the finger live.
-            .onTapGesture { withAnimation(.interpolatingSpring(stiffness: 320, damping: 30)) { model.isNowPlayingPresented = true } }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Now playing \(track.title) by \(track.artist)")
-            .accessibilityAddTraits(.isButton)
         }
+    }
+}
+
+// MARK: - Morphing player (ONE element: mini bar ⇄ full Now Playing)
+
+/// The single player element. At `p == 0` it IS the floating mini bar; at `p == 1`
+/// it IS the full Now Playing screen. The SAME Liquid Glass surface grows out of
+/// the bar's frame and fills the screen (and drains back) as `p` tracks the finger
+/// — so there is no separate bar plus a pop-in overlay. The glass starts clean and
+/// clear (real refraction of the app behind it stays visible) and tints lightly
+/// toward the album colour only as it commits. Tap or drag up opens; the full
+/// screen's own chevron / drag-down closes.
+struct MorphingPlayer: View {
+    @Environment(AppModel.self) private var model
+    let p: CGFloat              // 0 = mini, 1 = full (live, finger-tracking)
+    let screenSize: CGSize      // full screen incl. safe areas
+    let safeTop: CGFloat
+    let safeBottom: CGFloat
+    let tint: Color             // album palette colour the glass tints toward
+    /// Frozen snapshot of the app behind, refracted at full open (nil ⇒ no snapshot;
+    /// the clear glass still shows the real backdrop, just with subtler refraction).
+    /// A binding so the open gestures can grab a CLEAN collapsed frame the instant
+    /// they begin (and drop it on a snap-back), avoiding a snapshot of the player.
+    @Binding var backdrop: UIImage?
+    /// Strength of the snapshot refraction (points).
+    let refractStrength: CGFloat
+    @Binding var dragFraction: CGFloat?
+    @Binding var presented: Bool
+
+    private var engine: PlaybackEngine { model.engine }
+
+    /// Collapsed-bar metrics. Knob: `bottomGap` floats the bar above the tab bar;
+    /// `barHeight` matches `MiniPlayerContent` (row 56 + progress strip 8).
+    static let barHeight: CGFloat = 64
+    private let sideInset: CGFloat = 8
+    private let bottomGap: CGFloat = 50
+
+    private func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
+    /// Clamped 0→1 ramp of `x` across [lo, hi]; used to time the cross-fades.
+    private func ramp(_ x: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat {
+        min(max((x - lo) / (hi - lo), 0), 1)
+    }
+
+    var body: some View {
+        let W = screenSize.width
+        let H = screenSize.height
+        let pc = min(max(p, 0), 1)
+        // Live finger-drag in progress (vs settled / mid-settle-animation). During a
+        // drag `p` changes every frame, so the per-frame Liquid-Glass lensing + the
+        // screen-blended rim recompute over a resizing shape each frame — that is the
+        // morph lag. So drag uses a cheap static material with no rim; the real glass
+        // and rim resolve on settle (a short spring, where the per-frame cost is fine).
+        let dragging = dragFraction != nil
+
+        // Source = the floating mini bar's frame, COMPUTED (not measured). Because
+        // there is only this one element, there is nothing to match against, so the
+        // morph can never be "slightly mis-sized". Destination = the full screen.
+        let barMaxY = H - safeBottom - bottomGap
+        let src = CGRect(x: sideInset, y: barMaxY - Self.barHeight,
+                         width: W - sideInset * 2, height: Self.barHeight)
+
+        let left   = lerp(src.minX, 0, pc)
+        let right  = lerp(src.maxX, W, pc)
+        let top    = lerp(src.minY, 0, pc)
+        let bottom = lerp(src.maxY, H, pc)
+        let w = max(right - left, 1)
+        let h = max(bottom - top, 1)
+
+        // Liquid surface: corners stay cohesive/blobby mid-morph, but the TOP edge
+        // is a flat straight line (the meniscus dome was removed — it read badly).
+        // Knob: `* 18` corner bulge.
+        let inTransit = CGFloat(sin(Double(pc) * .pi))   // 0 at rest, 1 mid-morph
+        let radius = lerp(14, 0, pc) + inTransit * 18
+        let meniscus: CGFloat = 0   // flat top (dome removed per feedback)
+        let shape = LiquidShape(cornerRadius: radius, meniscus: meniscus)
+
+        // No album tint — stays clean clear glass so the real background (and its
+        // colour drops) refracts through, instead of being masked by the cover
+        // colour. (Raise this if a faint album tint is ever wanted.)
+        let tintAmount = 0.0
+        // Full (opaque) content resolves only in the last stretch, so the glass
+        // reads as clear/translucent through most of the morph. Knob: [0.6, 1].
+        let fullOpacity = Double(ramp(pc, 0.6, 1.0))
+        // Mini row fades out almost immediately so the glass spreads clean. Knob: 0.22.
+        let miniOpacity = Double(1 - ramp(pc, 0.0, 0.22))
+
+        // The morph frame in screen coords (the moving "window" into the snapshot).
+        let currentFrame = CGRect(x: left, y: top, width: w, height: h)
+
+        return ZStack {
+            // (1) FROSTED Liquid Glass surface. `Glass.regular` blurs the LIVE app behind
+            // the player natively on the GPU. But recomputing the interactive lensing
+            // glass over a shape that resizes every frame is what makes a live DRAG lag,
+            // so while dragging we swap in a plain static material (no lensing, no
+            // interactive wobble); the real glass resolves the instant the drag settles.
+            if dragging {
+                Color.clear.background(.ultraThinMaterial, in: shape)
+            } else {
+                Color.clear.glassSurface(shape, tint: tint, amount: tintAmount)
+            }
+
+            // (3) Content: full Now Playing (cropped from the bottom up, fades in) +
+            // the mini row (fades out; owns the open gestures).
+            ZStack(alignment: .bottom) {
+                // Skip rendering the heavy full Now Playing view until it actually starts
+                // fading in (it's opacity 0 below pc 0.6 anyway). Laying out this complex
+                // view every frame through the whole morph was a chunk of the lag.
+                // BUT keep it mounted for the whole collapse (while `presented`): the
+                // collapse drag lives on this view's children, so unmounting it as a SLOW
+                // drag crosses pc 0.55 killed the active gesture before `.onEnded` fired,
+                // freezing dragFraction mid-screen (stuck half-view, app needed a restart).
+                // Expand stays gated by pc alone (presented is false until release), so the
+                // expand-drag perf path is unchanged.
+                if pc > 0.55 || presented {
+                    NowPlayingView(
+                        dragFraction: $dragFraction,
+                        presented: $presented,
+                        containerHeight: H,
+                        safeTop: safeTop,
+                        safeBottom: safeBottom
+                    )
+                    .environment(model)
+                    .frame(width: W, height: H, alignment: .top)
+                    .opacity(fullOpacity)
+                    .frame(width: w, height: h, alignment: .bottom)
+                    // Only live when settled open: keeps its gestures off during an expand
+                    // drag and lets the bar own taps while collapsed. `presented` never flips
+                    // mid-drag, so an in-progress gesture is never cut.
+                    .allowsHitTesting(presented)
+                }
+
+                // Mini row, anchored to the bottom (where the bar lives), fading out.
+                MiniPlayerContent()
+                    .environment(model)
+                    // The bar height is fixed (the morph geometry depends on it), so
+                    // cap Dynamic Type here — past xxLarge the text would clip the
+                    // compact bar. The full player above has no such cap.
+                    .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+                    .frame(width: w, height: Self.barHeight)
+                    .opacity(miniOpacity)
+                    .contentShape(Rectangle())
+                    // Tap to open + drag up to expand. Each grabs a CLEAN collapsed
+                    // snapshot the instant it begins (before the player expands), so the
+                    // refracted backdrop never contains the player itself. Buttons inside
+                    // the row still win their taps (drag needs real movement).
+                    .onTapGesture {
+                        guard engine.lastErrorMessage == nil else { return }
+                        withAnimation(PlayerMorph.settle) { presented = true }
+                    }
+                    .gesture(expandDrag(height: H))
+                    .allowsHitTesting(!presented)
+            }
+
+            // (4) The glass EDGE: white bevel + prismatic rim + soft top light. Scaled
+            // by morph progress AND faded back out as it reaches full screen — at p==1
+            // the player IS the whole screen, so a rim there reads as an ugly lighter
+            // "cut-off" border around the display. So the edge only shows mid-morph
+            // (where it sells the glass CARD) and vanishes when fully open. Skipped
+            // during a live drag — its three screen-blended overlays were a chunk of
+            // the per-frame morph cost; it returns on settle with the real glass.
+            if !dragging {
+                GlassRimOverlay(shape: shape,
+                                intensity: Double(pc) * Double(1 - ramp(pc, 0.82, 1.0)))
+            }
+        }
+        .frame(width: w, height: h)
+        .clipShape(shape)
+        .compositingGroup()
+        // Fixed radius (an animating shadow radius re-rasterizes every frame → morph
+        // lag); opacity still eases in. Smaller radius is cheaper to blur each frame.
+        .shadow(color: .black.opacity(0.1 + 0.22 * Double(pc)), radius: 9, y: 5)
+        .position(x: currentFrame.midX, y: currentFrame.midY)
+        .frame(width: W, height: H)
+        .ignoresSafeArea()
+    }
+
+    /// Up-drag on the collapsed bar raises the morph fraction live; release settles
+    /// to full or mini by drag distance + fling velocity (viscous, no-bounce settle;
+    /// the velocity only picks the target, it is never fed to the animation).
+    private func expandDrag(height: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 10)
+            .onChanged { value in
+                guard engine.lastErrorMessage == nil, value.translation.height < 0 else { return }
+                dragFraction = min(max(-value.translation.height / max(height, 1), 0), 1)
+            }
+            .onEnded { value in
+                guard engine.lastErrorMessage == nil else { return }
+                let f = min(max(-value.translation.height / max(height, 1), 0), 1)
+                let flungUp = value.predictedEndTranslation.height < -220
+                let open = f > 0.25 || flungUp   // open if dragged past a quarter (or flung)
+                withAnimation(PlayerMorph.settle) {
+                    presented = open
+                    dragFraction = nil
+                }
+            }
     }
 }
 
@@ -131,17 +315,177 @@ extension View {
             self.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         }
     }
+
+    /// The morphing player's Liquid Glass (iOS 26+) surface filling `shape`. Uses the
+    /// CLEAR glass variant (not `.regular`) so the surface stays see-through — the app
+    /// behind it (strongly refracted by `BackdropRefraction` at full open) shows
+    /// through instead of reading as flat frosted black. `.interactive()` adds the
+    /// touch-responsive liquid wobble; `amount` is a light optional album tint
+    /// (currently 0). Takes any `Shape`. Thin-material fallback below iOS 26.
+    @ViewBuilder
+    func glassSurface<S: Shape>(_ shape: S, tint: Color, amount: Double) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular.tint(tint.opacity(amount)).interactive(), in: shape)
+        } else {
+            self.background(.ultraThinMaterial, in: shape)
+                .overlay(shape.fill(tint.opacity(amount * 0.5)))
+        }
+    }
+}
+
+/// The morphing player's surface outline: a rounded rectangle whose TOP edge bows
+/// up into a convex **meniscus** while the glass is filling, then settles flat —
+/// so the leading edge reads as a real liquid surface held by surface tension, not
+/// a rectangle resizing. The corners stay cohesive/blobby through the morph.
+/// `meniscus` is the dome height (0 = flat); both params interpolate via
+/// `animatableData` so the settle is smooth.
+struct LiquidShape: InsettableShape {
+    var cornerRadius: CGFloat
+    var meniscus: CGFloat
+    var insetAmount: CGFloat = 0
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(cornerRadius, meniscus) }
+        set { cornerRadius = newValue.first; meniscus = newValue.second }
+    }
+
+    func inset(by amount: CGFloat) -> some InsettableShape {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let rect = rect.insetBy(dx: insetAmount, dy: insetAmount)
+        let w = rect.width, h = rect.height
+        guard w > 0, h > 0 else { return Path() }
+        let r = max(0, min(cornerRadius - insetAmount, min(w, h) / 2))
+        // Keep the domed shoulders inside the rect even at large radii.
+        let m = max(0, min(meniscus, max(0, h - 2 * r)))
+        let minX = rect.minX, maxX = rect.maxX
+        let minY = rect.minY, maxY = rect.maxY
+        let shoulderY = minY + m          // where the dome meets the side corners
+
+        var path = Path()
+        // Left shoulder → meniscus dome across the top → right shoulder. The control
+        // point sits `m` above the rect so the curve PEAKS exactly at the top edge.
+        path.move(to: CGPoint(x: minX + r, y: shoulderY))
+        path.addQuadCurve(to: CGPoint(x: maxX - r, y: shoulderY),
+                          control: CGPoint(x: rect.midX, y: minY - m))
+        // Top-right corner
+        path.addQuadCurve(to: CGPoint(x: maxX, y: shoulderY + r),
+                          control: CGPoint(x: maxX, y: shoulderY))
+        path.addLine(to: CGPoint(x: maxX, y: maxY - r))
+        // Bottom-right corner
+        path.addQuadCurve(to: CGPoint(x: maxX - r, y: maxY),
+                          control: CGPoint(x: maxX, y: maxY))
+        path.addLine(to: CGPoint(x: minX + r, y: maxY))
+        // Bottom-left corner
+        path.addQuadCurve(to: CGPoint(x: minX, y: maxY - r),
+                          control: CGPoint(x: minX, y: maxY))
+        path.addLine(to: CGPoint(x: minX, y: shoulderY + r))
+        // Top-left corner
+        path.addQuadCurve(to: CGPoint(x: minX + r, y: shoulderY),
+                          control: CGPoint(x: minX, y: shoulderY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// The glass EDGE: a white bevel, a prismatic angular-gradient rim, a soft top-light
+/// highlight, and an inner bevel — all `.screen`-blended so they read as light on
+/// glass. `intensity` (0...1) scales every layer, so the edge fades in with the morph
+/// progress. Per the design advice this sells the Liquid-Glass "object" more than the
+/// refraction does — raise these opacities first if the look feels weak.
+struct GlassRimOverlay<S: InsettableShape>: View {
+    var shape: S
+    var intensity: Double
+
+    var body: some View {
+        shape
+            // Crisp white bevel edge.
+            .strokeBorder(.white.opacity(0.5 * intensity), lineWidth: 0.8)
+            .blendMode(.screen)
+            // Prismatic chromatic edge — no blur (blur per-frame was the morph-lag
+            // culprit); a crisp thin stroke reads as the glass edge and is cheap.
+            .overlay {
+                shape
+                    .strokeBorder(
+                        AngularGradient(colors: [
+                            .cyan, .blue, .white, .pink, .yellow, .mint, .cyan
+                        ], center: .center),
+                        lineWidth: 2.0
+                    )
+                    .opacity(0.55 * intensity)
+                    .blendMode(.screen)
+            }
+            // Soft top "global light".
+            .overlay {
+                shape.fill(
+                    LinearGradient(stops: [
+                        .init(color: .white.opacity(0.16 * intensity), location: 0.0),
+                        .init(color: .clear, location: 0.35)
+                    ], startPoint: .top, endPoint: .center)
+                )
+                .blendMode(.screen)
+            }
+            .allowsHitTesting(false)
+    }
 }
 
 // MARK: - Full Now Playing screen
+
+/// Full-screen host for artist/album navigation triggered from the full player.
+/// Presented as a `fullScreenCover`, NOT a sheet: an artist can have hundreds of
+/// tracks, and a sheet's swipe-down-to-dismiss would close the whole screen on an
+/// accidental down-swipe deep in the list. A cover only dismisses via the explicit
+/// Close button. It owns a NavigationStack (standard opaque background) so the
+/// player's own root can stay transparent for the Liquid-Glass backdrop; supports
+/// nested navigation (e.g. album → artist) via its local path.
+private struct PlayerNavCover: View {
+    let route: LibraryRoute
+    @Environment(\.dismiss) private var dismiss
+    @State private var path: [LibraryRoute] = []
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            routeView
+                .libraryDestinations()
+                .libraryNavigation($path)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { dismiss() } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.body.weight(.semibold))
+                        }
+                        .accessibilityLabel("Close")
+                    }
+                }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    @ViewBuilder
+    private var routeView: some View {
+        switch route {
+        case .album(let id): AlbumDetailView(albumID: id)
+        case .artist(let id): ArtistDetailView(artistID: id)
+        case .playlist(let id): PlaylistDetailView(playlistID: id)
+        default: EmptyView()
+        }
+    }
+}
 
 struct NowPlayingView: View {
     @Environment(AppModel.self) private var model
     @State private var showQueue = false
     @State private var showLyrics = false
-    /// Pushes the artist/album screen ON TOP of Now Playing (like Apple Music),
-    /// reusing the shared `LibraryRoute` destinations — not a modal sheet.
-    @State private var path: [LibraryRoute] = []
+    /// Artist/album navigation from the player opens a full-screen cover (its own
+    /// NavigationStack + opaque background), NOT a sheet — a long artist list must not
+    /// close on an accidental swipe-down, and the player root must stay transparent for
+    /// the Liquid-Glass backdrop (a NavigationStack as the player's root paints an opaque
+    /// system background that covered the glass at full open). See `PlayerNavCover`.
+    @State private var navRoute: LibraryRoute?
 
     /// Live downward-drag fraction (1 = full, 0 = mini); nil when settled. Owned
     /// by the host (RootTabView), which positions this view by it for a
@@ -151,16 +495,23 @@ struct NowPlayingView: View {
     var presented: Binding<Bool> = .constant(true)
     /// Full container height, to translate a downward drag into a fraction.
     var containerHeight: CGFloat = 1
+    /// Safe-area insets re-injected by the morph host (its surface ignores the
+    /// safe area so the glass can fill the screen), so the controls stay clear of
+    /// the Dynamic Island / home indicator.
+    var safeTop: CGFloat = 0
+    var safeBottom: CGFloat = 0
 
     private var engine: PlaybackEngine { model.engine }
 
     var body: some View {
-        NavigationStack(path: $path) {
-            playerContent
-                .toolbar(.hidden, for: .navigationBar)
-                .libraryDestinations()
-                .libraryNavigation($path)
-        }
+        // NO NavigationStack here: it paints an opaque system background that covers
+        // the Liquid-Glass backdrop behind the player at full open. The player root
+        // stays transparent; artist/album navigation opens as a full-screen cover.
+        playerContent
+            .fullScreenCover(item: $navRoute) { route in
+                PlayerNavCover(route: route)
+                    .environment(model)
+            }
     }
 
     private var playerContent: some View {
@@ -216,6 +567,10 @@ struct NowPlayingView: View {
                         Spacer()
                     }
                 }
+                // NOTE: do NOT re-inset by safeTop/safeBottom here — the enclosing
+                // NavigationStack already insets its content for the safe area, so
+                // adding it again double-padded the header (big gap above the
+                // grabber). The gradient still fills edge to edge via ignoresSafeArea.
             }
             .preferredColorScheme(.dark)
         }
@@ -231,19 +586,25 @@ struct NowPlayingView: View {
                     .environment(model)
                     .presentationDetents([.large, .medium])
                     .presentationDragIndicator(.visible)
+            } else {
+                ContentUnavailableView("No track playing", systemImage: "music.note")
+                    .presentationDetents([.medium])
+                    .presentationDragIndicator(.visible)
             }
         }
     }
 
     private var backgroundGradient: some View {
-        let key = engine.currentTrack?.albumID ?? "placeholder"
-        let palette = Artwork.palette(for: key)
-        return LinearGradient(
-            colors: [palette.top, palette.bottom, .black],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        .overlay(Color.black.opacity(0.18))
+        // A dimming scrim over the refracted backdrop. The glass stays see-through, but
+        // the app behind it is darkened enough that its content (esp. large text) recedes
+        // and the player's own controls read as the foreground — the raw refraction alone
+        // left the backdrop too legible/distracting. Fades in with the content opacity, so
+        // it only dims once the player is actually open. (Light mode: lighten instead.)
+        // A light wash that LIFTS the frosted backdrop's brightness (the heavy blur is
+        // the glass itself, untouched — so it stays very blurry, just brighter). Less at
+        // the bottom so the transport controls keep contrast against it.
+        LinearGradient(colors: [.white.opacity(0.2), .white.opacity(0.13), .white.opacity(0.05)],
+                       startPoint: .top, endPoint: .bottom)
     }
 
     /// Swipe down anywhere in the top area (artwork / title) to dismiss.
@@ -261,7 +622,7 @@ struct NowPlayingView: View {
                 let f = 1 - (max(value.translation.height, 0) / max(containerHeight, 1))
                 let flungDown = value.predictedEndTranslation.height > 280
                 let stayOpen = f > 0.72 && !flungDown
-                withAnimation(.interpolatingSpring(stiffness: 320, damping: 30)) {
+                withAnimation(PlayerMorph.settle) {
                     presented.wrappedValue = stayOpen
                     dragFraction.wrappedValue = nil
                 }
@@ -269,7 +630,7 @@ struct NowPlayingView: View {
     }
 
     private func collapse() {
-        withAnimation(.interpolatingSpring(stiffness: 320, damping: 30)) {
+        withAnimation(PlayerMorph.settle) {
             presented.wrappedValue = false
             dragFraction.wrappedValue = nil
         }
@@ -309,7 +670,7 @@ struct NowPlayingView: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
                 Button {
-                    path.append(.artist(track.artistID))
+                    navRoute = .artist(track.artistID)
                 } label: {
                     Text(track.artist)
                         .font(.title3)
@@ -351,7 +712,8 @@ struct NowPlayingView: View {
                 Button("Download", systemImage: "arrow.down.circle") { model.download(track.id) }
             }
         }
-        Button("Go to Album", systemImage: "square.stack") { path.append(.album(track.albumID)) }
+        Button("Go to Album", systemImage: "square.stack") { navRoute = .album(track.albumID) }
+        Button("Edit Info", systemImage: "pencil") { model.metadataEditTarget = .track(track.id) }
         Menu("Add to Playlist", systemImage: "text.badge.plus") {
             Button("New Playlist", systemImage: "plus") {
                 model.createPlaylist(name: "New Playlist", trackIDs: [track.id])
@@ -391,13 +753,14 @@ struct NowPlayingView: View {
             HStack(spacing: 6) {
                 Image(systemName: track.isLossless ? "seal.fill" : "waveform")
                     .font(.caption2)
-                Text(track.formatLabel)
+                Text(engine.currentFormatDetail ?? track.formatLabel)
                     .font(.caption2.weight(.semibold))
                 if model.cacheState(track.id) == .cached || model.cacheState(track.id) == .prefetched {
                     Text("· Downloaded").font(.caption2)
                 }
             }
             .foregroundStyle(.white.opacity(0.6))
+            .accessibilityElement(children: .combine)
         }
     }
 
@@ -472,7 +835,7 @@ struct NowPlayingQueueView: View {
                 Section {
                     let upcoming = Array(engine.queue.enumerated())
                         .filter { $0.offset > engine.currentIndex }
-                    ForEach(upcoming, id: \.element.id) { _, track in
+                    ForEach(upcoming, id: \.offset) { _, track in
                         QueueRow(track: track, isCurrent: false)
                     }
                     .onDelete { offsets in

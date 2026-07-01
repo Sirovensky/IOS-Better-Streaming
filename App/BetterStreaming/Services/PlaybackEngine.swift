@@ -42,11 +42,36 @@ final class PlaybackEngine {
     private(set) var currentArtwork: UIImage?
     /// Set when a resolve/playback attempt fails, for surfacing in the UI.
     private(set) var lastErrorMessage: String?
+    /// Codec / bit-depth / sample-rate of the playing item, read from the decoded
+    /// asset (e.g. "FLAC · 24-bit · 96 kHz"). Falls back to the file-extension
+    /// label until the asset resolves; nil before anything plays.
+    private(set) var currentFormatDetail: String?
 
     var currentTrack: Track? {
         guard queue.indices.contains(currentIndex) else { return nil }
         return queue[currentIndex]
     }
+
+#if DEBUG
+    /// Seeds a mock now-playing track WITHOUT real playback, so the player UI can
+    /// be rendered in the Simulator for visual iteration (no SMB needed). Triggered
+    /// by the `-uiPreview` launch argument; never reached in a release build.
+    func debugSeedNowPlaying(_ track: Track, elapsed: Double, restorable: Bool = false) {
+        queue = [track]
+        unshuffledQueue = [track]
+        currentIndex = 0
+        duration = track.durationSeconds
+        self.elapsed = elapsed
+        isPlaying = false
+        isBuffering = false
+        // `restorable` mimics a restored-but-not-resumed session so the Home
+        // "Continue where you left off" hero (gated on hasRestorableSession) shows.
+        needsInitialLoad = restorable
+        // Mock the asset-resolved format detail so the player's format chip can be
+        // screenshotted (no real AVAsset to read in the sim).
+        currentFormatDetail = "FLAC · 24-bit · 96 kHz"
+    }
+#endif
 
     var hasNext: Bool {
         // repeat-one doesn't advance, so it shouldn't enable Next at the last
@@ -110,7 +135,12 @@ final class PlaybackEngine {
     /// session but NO player item has been resolved yet (so launch does no
     /// network I/O and the user lands paused). The first resume/seek lazily
     /// resolves and seeks to `elapsed`. Cleared the moment an item is loaded.
-    private var needsInitialLoad = false
+    private(set) var needsInitialLoad = false
+
+    /// True when a previous session was restored (queue + position) but has NOT been
+    /// resumed yet. This is the one state where the Home "Continue where you left off"
+    /// hero is shown; its tap calls `resume()`, which seeks to the saved `elapsed`.
+    var hasRestorableSession: Bool { needsInitialLoad && currentTrack != nil }
 
     /// Fires on the periodic time observer (~every 0.5s) so an owner can persist
     /// the current position. Throttle on the receiving side.
@@ -223,7 +253,15 @@ final class PlaybackEngine {
     func playNext(_ track: Track) {
         let insertAt = min(currentIndex + 1, queue.count)
         queue.insert(track, at: insertAt)
-        unshuffledQueue.append(track)
+        // Insert right after the current track in the shuffle-source too (match by
+        // id), so "play next" survives a later shuffle-off instead of jumping to the
+        // end.
+        if let current = currentTrack,
+           let idx = unshuffledQueue.firstIndex(where: { $0.id == current.id }) {
+            unshuffledQueue.insert(track, at: min(idx + 1, unshuffledQueue.count))
+        } else {
+            unshuffledQueue.append(track)
+        }
         clearPreload()   // the immediate-next track changed
         if queue.count == 1 { startCurrentItem(autoPlay: true) }
         else { preloadNextIfGapless() }
@@ -341,6 +379,9 @@ final class PlaybackEngine {
         updateNowPlayingInfo()
         if isSeeking {
             pendingSeekSeconds = clamped   // coalesce rapid scrubs to the latest
+            #if DEBUG
+            print("BETTERSTREAMING_SEEK coalesce pending=\(clamped) elapsed=\(elapsed) (in-flight)")
+            #endif
             return
         }
         performSeek(to: clamped)
@@ -348,6 +389,9 @@ final class PlaybackEngine {
 
     private func performSeek(to seconds: Double) {
         isSeeking = true
+        #if DEBUG
+        print("BETTERSTREAMING_SEEK perform to=\(seconds) gen=\(resolveGeneration) elapsed=\(elapsed) dur=\(duration)")
+        #endif
         cancelPreroll()   // a fresh seek supersedes any in-progress pre-roll
         // Scrubbing to an un-cached position must fetch from the source; show
         // activity immediately instead of a frozen or "playing-but-silent" UI.
@@ -361,6 +405,9 @@ final class PlaybackEngine {
         player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] finished in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                #if DEBUG
+                print("BETTERSTREAMING_SEEK done to=\(seconds) finished=\(finished) gen=\(generation) curGen=\(self.resolveGeneration) pending=\(self.pendingSeekSeconds ?? -1) playerTime=\(self.player.currentTime().seconds) ctrl=\(self.player.timeControlStatus.rawValue)")
+                #endif
                 // The track changed mid-seek: abandon this stale completion so it
                 // can't seek the new item (the new item resets seek state itself).
                 guard generation == self.resolveGeneration else { return }
@@ -463,6 +510,14 @@ final class PlaybackEngine {
 
     // MARK: Gapless lookahead
 
+    /// React to the gapless setting toggling. Drop any staged preload (so turning it
+    /// OFF doesn't fire one more gapless advance) and re-evaluate (preloadNextIfGapless
+    /// is a no-op when gapless is off, so this both stages and clears correctly).
+    func gaplessSettingChanged() {
+        clearPreload()
+        preloadNextIfGapless()
+    }
+
     /// Remove the preloaded next item from the queue and forget it. Called on any
     /// change that invalidates "what plays next" (load/skip/reorder/remove/shuffle).
     private func clearPreload() {
@@ -493,6 +548,12 @@ final class PlaybackEngine {
     /// (so it adds NO streaming contention with the live track). Builds the item,
     /// sets its EQ + buffer, and enqueues it after the current item.
     private func preloadNextIfGapless() {
+        // Crossfade and gapless are mutually exclusive on a single player: the
+        // envelope fades the current track to 0 over the last cf seconds, then an
+        // AVQueuePlayer hard-advance would start the preload at envelope 0 → a near-
+        // silent gap. Let crossfade (the explicit overlap feature) win when both are
+        // on; gapless resumes once crossfade is back to 0.
+        guard enhancements.crossfadeSeconds <= 0.1 else { return }
         guard enhancements.gaplessEnabled, isPlaying, repeatMode != .one, !stopAtTrackEnd,
               let nextIndex = gaplessNextIndex, queue.indices.contains(nextIndex),
               let current = currentPlayerItem, player.currentItem === current else { return }
@@ -528,6 +589,8 @@ final class PlaybackEngine {
     private func gaplessAdvanced(to item: AVPlayerItem, index: Int) {
         cancelStallWatchdog()
         cancelPreroll()
+        endSwitchFade()   // a gapless advance supersedes any in-flight switch-fade,
+                          // else isSwitchFading stays set and mutes the rest of the queue
         preloadedNextItem = nil
         preloadedNextIndex = nil
         currentPlayerItem = item
@@ -569,6 +632,7 @@ final class PlaybackEngine {
         #endif
         cancelStallWatchdog()
         cancelPreroll()
+        fadeOutForSwitch()         // fade the old song while the new one loads
         needsInitialLoad = false   // we're resolving an item now
         isSeeking = false
         pendingSeekSeconds = nil
@@ -598,6 +662,7 @@ final class PlaybackEngine {
             }
             guard generation == self.resolveGeneration else { return }
             guard let item else {
+                self.endSwitchFade()   // no new item — don't strand the fade at silence
                 self.isBuffering = false
                 self.lastErrorMessage = "“\(track.title)” isn’t available offline."
                 #if DEBUG
@@ -627,6 +692,15 @@ final class PlaybackEngine {
     /// envelope to get the actual `player.volume`. 1.0 by default.
     private var baseVolume: Float = 1.0
 
+    /// A short volume ramp on the OUTGOING item when switching to a track that
+    /// still has to load (uncached/remote). Without it the old song plays on at
+    /// full volume until the new item finishes buffering, which feels sluggish.
+    /// `isSwitchFading` makes `applyVolume()` yield so the crossfade tick can't
+    /// fight the ramp; the new item's load cancels the ramp and restores volume.
+    private var switchFadeTask: Task<Void, Never>?
+    private var isSwitchFading = false
+    private static let switchFadeSeconds: Double = 1.0
+
     private func applyEnhancements(to item: AVPlayerItem, generation: Int) {
         configureItemAudio(item)                                   // per-item EQ
         applyReplayGainVolume(for: item, generation: generation)   // player-wide volume
@@ -654,7 +728,7 @@ final class PlaybackEngine {
             if !e.eqEnabled { db += e.preampDB }   // preamp via volume only when EQ isn't carrying it
             if e.replayGainEnabled,
                let metadata = try? await assetToRead.load(.metadata),
-               let rg = await AudioEnhancements.replayGainDB(from: metadata) {
+               let rg = await AudioEnhancements.replayGainDB(from: metadata, preferAlbum: e.replayGainAlbumMode) {
                 db += rg
             }
             guard generation == self.resolveGeneration else { return }
@@ -668,6 +742,9 @@ final class PlaybackEngine {
     /// of the track (0 = off → always 1). A single-player fade, not sample-gapless
     /// (true gapless would need AVQueuePlayer); contained and off by default.
     private func applyVolume() {
+        // A switch-fade owns `player.volume` while it runs; don't let the crossfade
+        // tick reset it back to full and undo the fade.
+        guard !isSwitchFading else { return }
         let cf = enhancements.crossfadeSeconds
         var envelope: Float = 1
         if cf > 0.1, duration > cf * 2 {
@@ -684,6 +761,57 @@ final class PlaybackEngine {
         player.volume = baseVolume * envelope
     }
 
+    /// Ramp the currently-playing item's volume to silence over `switchFadeSeconds`
+    /// so a switch to a track that has to buffer doesn't keep blaring the old song
+    /// until the new one loads. No-op when nothing is audibly playing (first track,
+    /// paused, already silent). The new item's `loadPlayerItem` ends the fade and
+    /// restores volume, so a fast (cached) load barely dips.
+    private func fadeOutForSwitch() {
+        switchFadeTask?.cancel()
+        guard isPlaying, player.currentItem != nil else { return }
+        let start = player.volume
+        guard start > 0.01 else { return }
+        isSwitchFading = true
+        switchFadeTask = Task { @MainActor [weak self] in
+            let steps = 24
+            let stepNanos = UInt64(Self.switchFadeSeconds / Double(steps) * 1_000_000_000)
+            for i in 1...steps {
+                try? await Task.sleep(nanoseconds: stepNanos)
+                guard let self, !Task.isCancelled else { return }
+                self.player.volume = start * Float(1 - Double(i) / Double(steps))
+            }
+        }
+    }
+
+    /// End any in-flight switch-fade and hand `player.volume` back to `applyVolume`.
+    private func endSwitchFade() {
+        switchFadeTask?.cancel()
+        switchFadeTask = nil
+        isSwitchFading = false
+    }
+
+    /// Build a "CODEC · 24-bit · 96 kHz" label from a decoded asset's audio format.
+    /// Bit depth is omitted for compressed formats (mBitsPerChannel == 0, e.g. AAC/
+    /// MP3). Returns the codec alone if the asset format can't be read (e.g. a
+    /// still-loading remote stream), so the chip always shows something. Stays on
+    /// the MainActor (the async loaders hop off internally) so the non-Sendable
+    /// AVAsset never crosses an actor boundary.
+    static func formatDetail(from asset: AVAsset, codec: String?) async -> String? {
+        var parts: [String] = []
+        if let codec, !codec.isEmpty { parts.append(codec) }
+        if let track = try? await asset.loadTracks(withMediaType: .audio).first,
+           let desc = try? await track.load(.formatDescriptions).first,
+           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
+            if asbd.mBitsPerChannel > 0 { parts.append("\(asbd.mBitsPerChannel)-bit") }
+            if asbd.mSampleRate > 0 {
+                let khz = asbd.mSampleRate / 1000
+                let label = khz == khz.rounded() ? String(format: "%.0f kHz", khz) : String(format: "%.1f kHz", khz)
+                parts.append(label)
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     /// Re-apply audio enhancements (EQ mix, ReplayGain/preamp, crossfade volume)
     /// to the CURRENT item live, e.g. when the user changes them in Settings while
     /// a track is playing. Setting `audioMix` on an already-prepared item doesn't
@@ -691,6 +819,9 @@ final class PlaybackEngine {
     /// seek-in-place (instant for a local/cached file).
     func enhancementsDidChange() {
         applyVolume()
+        // Refresh the already-preloaded next item's EQ mix too, else it plays its
+        // whole duration with the stale mix (gaplessAdvanced skips configureItemAudio).
+        if let next = preloadedNextItem { configureItemAudio(next) }
         guard let item = currentPlayerItem else { return }
         let hadMix = item.audioMix != nil
         configureItemAudio(item)
@@ -720,6 +851,17 @@ final class PlaybackEngine {
                     }
                 }
             }
+        }
+
+        // Codec/bit-depth/sample-rate for the player's format chip. Seed with the
+        // file-extension label immediately, then refine from the decoded asset.
+        currentFormatDetail = currentTrack?.formatLabel
+        let formatAsset = item.asset
+        let codec = currentTrack?.fileExtension.uppercased()
+        Task { @MainActor in
+            guard let detail = await Self.formatDetail(from: formatAsset, codec: codec),
+                  generation == self.resolveGeneration else { return }
+            self.currentFormatDetail = detail
         }
 
         statusObservation?.invalidate()
@@ -780,6 +922,7 @@ final class PlaybackEngine {
     }
 
     private func loadPlayerItem(item: AVPlayerItem, autoPlay: Bool, generation: Int) {
+        endSwitchFade()   // the new item is ready — stop fading, restore volume
         attachItemObservers(item, generation: generation)
         item.preferredForwardBufferDuration = Self.preferredForwardBufferSeconds
         applyEnhancements(to: item, generation: generation)

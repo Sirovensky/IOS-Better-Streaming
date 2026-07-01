@@ -241,11 +241,18 @@ enum MetadataGrouping {
         return comps
     }
 
-    /// Stable album identity: album folder + album title. Folder-keyed so feat.-
-    /// credited and various-artist albums in one folder stay a single album; the
-    /// title keeps two distinct albums in the same folder apart.
+    /// Stable album identity, keyed on the album FOLDER so one recording stays a
+    /// single album. A track in its own album subfolder (≥2 path components, the
+    /// usual Artist/Album or Genre/Recording layout) is grouped by folder ALONE —
+    /// so a classical/opera recording whose per-track album tags vary by act or
+    /// singer doesn't fragment into one album per singer, while a *different*
+    /// recording in a *different* folder stays separate. Only loose files sitting
+    /// directly at the scan root (≤1 component) fall back to folder+title, so a
+    /// flat dump still splits into albums by tag instead of merging into one.
     static func albumID(path: String, album: String) -> String {
-        let folder = albumFolderComponents(forPath: path).map(normalizeKey).joined(separator: "/")
+        let components = albumFolderComponents(forPath: path).map(normalizeKey)
+        let folder = components.joined(separator: "/")
+        if components.count >= 2 { return "albumfolder::\(folder)" }
         let albumKey = normalizeKey(album)
         return folder.isEmpty ? "album::\(albumKey)" : "\(folder)::\(albumKey)"
     }

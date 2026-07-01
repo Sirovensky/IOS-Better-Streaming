@@ -12,6 +12,10 @@ struct HomeView: View {
                         heroSection
                         if !model.recentlyPlayed.isEmpty { recentlyPlayedRail }
                         heavyRotationRail
+                        topThisMonthRail
+                        buriedTreasureRail
+                        onThisDayRail
+                        haveNotHeardRail
                         if !model.playlists.isEmpty { madeForYouRail }
                         statsSection
                         sourceThread
@@ -33,6 +37,15 @@ struct HomeView: View {
             }
             .libraryDestinations()
             .libraryNavigation($path)
+            .task {
+                #if DEBUG
+                // Sim deep-link: `-settings` pushes Settings (with ReplayGain on so
+                // the album-gain row is visible) for screenshotting. No-op otherwise.
+                guard CommandLine.arguments.contains("-settings") else { return }
+                model.engine.enhancements.replayGainEnabled = true
+                if path.isEmpty { path = [.settings] }
+                #endif
+            }
         }
     }
 
@@ -80,11 +93,12 @@ struct HomeView: View {
 
     @ViewBuilder
     private var heroSection: some View {
-        if let track = model.engine.currentTrack ?? model.recentlyPlayed.first ?? model.audioTracks.first {
+        // Only the genuine "continue" state: a session was restored and not yet resumed.
+        // Once it is resumed (or anything else starts playing) the mini-player is the
+        // now-playing surface, so this big card would just duplicate it. See QUEUE/IDEAS.
+        if model.engine.hasRestorableSession, let track = model.engine.currentTrack {
             Button {
-                if model.engine.currentTrack == nil {
-                    model.play(track, in: model.tracks(forAlbum: track.albumID))
-                }
+                model.engine.resume()            // resolves the item + seeks to the saved position
                 model.isNowPlayingPresented = true
             } label: {
                 HStack(spacing: 16) {
@@ -92,7 +106,7 @@ struct HomeView: View {
                         .frame(width: 96, height: 96)
                         .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(model.engine.isPlaying ? "NOW PLAYING" : "PICK UP WHERE YOU LEFT OFF")
+                        Text("CONTINUE WHERE YOU LEFT OFF")
                             .font(.caption2.weight(.bold))
                             .tracking(1.1)
                             .foregroundStyle(DesignTokens.brandPrimary)
@@ -104,9 +118,14 @@ struct HomeView: View {
                             .font(.subheadline)
                             .foregroundStyle(DesignTokens.textSecondary)
                             .lineLimit(1)
+                        if model.engine.elapsed > 1 {
+                            Text("Resume at \(Self.timeLabel(model.engine.elapsed))")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(DesignTokens.textSecondary)
+                        }
                     }
                     Spacer(minLength: 8)
-                    Image(systemName: model.engine.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                    Image(systemName: "play.circle.fill")
                         .font(.system(size: 44))
                         .foregroundStyle(DesignTokens.brandPrimary)
                 }
@@ -114,7 +133,17 @@ struct HomeView: View {
                 .surfaceCard(fill: DesignTokens.surfaceCard)
             }
             .buttonStyle(.plain)
+            // One coherent VoiceOver action instead of five fragments.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Continue \(track.title) by \(track.artist)")
+            .accessibilityHint(model.engine.elapsed > 1 ? "Resumes at \(Self.timeLabel(model.engine.elapsed))" : "Resumes playback")
+            .accessibilityAddTraits(.isButton)
         }
+    }
+
+    private static func timeLabel(_ seconds: Double) -> String {
+        let t = Int(seconds.rounded())
+        return String(format: "%d:%02d", t / 60, t % 60)
     }
 
     // MARK: Recently played
@@ -176,6 +205,74 @@ struct HomeView: View {
             .sorted { $0.1 > $1.1 }
             .prefix(10)
             .map(\.0)
+    }
+
+    // MARK: Rediscovery shelves
+
+    @ViewBuilder
+    private var topThisMonthRail: some View {
+        trackRail(title: "Top This Month", detail: "Your most-played this month", tracks: model.topThisMonth)
+    }
+
+    @ViewBuilder
+    private var buriedTreasureRail: some View {
+        trackRail(title: "Buried Treasure", detail: "Loved once, gone quiet", tracks: model.buriedTreasure)
+    }
+
+    @ViewBuilder
+    private var haveNotHeardRail: some View {
+        trackRail(title: "Haven't Heard Yet", detail: "In your library, never played", tracks: model.haveNotHeard)
+    }
+
+    @ViewBuilder
+    private func trackRail(title: String, detail: String, tracks: [Track]) -> some View {
+        if !tracks.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                SectionHeader(title: title, detail: detail)
+                ScrollView(.horizontal) {
+                    HStack(spacing: 14) {
+                        ForEach(tracks) { track in
+                            SquareArtTile(
+                                artworkKey: track.albumID,
+                                url: track.artworkURL,
+                                title: track.title,
+                                subtitle: track.artist,
+                                size: 140
+                            ) {
+                                model.play(track, in: tracks)
+                            }
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var onThisDayRail: some View {
+        let albums = model.onThisDayAlbums
+        if !albums.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                SectionHeader(title: "On This Day", detail: "Added to your library years ago")
+                ScrollView(.horizontal) {
+                    HStack(spacing: 14) {
+                        ForEach(albums) { album in
+                            SquareArtTile(
+                                artworkKey: album.id,
+                                url: album.artworkURL,
+                                title: album.title,
+                                subtitle: album.artist,
+                                size: 140
+                            ) {
+                                path.append(.album(album.id))
+                            }
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
     }
 
     // MARK: Made for you
@@ -250,6 +347,8 @@ struct HomeView: View {
         }
         .padding(12)
         .surfaceCard(fill: DesignTokens.surfaceCard)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(value) \(label)")
     }
 
     /// "12 hr", "1.2k hr", "45 min" — friendly, compact.
