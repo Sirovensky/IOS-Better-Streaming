@@ -10,7 +10,18 @@ struct RadioView: View {
     }
 
     private var artistStations: [Artist] {
-        Array(model.artists.filter { $0.trackCount > 1 }.prefix(12))
+        let eligible = model.artists.filter { $0.trackCount > 1 }
+        // Rank by summed play count across each artist's tracks so the most-listened
+        // artists lead; fall back to the alphabetical order when there's no history.
+        let ranked = eligible.map { artist -> (artist: Artist, plays: Int) in
+            let plays = model.tracks(forArtist: artist.id)
+                .reduce(0) { $0 + model.autoCache.stat(for: $1.id).playCount }
+            return (artist, plays)
+        }
+        guard ranked.contains(where: { $0.plays > 0 }) else {
+            return Array(eligible.prefix(12))
+        }
+        return ranked.sorted { $0.plays > $1.plays }.prefix(12).map(\.artist)
     }
 
     private var genreStations: [GenreStation] {

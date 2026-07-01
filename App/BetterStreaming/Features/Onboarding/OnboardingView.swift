@@ -1,6 +1,7 @@
 import BetterStreamingDomain
 import BetterStreamingSources
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// First-run setup: welcome → connect a source → key settings. Matches the docs'
@@ -13,6 +14,7 @@ struct OnboardingView: View {
     @State private var step = 0
     @State private var proto: SourceProtocol = .smb
     @State private var host = ""
+    @State private var port = ""
     @State private var share = ""
     @State private var username = ""
     @State private var password = ""
@@ -49,7 +51,7 @@ struct OnboardingView: View {
             RemoteFolderPicker(
                 proto: proto,
                 host: host.trimmed,
-                port: proto.defaultPort,
+                port: Int(port.trimmed) ?? proto.defaultPort,
                 share: share.trimmed,
                 username: username.trimmed.isEmpty ? nil : username.trimmed,
                 domain: domain.trimmed.isEmpty ? nil : domain.trimmed,
@@ -135,6 +137,7 @@ struct OnboardingView: View {
 
             VStack(spacing: 12) {
                 field("Host or IP", text: $host, icon: "network")
+                field("Port (default \(proto.defaultPort))", text: $port, icon: "number", keyboard: .numberPad)
                 field(proto.pathFieldLabel, text: $share, icon: "folder")
                 field("Username (optional)", text: $username, icon: "person")
                 secureField("Password (optional)", text: $password)
@@ -144,6 +147,11 @@ struct OnboardingView: View {
             }
             .padding(14)
             .surfaceCard(fill: DesignTokens.surfaceCard)
+
+            if !portValid {
+                Text("Enter a port between 1 and 65535.")
+                    .font(.caption).foregroundStyle(DesignTokens.error)
+            }
 
             if proto.hasConnectionTest {
                 switch testState {
@@ -160,7 +168,7 @@ struct OnboardingView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(SecondaryActionButtonStyle())
-                .disabled(isTesting || host.trimmed.isEmpty || share.trimmed.isEmpty)
+                .disabled(isTesting || host.trimmed.isEmpty || share.trimmed.isEmpty || !portValid)
             } else {
                 Text("\(proto.rawValue) connects when you add it; your library appears after the first scan.")
                     .font(.caption).foregroundStyle(DesignTokens.textSecondary)
@@ -240,7 +248,7 @@ struct OnboardingView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(PrimaryActionButtonStyle())
-            .disabled(step == 1 && (host.trimmed.isEmpty || share.trimmed.isEmpty))
+            .disabled(step == 1 && (host.trimmed.isEmpty || share.trimmed.isEmpty || !portValid))
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
@@ -264,7 +272,7 @@ struct OnboardingView: View {
                 name: share.trimmed,
                 proto: proto,
                 host: host.trimmed,
-                port: proto.defaultPort,
+                port: Int(port.trimmed) ?? proto.defaultPort,
                 share: share.trimmed,
                 username: username.trimmed.isEmpty ? nil : username.trimmed,
                 password: password.isEmpty ? nil : password,
@@ -286,7 +294,7 @@ struct OnboardingView: View {
             let draft = SourceDraft(
                 protocolKind: .smb,
                 displayName: trimmedShare,
-                endpoint: SourceEndpoint(hostDisplayName: trimmedHost, shareName: trimmedShare),
+                endpoint: SourceEndpoint(hostDisplayName: trimmedHost, port: Int(port.trimmed), shareName: trimmedShare),
                 username: username.trimmed.isEmpty ? nil : username.trimmed,
                 domain: domain.trimmed.isEmpty ? nil : domain.trimmed
             )
@@ -312,16 +320,25 @@ struct OnboardingView: View {
         }
     }
 
-    private func field(_ title: String, text: Binding<String>, icon: String) -> some View {
+    private func field(_ title: String, text: Binding<String>, icon: String, keyboard: UIKeyboardType = .default) -> some View {
         HStack(spacing: 10) {
             Image(systemName: icon).foregroundStyle(DesignTokens.textTertiary).frame(width: 24)
             TextField(title, text: text)
+                .keyboardType(keyboard)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .foregroundStyle(DesignTokens.textPrimary)
         }
         .padding(12)
         .background(DesignTokens.surfaceRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    /// Port must be blank (→ protocol default) or a valid 1...65535.
+    private var portValid: Bool {
+        let t = port.trimmed
+        if t.isEmpty { return true }
+        guard let n = Int(t) else { return false }
+        return (1...65535).contains(n)
     }
 
     private func secureField(_ title: String, text: Binding<String>) -> some View {

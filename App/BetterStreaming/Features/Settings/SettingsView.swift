@@ -7,6 +7,7 @@ struct SettingsView: View {
     /// Debounces live re-apply of audio enhancements while the user drags sliders
     /// (one re-prep after they settle, not one per step).
     @State private var enhApplyTask: Task<Void, Never>?
+    @State private var showResetHistoryConfirm = false
 
     private func scheduleEnhancementsApply() {
         enhApplyTask?.cancel()
@@ -21,6 +22,7 @@ struct SettingsView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 autoCacheSection
+                offlineModeSection
                 audioSection
                 artworkSection
                 librarySection
@@ -88,10 +90,17 @@ struct SettingsView: View {
                 Text(autoCache.lastReconcileSummary)
                     .font(.caption).foregroundStyle(DesignTokens.textTertiary)
                 Spacer()
-                Button("Clear history", role: .destructive) { autoCache.resetStats() }
+                Button("Reset play history", role: .destructive) { showResetHistoryConfirm = true }
                     .font(.caption.weight(.semibold))
             }
             .padding(.horizontal, 4)
+        }
+        .confirmationDialog("Reset play history?", isPresented: $showResetHistoryConfirm,
+                            titleVisibility: .visible) {
+            Button("Reset play history", role: .destructive) { autoCache.resetStats() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This clears all play counts. Heavy Rotation, Top This Month, Buried Treasure, and auto-cache scoring will start over.")
         }
     }
 
@@ -347,6 +356,44 @@ struct SettingsView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12)
+            .surfaceCard(fill: DesignTokens.surfaceCard)
+
+            if let version = Self.appVersion {
+                HStack {
+                    Text("Version").font(.caption).foregroundStyle(DesignTokens.textSecondary)
+                    Spacer()
+                    Text(version).font(.caption.monospacedDigit()).foregroundStyle(DesignTokens.textTertiary)
+                }
+                .padding(.horizontal, 4)
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    /// "1.2 (34)" from the bundle, or nil if unavailable.
+    private static var appVersion: String? {
+        let info = Bundle.main.infoDictionary
+        guard let short = info?["CFBundleShortVersionString"] as? String else { return nil }
+        if let build = info?["CFBundleVersion"] as? String { return "\(short) (\(build))" }
+        return short
+    }
+
+    // MARK: Offline Mode (mirror of the Library → Offline toggle)
+
+    private var offlineModeSection: some View {
+        @Bindable var bindableModel = model
+
+        return VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "Offline")
+            VStack(spacing: 0) {
+                Toggle(isOn: $bindableModel.offlineMode) {
+                    settingsLabel("Offline Mode",
+                                  "Only play downloaded or cached songs. Remote-only songs are dimmed.",
+                                  icon: model.offlineMode ? "wifi.slash" : "wifi")
+                }
+                .tint(DesignTokens.connectionTeal)
+                .padding(12)
+            }
             .surfaceCard(fill: DesignTokens.surfaceCard)
         }
     }

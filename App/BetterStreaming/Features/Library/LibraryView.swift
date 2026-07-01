@@ -27,6 +27,8 @@ struct LibraryView: View {
         VStack(spacing: 0) {
             categoryRow("Playlists", icon: "music.note.list", route: .allPlaylists)
             divider
+            categoryRow("Favourites", icon: "star", route: .favorites)
+            divider
             categoryRow("Artists", icon: "music.mic", route: .allArtists)
             divider
             categoryRow("Albums", icon: "square.stack", route: .allAlbums)

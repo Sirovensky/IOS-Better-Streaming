@@ -15,16 +15,13 @@ struct OfflineLibraryView: View {
     @State private var filter: Filter = .all
     @State private var sort: SongSort = .title
 
-    private var downloaded: [Track] { model.tracks.filter { $0.cacheState == .cached } }
-    private var autoCached: [Track] { model.tracks.filter { $0.cacheState == .prefetched } }
-
     /// One unified, sorted list of everything available offline. The per-row
     /// availability glyph (download vs auto-cache) distinguishes them, so there's
     /// no need for two stacked sections.
-    private var offlineTracks: [Track] {
+    private func offlineTracks(downloaded: [Track], autoCached: [Track]) -> [Track] {
         let base: [Track]
         switch filter {
-        case .all: base = model.tracks.filter { $0.cacheState == .cached || $0.cacheState == .prefetched }
+        case .all: base = downloaded + autoCached
         case .downloaded: base = downloaded
         case .autoCached: base = autoCached
         }
@@ -43,7 +40,13 @@ struct OfflineLibraryView: View {
     }
 
     var body: some View {
-        ScrollView {
+        // Compute the offline buckets ONCE per body pass. They fed several computed
+        // properties before, so the full filter+sort re-ran on every render — a
+        // continuous churn while downloads were in flight.
+        let downloaded = model.tracks.filter { $0.cacheState == .cached }
+        let autoCached = model.tracks.filter { $0.cacheState == .prefetched }
+        let list = offlineTracks(downloaded: downloaded, autoCached: autoCached)
+        return ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 offlineModeCard
                 storageCard
@@ -54,7 +57,7 @@ struct OfflineLibraryView: View {
                         systemImage: "arrow.down.circle"
                     )
                 } else {
-                    librarySection
+                    librarySection(downloaded: downloaded, autoCached: autoCached, list: list)
                 }
             }
             .padding(DesignTokens.phonePadding)
@@ -77,7 +80,7 @@ struct OfflineLibraryView: View {
     }
 
     @ViewBuilder
-    private var librarySection: some View {
+    private func librarySection(downloaded: [Track], autoCached: [Track], list: [Track]) -> some View {
         // Only offer the filter when both kinds exist — otherwise it's noise.
         if !downloaded.isEmpty && !autoCached.isEmpty {
             Picker("Show", selection: $filter) {
@@ -85,7 +88,6 @@ struct OfflineLibraryView: View {
             }
             .pickerStyle(.segmented)
         }
-        let list = offlineTracks
         VStack(alignment: .leading, spacing: 2) {
             SectionHeader(title: "Available Offline", detail: "\(list.count) songs")
             ForEach(list) { track in

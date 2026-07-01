@@ -4,6 +4,7 @@ import SwiftUI
 
 struct TrackRowView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.libraryNavigate) private var libraryNavigate
     var track: Track
     var context: [Track]
     /// Show the leading artwork tile (off for tight album track lists).
@@ -21,9 +22,15 @@ struct TrackRowView: View {
     var body: some View {
         Button {
             #if DEBUG
-            print("BETTERSTREAMING_UI track_tap title=\(track.title) ext=\(track.fileExtension) source=\(track.sourceID)")
+            AppLog.ui.debug("BETTERSTREAMING_UI track_tap title=\(track.title) ext=\(track.fileExtension, privacy: .public) source=\(track.sourceID, privacy: .public)")
             #endif
-            model.play(track, in: context)
+            // Tapping the row that's already playing opens the player (Apple Music
+            // behaviour) instead of restarting the track.
+            if isCurrent {
+                model.isNowPlayingPresented = true
+            } else {
+                model.play(track, in: context)
+            }
         } label: {
             HStack(spacing: 12) {
                 if let index {
@@ -90,12 +97,19 @@ struct TrackRowView: View {
             Button(model.isFavorite(track.id) ? "Remove Favourite" : "Favourite") {
                 model.toggleFavorite(track.id)
             }
+            if let first = model.playlists.first {
+                Button("Add to \(first.name)") { model.addToPlaylist(first.id, trackIDs: [track.id]) }
+            }
             if model.canManageDownload(track.id) {
                 if model.cacheState(track.id) == .cached {
                     Button("Remove Download") { model.removeDownload(track.id) }
                 } else {
                     Button("Download") { model.download(track.id) }
                 }
+            }
+            if let libraryNavigate {
+                Button("Go to Album") { libraryNavigate(.album(track.albumID)) }
+                Button("Go to Artist") { libraryNavigate(.artist(track.artistID)) }
             }
         }
     }
@@ -108,7 +122,7 @@ struct TrackRowView: View {
             ProgressView().controlSize(.mini).tint(DesignTokens.connectionTeal)
         case .queued:
             Image(systemName: "clock").font(.caption).foregroundStyle(DesignTokens.connectionTeal)
-        case .cached, .prefetched, .missingSource, .failed:
+        case .cached, .prefetched, .missingSource, .failed, .stale:
             let state = track.cacheState
             Image(systemName: state.systemImage).font(.caption).foregroundStyle(state.tint)
         default:
@@ -128,6 +142,15 @@ struct TrackRowView: View {
                systemImage: model.isFavorite(track.id) ? "star.slash" : "star") {
             model.toggleFavorite(track.id)
         }
+        Menu("Add to Playlist", systemImage: "text.badge.plus") {
+            Button("New Playlist", systemImage: "plus") {
+                model.createPlaylist(name: "New Playlist", trackIDs: [track.id])
+            }
+            if !model.playlists.isEmpty { Divider() }
+            ForEach(model.playlists) { playlist in
+                Button(playlist.name) { model.addToPlaylist(playlist.id, trackIDs: [track.id]) }
+            }
+        }
         if model.canManageDownload(track.id) {
             if model.cacheState(track.id) == .cached {
                 Button("Remove Download", systemImage: "trash", role: .destructive) {
@@ -138,6 +161,13 @@ struct TrackRowView: View {
                     model.download(track.id)
                 }
             }
+        }
+        // Navigation only where a host stack exists (nil inside the player) — a
+        // NavigationLink can't live in a detached menu platter, so we push via the env.
+        if let libraryNavigate {
+            Divider()
+            Button("Go to Album", systemImage: "square.stack") { libraryNavigate(.album(track.albumID)) }
+            Button("Go to Artist", systemImage: "music.mic") { libraryNavigate(.artist(track.artistID)) }
         }
     }
 }
@@ -273,6 +303,10 @@ struct AlphabetIndexBar: View {
     let letters: [String]
     let onSelect: (String) -> Void
 
+    /// The letter under the finger while dragging; nil when idle. Drives the
+    /// selection haptic (on change) and the floating bubble overlay.
+    @State private var focused: String?
+
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
@@ -291,12 +325,33 @@ struct AlphabetIndexBar: View {
                         guard !letters.isEmpty, geo.size.height > 0 else { return }
                         let step = geo.size.height / CGFloat(letters.count)
                         let idx = min(letters.count - 1, max(0, Int(value.location.y / step)))
-                        onSelect(letters[idx])
+                        let letter = letters[idx]
+                        if letter != focused { focused = letter }
+                        onSelect(letter)
                     }
+                    .onEnded { _ in focused = nil }
             )
+            // Floating letter chip to the left of the bar, tracking the finger.
+            .overlay(alignment: .trailing) {
+                if let focused, let idx = letters.firstIndex(of: focused), geo.size.height > 0 {
+                    let step = geo.size.height / CGFloat(letters.count)
+                    let y = step * (CGFloat(idx) + 0.5)
+                    Text(focused)
+                        .font(.title.weight(.bold))
+                        .foregroundStyle(DesignTokens.textPrimary)
+                        .frame(width: 56, height: 56)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().stroke(DesignTokens.brandPrimary.opacity(0.4), lineWidth: 1))
+                        .offset(x: -44, y: y - geo.size.height / 2)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
+            }
         }
         .frame(width: 18)
         .padding(.trailing, 2)
+        // iOS 17 haptics: one selection tick each time the focused letter changes.
+        .sensoryFeedback(.selection, trigger: focused)
     }
 }
 

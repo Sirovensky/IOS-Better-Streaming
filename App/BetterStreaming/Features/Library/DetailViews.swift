@@ -13,6 +13,9 @@ enum LibraryRoute: Hashable, Identifiable {
     case allAlbums
     case allArtists
     case allPlaylists
+    case favorites
+    case genre(String)
+    case trackList(title: String, ids: [String])
     case offline
     case sources
     case settings
@@ -56,6 +59,9 @@ extension View {
             case .allAlbums: AllAlbumsView()
             case .allArtists: AllArtistsView()
             case .allPlaylists: AllPlaylistsView()
+            case .favorites: FavoritesView()
+            case .genre(let name): AllSongsView(initialGenreFilter: name)
+            case .trackList(let title, let ids): TrackListView(title: title, trackIDs: ids)
             case .offline: OfflineLibraryView()
             case .sources: SourcesView()
             case .settings: SettingsView()
@@ -276,7 +282,7 @@ struct AlbumArtistsView: View {
                 ForEach(artists) { artist in
                     NavigationLink(value: LibraryRoute.artist(artist.id)) {
                         HStack(spacing: 12) {
-                            ArtworkView(url: nil, artworkKey: artist.id, glyph: "music.mic", cornerRadius: 26)
+                            ArtworkView(url: model.artistImage(artist.id), artworkKey: artist.id, glyph: "music.mic", cornerRadius: 26)
                                 .frame(width: 52, height: 52)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(artist.name).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
@@ -311,6 +317,16 @@ struct ArtistDetailView: View {
     private var artistTracks: [Track] { model.tracks(forArtist: artistID) }
     private var artistAlbums: [Album] { model.albums.filter { $0.artistID == artistID } }
 
+    /// Top 5 by play count; empty when the artist has no plays yet (so the section
+    /// hides rather than showing an arbitrary "top" of all-zero songs).
+    private var topSongs: [Track] {
+        let ranked = artistTracks
+            .map { ($0, model.autoCache.stat(for: $0.id).playCount) }
+            .filter { $0.1 > 0 }
+            .sorted { $0.1 > $1.1 }
+        return Array(ranked.prefix(5).map(\.0))
+    }
+
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
@@ -336,6 +352,16 @@ struct ArtistDetailView: View {
                     .frame(maxWidth: .infinity)
                 }
 
+                if !topSongs.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        SectionHeader(title: "Top Songs")
+                        ForEach(topSongs) { track in
+                            TrackRowView(track: track, context: topSongs)
+                            Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                        }
+                    }
+                }
+
                 if !artistAlbums.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         SectionHeader(title: "Albums")
@@ -354,7 +380,7 @@ struct ArtistDetailView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    SectionHeader(title: "Songs")
+                    SectionHeader(title: topSongs.isEmpty ? "Songs" : "All Songs")
                     ForEach(artistTracks) { track in
                         TrackRowView(track: track, context: artistTracks)
                         Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
@@ -431,35 +457,64 @@ struct PlaylistDetailView: View {
     private var playlistTracks: [Track] { model.tracks(playlist?.trackIDs ?? []) }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 6) {
-                if let playlist {
-                    MediaDetailHeader(
-                        artworkKey: playlist.id,
-                        artworkURL: playlist.artworkURLs.first,
-                        glyph: playlist.isLiveFolder ? "folder.fill" : "music.note.list",
-                        title: playlist.name,
-                        subtitle: playlist.subtitle,
-                        meta: "\(playlistTracks.count) songs",
-                        playAction: { model.playPlaylist(playlist) },
-                        shuffleAction: { model.playPlaylist(playlist, shuffled: true) }
-                    )
-                    .padding(.bottom, 12)
-                }
-
-                ForEach(playlistTracks) { track in
-                    TrackRowView(track: track, context: playlistTracks)
-                    Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
-                }
+        // A List (not the usual ScrollView) so non-live playlists get swipe-to-remove.
+        List {
+            if let playlist {
+                MediaDetailHeader(
+                    artworkKey: playlist.id,
+                    artworkURL: playlist.artworkURLs.first,
+                    glyph: playlist.isLiveFolder ? "folder.fill" : "music.note.list",
+                    title: playlist.name,
+                    subtitle: playlist.subtitle,
+                    meta: "\(playlistTracks.count) songs",
+                    playAction: { model.playPlaylist(playlist) },
+                    shuffleAction: { model.playPlaylist(playlist, shuffled: true) }
+                )
+                .padding(.bottom, 12)
+                .listRowInsets(EdgeInsets(top: 8, leading: DesignTokens.phonePadding, bottom: 0, trailing: DesignTokens.phonePadding))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
             }
-            .padding(DesignTokens.phonePadding)
-            .padding(.bottom, 120)
+
+            ForEach(playlistTracks) { track in
+                TrackRowView(track: track, context: playlistTracks)
+                    .listRowInsets(EdgeInsets(top: 0, leading: DesignTokens.phonePadding, bottom: 0, trailing: DesignTokens.phonePadding))
+                    .listRowBackground(Color.clear)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        // Live folders mirror a server directory, so removing a row would
+                        // be undone on the next scan — only offer it on real playlists.
+                        if let playlist, !playlist.isLiveFolder,
+                           let idx = playlist.trackIDs.firstIndex(of: track.id) {
+                            Button(role: .destructive) {
+                                model.removeFromPlaylist(playlistID, at: [idx])
+                            } label: {
+                                Label("Remove", systemImage: "minus.circle")
+                            }
+                        }
+                    }
+            }
+            .onMove { source, destination in
+                // Row offsets only equal trackIDs offsets when no dead ids linger;
+                // dead ids are pruned on load/rescan, so mismatch means skip safely.
+                guard let playlist, !playlist.isLiveFolder,
+                      playlist.trackIDs.count == playlistTracks.count else { return }
+                model.moveInPlaylist(playlistID, fromOffsets: source, toOffset: destination)
+            }
+
+            Color.clear.frame(height: 96)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
         .appScreenBackground()
         .navigationTitle(playlist?.name ?? "Playlist")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if let playlist, !playlist.isLiveFolder {
+                ToolbarItem(placement: .topBarTrailing) {
+                    EditButton()
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button { renameText = playlist.name; showingRename = true } label: {
@@ -514,14 +569,17 @@ private final class SectionCache<Item> {
     private(set) var items: [Item] = []
     private(set) var sections: [LetterSection<Item>] = []
 
-    func resolve(rev: Int, variant: String, sectioned: Bool,
+    /// `cache: false` forces a rebuild every pass and stores no signature — for sorts
+    /// whose order depends on state that doesn't bump `libraryRevision` (e.g. play
+    /// counts driving "Most Played"), which would otherwise freeze until a rescan.
+    func resolve(rev: Int, variant: String, sectioned: Bool, cache: Bool = true,
                  build: () -> [Item], sectionKey: (Item) -> String) {
         let sig = Signature(rev: rev, variant: variant)
-        guard signature != sig else { return }
+        if cache, signature == sig { return }
         let built = build()
         items = built
         sections = sectioned ? LibraryIndex.sections(built, key: sectionKey) : []
-        signature = sig
+        signature = cache ? sig : nil
     }
 }
 
@@ -531,6 +589,11 @@ struct AllSongsView: View {
     @State private var genreFilter: String? = nil
     @State private var genres: [String] = []
     @State private var cache = SectionCache<Track>()
+
+    /// When pushed from a genre tile, the list opens pre-filtered to that genre.
+    init(initialGenreFilter: String? = nil) {
+        _genreFilter = State(initialValue: initialGenreFilter)
+    }
 
     private func buildSongs() -> [Track] {
         // Title (the default) reads the model's revision-cached sort; genre filtering is
@@ -554,11 +617,20 @@ struct AllSongsView: View {
         let _ = cache.resolve(rev: model.libraryRevision,
                               variant: "\(sort.rawValue)|\(genreFilter ?? "")",
                               sectioned: sort.isAlphabetical,
+                              cache: sort != .mostPlayed,
                               build: buildSongs, sectionKey: { $0.title })
         let list = cache.items
         let sections = cache.sections
         Group {
-            if sort.isAlphabetical {
+            if let genreFilter, list.isEmpty {
+                ContentUnavailableView {
+                    Label("No \(genreFilter) Songs", systemImage: "music.note.list")
+                } description: {
+                    Text("No songs in your library match this genre.")
+                } actions: {
+                    Button("Clear Filter") { self.genreFilter = nil }
+                }
+            } else if sort.isAlphabetical {
                 AlphabetIndexedScroll(sections: sections) {
                     header(list)
                 } sectionContent: { section in
@@ -584,15 +656,39 @@ struct AllSongsView: View {
         .appScreenBackground()
         .navigationTitle("Songs")
         .toolbar { sortMenu }
-        .task { if genres.isEmpty { genres = model.availableGenres } }
+        // Recompute per library revision so newly-scanned genres appear (not just once
+        // per push — the previous `if genres.isEmpty` guard froze the list).
+        .task(id: model.libraryRevision) { genres = model.availableGenres }
     }
 
     @ViewBuilder private func header(_ list: [Track]) -> some View {
-        PlayShuffleBar(
-            play: { model.engine.setShuffle(false); model.engine.play(list) },
-            shuffle: { model.engine.playShuffled(list) }
-        )
-        .disabled(list.isEmpty)
+        VStack(spacing: 10) {
+            if let genreFilter {
+                HStack {
+                    Button {
+                        self.genreFilter = nil
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(genreFilter)
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(DesignTokens.brandPrimary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(DesignTokens.brandPrimary.opacity(0.14), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear \(genreFilter) filter")
+                    Spacer()
+                }
+            }
+            PlayShuffleBar(
+                play: { model.engine.setShuffle(false); model.engine.play(list) },
+                shuffle: { model.engine.playShuffled(list) }
+            )
+            .disabled(list.isEmpty)
+        }
         .padding(.bottom, 6)
     }
 
@@ -651,14 +747,12 @@ enum AlbumSort: String, CaseIterable, Identifiable {
     case title = "Title"
     case artist = "Artist"
     case recentlyAdded = "Recently Added"
-    case year = "Year"
     var id: String { rawValue }
     var systemImage: String {
         switch self {
         case .title: "textformat"
         case .artist: "music.mic"
         case .recentlyAdded: "clock"
-        case .year: "calendar"
         }
     }
     var isAlphabetical: Bool { self == .title || self == .artist }
@@ -671,7 +765,7 @@ struct AllAlbumsView: View {
     private let columns = [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)]
 
     /// Albums ordered for the current sort. Alphabetical sorts are also sectioned; the
-    /// non-alphabetical ones (recently-added, year) render as a flat grid.
+    /// non-alphabetical ones (recently-added) render as a flat grid.
     private func buildAlbums() -> [Album] {
         switch sort {
         case .title:
@@ -685,8 +779,6 @@ struct AllAlbumsView: View {
             }
         case .recentlyAdded:
             return model.recentlyAddedAlbums
-        case .year:
-            return model.albums.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
         }
     }
 
@@ -748,7 +840,7 @@ struct AllArtistsView: View {
             ForEach(section.items) { artist in
                 NavigationLink(value: LibraryRoute.artist(artist.id)) {
                     HStack(spacing: 12) {
-                        ArtworkView(url: nil, artworkKey: artist.id, glyph: "music.mic", cornerRadius: 26)
+                        ArtworkView(url: model.artistImage(artist.id), artworkKey: artist.id, glyph: "music.mic", cornerRadius: 26)
                             .frame(width: 52, height: 52)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(artist.name).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
@@ -776,6 +868,7 @@ struct AllPlaylistsView: View {
     @State private var newName = ""
     @State private var showingImporter = false
     @State private var importMessage: String?
+    @State private var pendingDelete: Playlist?
 
     private static let m3uTypes: [UTType] = [
         UTType(filenameExtension: "m3u") ?? .plainText,
@@ -814,6 +907,14 @@ struct AllPlaylistsView: View {
         .alert("Import", isPresented: Binding(get: { importMessage != nil }, set: { if !$0 { importMessage = nil } })) {
             Button("OK", role: .cancel) {}
         } message: { Text(importMessage ?? "") }
+        .confirmationDialog("Delete “\(pendingDelete?.name ?? "")”?",
+                            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+                            titleVisibility: .visible) {
+            Button("Delete Playlist", role: .destructive) {
+                if let pendingDelete { model.deletePlaylist(pendingDelete.id) }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     private var emptyState: some View {
@@ -834,33 +935,129 @@ struct AllPlaylistsView: View {
     }
 
     private var listView: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
-                ForEach(model.playlists) { playlist in
-                    NavigationLink(value: LibraryRoute.playlist(playlist.id)) {
-                        HStack(spacing: 12) {
-                            ArtworkView(url: playlist.artworkURLs.first, artworkKey: playlist.id,
-                                        glyph: playlist.isLiveFolder ? "folder.fill" : "music.note.list", cornerRadius: 8)
-                                .frame(width: 52, height: 52)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(playlist.name).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary).lineLimit(1)
-                                Text(playlist.subtitle).font(.caption).foregroundStyle(DesignTokens.textSecondary).lineLimit(1)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right").font(.footnote).foregroundStyle(DesignTokens.textTertiary)
+        List {
+            ForEach(model.playlists) { playlist in
+                NavigationLink(value: LibraryRoute.playlist(playlist.id)) {
+                    HStack(spacing: 12) {
+                        ArtworkView(url: playlist.artworkURLs.first, artworkKey: playlist.id,
+                                    glyph: playlist.isLiveFolder ? "folder.fill" : "music.note.list", cornerRadius: 8)
+                            .frame(width: 52, height: 52)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(playlist.name).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary).lineLimit(1)
+                            Text(playlist.subtitle).font(.caption).foregroundStyle(DesignTokens.textSecondary).lineLimit(1)
                         }
-                        .padding(.vertical, 6)
-                        .contentShape(Rectangle())
+                        Spacer()
                     }
-                    .buttonStyle(.plain)
-                    Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .listRowInsets(EdgeInsets(top: 0, leading: DesignTokens.phonePadding, bottom: 0, trailing: DesignTokens.phonePadding))
+                .listRowBackground(Color.clear)
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    // Confirm before deleting: a playlist is real user data, not just a view.
+                    if !playlist.isLiveFolder {
+                        Button(role: .destructive) { pendingDelete = playlist } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
                 }
             }
-            .padding(DesignTokens.phonePadding)
-            .padding(.bottom, 120)
+
+            Color.clear.frame(height: 96)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
         .appScreenBackground()
         .navigationTitle("Playlists")
+    }
+}
+
+// MARK: - Favorites
+
+/// The favourited songs, mirroring AllSongsView's list structure. Favouriting is
+/// wired all over the app but had no screen listing the result.
+struct FavoritesView: View {
+    @Environment(AppModel.self) private var model
+
+    private var favorites: [Track] {
+        model.favorites.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    var body: some View {
+        Group {
+            if favorites.isEmpty {
+                ContentUnavailableView {
+                    Label("No Favourites", systemImage: "star")
+                } description: {
+                    Text("Star songs to see them here.")
+                }
+            } else {
+                let list = favorites
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        PlayShuffleBar(
+                            play: { model.engine.setShuffle(false); model.engine.play(list) },
+                            shuffle: { model.engine.playShuffled(list) }
+                        )
+                        .padding(.bottom, 6)
+                        ForEach(list) { track in
+                            TrackRowView(track: track, context: list)
+                            Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                        }
+                    }
+                    .padding(.horizontal, DesignTokens.phonePadding)
+                    .padding(.bottom, 120)
+                }
+            }
+        }
+        .appScreenBackground()
+        .navigationTitle("Favourites")
+    }
+}
+
+// MARK: - Generic track list (rail "See All")
+
+/// A flat song list resolved from a set of ids — the destination for a Home/Radio
+/// rail's "See All". Ids resolve through the live library so dead ids drop out.
+struct TrackListView: View {
+    @Environment(AppModel.self) private var model
+    let title: String
+    let trackIDs: [String]
+
+    private var tracks: [Track] { model.tracks(trackIDs) }
+
+    var body: some View {
+        Group {
+            if tracks.isEmpty {
+                ContentUnavailableView {
+                    Label("Nothing Here", systemImage: "music.note")
+                } description: {
+                    Text("These songs are no longer in your library.")
+                }
+            } else {
+                let list = tracks
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        PlayShuffleBar(
+                            play: { model.engine.setShuffle(false); model.engine.play(list) },
+                            shuffle: { model.engine.playShuffled(list) }
+                        )
+                        .padding(.bottom, 6)
+                        ForEach(list) { track in
+                            TrackRowView(track: track, context: list)
+                            Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                        }
+                    }
+                    .padding(.horizontal, DesignTokens.phonePadding)
+                    .padding(.bottom, 120)
+                }
+            }
+        }
+        .appScreenBackground()
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

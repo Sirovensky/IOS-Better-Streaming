@@ -150,7 +150,9 @@ struct HomeView: View {
 
     private var recentlyPlayedRail: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SectionHeader(title: "Recently Played")
+            SectionHeader(title: "Recently Played", actionTitle: "All") {
+                path.append(.trackList(title: "Recently Played", ids: model.recentlyPlayed.map(\.id)))
+            }
             ScrollView(.horizontal) {
                 HStack(spacing: 14) {
                     ForEach(model.recentlyPlayed.prefix(12)) { track in
@@ -176,7 +178,10 @@ struct HomeView: View {
         let top = heavyRotation
         if !top.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
-                SectionHeader(title: "Heavy Rotation", detail: "The songs you keep coming back to")
+                SectionHeader(title: "Heavy Rotation", detail: "The songs you keep coming back to",
+                              actionTitle: "All") {
+                    path.append(.trackList(title: "Heavy Rotation", ids: top.map(\.id)))
+                }
                 ScrollView(.horizontal) {
                     HStack(spacing: 14) {
                         ForEach(top) { track in

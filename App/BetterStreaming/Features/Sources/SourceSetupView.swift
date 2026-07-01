@@ -35,7 +35,16 @@ struct SourceSetupView: View {
 
     private var canAdd: Bool {
         if proto == .local { return localFolderURL != nil }
-        return !host.trimmed.isEmpty && !path.trimmed.isEmpty
+        return !host.trimmed.isEmpty && !path.trimmed.isEmpty && portValid
+    }
+
+    /// Port must be blank (→ protocol default) or a valid 1...65535. Guards the FTP
+    /// UInt16-overflow crash and an out-of-range custom port before Add/Test.
+    private var portValid: Bool {
+        let t = port.trimmed
+        if t.isEmpty { return true }
+        guard let n = Int(t) else { return false }
+        return (1...65535).contains(n)
     }
 
     var body: some View {
@@ -68,6 +77,8 @@ struct SourceSetupView: View {
         .appScreenBackground()
         .navigationTitle("Add Source")
         .navigationBarTitleDisplayMode(.inline)
+        // Success tick only when a Test connection actually comes back online.
+        .sensoryFeedback(.success, trigger: testState.isOnline) { _, online in online }
         .fileImporter(isPresented: $showLocalImporter, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result {
                 localFolderURL = url
@@ -170,6 +181,10 @@ struct SourceSetupView: View {
             }
             .padding(14)
             .surfaceCard(fill: DesignTokens.surfaceCard)
+            if !portValid {
+                Text("Enter a port between 1 and 65535.")
+                    .font(.caption).foregroundStyle(DesignTokens.error)
+            }
             Text("Credentials are stored in the Keychain on this device only.")
                 .font(.caption2).foregroundStyle(DesignTokens.textTertiary)
         }
@@ -277,7 +292,7 @@ struct SourceSetupView: View {
             let draft = SourceDraft(
                 protocolKind: .smb,
                 displayName: trimmedShare,
-                endpoint: SourceEndpoint(hostDisplayName: trimmedHost, shareName: trimmedShare),
+                endpoint: SourceEndpoint(hostDisplayName: trimmedHost, port: Int(port.trimmed), shareName: trimmedShare),
                 username: username.trimmed.isEmpty ? nil : username.trimmed,
                 domain: domain.trimmed.isEmpty ? nil : domain.trimmed
             )

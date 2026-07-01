@@ -27,6 +27,10 @@ struct SearchView: View {
     @State private var matchingArtists: [Artist] = []
     @State private var searchTask: Task<Void, Never>?
 
+    /// Auto-focus the keyboard only on the FIRST time Search appears this app run —
+    /// not every time the tab is re-entered or a pushed result is popped.
+    @MainActor private static var didAutoFocusThisSession = false
+
     private var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
@@ -54,7 +58,9 @@ struct SearchView: View {
             model.recordSearch(query)
         }
         .task {
-            // Open the keyboard immediately when Search appears.
+            // Open the keyboard the first time Search appears this session only.
+            guard !Self.didAutoFocusThisSession else { return }
+            Self.didAutoFocusThisSession = true
             try? await Task.sleep(nanoseconds: 350_000_000)
             searchFocused = true
         }
@@ -81,8 +87,15 @@ struct SearchView: View {
         results = model.searchResults(q)
         matchingArtists = model.artistResults(q)
         matchingAlbums = model.albums.filter {
-            $0.title.localizedCaseInsensitiveContains(trimmed) || $0.artist.localizedCaseInsensitiveContains(trimmed)
+            $0.title.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+                || $0.artist.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil
         }
+    }
+
+    /// Recents are recorded on submit; also record when the user acts on a result, so
+    /// a query typed-then-tapped (never Return-pressed) still lands in Recent.
+    private func recordOnResultTap() {
+        model.recordSearch(query)
     }
 
     private var resultsList: some View {
@@ -108,6 +121,7 @@ struct SearchView: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .simultaneousGesture(TapGesture().onEnded { recordOnResultTap() })
                             Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
                         }
                     }
@@ -120,6 +134,7 @@ struct SearchView: View {
                                 AlbumGridCellStatic(album: album)
                             }
                             .buttonStyle(.plain)
+                            .simultaneousGesture(TapGesture().onEnded { recordOnResultTap() })
                         }
                     }
                 }
@@ -128,6 +143,7 @@ struct SearchView: View {
                     LazyVStack(spacing: 0) {
                         ForEach(results) { track in
                             TrackRowView(track: track, context: results)
+                                .simultaneousGesture(TapGesture().onEnded { recordOnResultTap() })
                             Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
                         }
                     }
@@ -192,7 +208,7 @@ struct SearchView: View {
                     let genres = model.availableGenres
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                         ForEach(genres, id: \.self) { genre in
-                            Button { query = genre } label: {
+                            Button { path.append(.genre(genre)) } label: {
                                 HStack {
                                     Text(genre).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
                                     Spacer()

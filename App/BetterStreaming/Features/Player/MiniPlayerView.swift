@@ -139,13 +139,6 @@ struct MorphingPlayer: View {
     let safeTop: CGFloat
     let safeBottom: CGFloat
     let tint: Color             // album palette colour the glass tints toward
-    /// Frozen snapshot of the app behind, refracted at full open (nil ⇒ no snapshot;
-    /// the clear glass still shows the real backdrop, just with subtler refraction).
-    /// A binding so the open gestures can grab a CLEAN collapsed frame the instant
-    /// they begin (and drop it on a snap-back), avoiding a snapshot of the player.
-    @Binding var backdrop: UIImage?
-    /// Strength of the snapshot refraction (points).
-    let refractStrength: CGFloat
     @Binding var dragFraction: CGFloat?
     @Binding var presented: Bool
 
@@ -269,10 +262,8 @@ struct MorphingPlayer: View {
                     .frame(width: w, height: Self.barHeight)
                     .opacity(miniOpacity)
                     .contentShape(Rectangle())
-                    // Tap to open + drag up to expand. Each grabs a CLEAN collapsed
-                    // snapshot the instant it begins (before the player expands), so the
-                    // refracted backdrop never contains the player itself. Buttons inside
-                    // the row still win their taps (drag needs real movement).
+                    // Tap to open + drag up to expand. Buttons inside the row still win
+                    // their taps (the drag needs real movement before it engages).
                     .onTapGesture {
                         guard engine.lastErrorMessage == nil, !model.isPlayerMorphSettling else { return }
                         withAnimation(PlayerMorph.settle) { presented = true }
@@ -302,6 +293,10 @@ struct MorphingPlayer: View {
         .position(x: currentFrame.midX, y: currentFrame.midY)
         .frame(width: W, height: H)
         .ignoresSafeArea()
+        // Soft tick on play/pause (mini bar + full player share this engine) and when
+        // the morph settles open or closed.
+        .sensoryFeedback(.impact(flexibility: .soft), trigger: engine.isPlaying)
+        .sensoryFeedback(.impact(flexibility: .soft), trigger: presented)
     }
 
     /// Up-drag on the collapsed bar raises the morph fraction live; release settles
@@ -340,8 +335,8 @@ extension View {
 
     /// The morphing player's Liquid Glass (iOS 26+) surface filling `shape`. Uses the
     /// CLEAR glass variant (not `.regular`) so the surface stays see-through — the app
-    /// behind it (strongly refracted by `BackdropRefraction` at full open) shows
-    /// through instead of reading as flat frosted black. `.interactive()` adds the
+    /// behind it shows through instead of reading as flat frosted black. Frosted glass
+    /// samples the live backdrop natively. `.interactive()` adds the
     /// touch-responsive liquid wobble; `amount` is a light optional album tint
     /// (currently 0). Takes any `Shape`. Thin-material fallback below iOS 26.
     @ViewBuilder
@@ -507,6 +502,7 @@ struct NowPlayingView: View {
     @Environment(AppModel.self) private var model
     @State private var showQueue = false
     @State private var showLyrics = false
+    @State private var favoriteTapCount = 0
     /// Artist/album navigation from the player opens a full-screen cover (its own
     /// NavigationStack + opaque background), NOT a sheet — a long artist list must not
     /// close on an accidental swipe-down, and the player root must stay transparent for
@@ -619,6 +615,10 @@ struct NowPlayingView: View {
                     .presentationDragIndicator(.visible)
             }
         }
+        // Light tick on the favourite TAP itself — keying off the derived per-track
+        // Bool fired a spurious tick whenever auto-advance landed on a track whose
+        // favourite state differed from the previous one.
+        .sensoryFeedback(.impact(weight: .light), trigger: favoriteTapCount)
     }
 
     private var backgroundGradient: some View {
@@ -722,6 +722,7 @@ struct NowPlayingView: View {
 
             Button {
                 model.toggleFavorite(track.id)
+                favoriteTapCount += 1
             } label: {
                 Image(systemName: model.isFavorite(track.id) ? "star.fill" : "star")
                     .font(.headline)
@@ -765,6 +766,11 @@ struct NowPlayingView: View {
         Button("Lyrics", systemImage: "quote.bubble") { showLyrics = true }
         Button("View Queue", systemImage: "list.bullet") { showQueue = true }
         Menu("Sleep Timer", systemImage: model.sleepTimerArmed ? "moon.zzz.fill" : "moon.zzz") {
+            if let end = model.sleepTimerEnd {
+                Text("Stops in \(end, style: .timer)")
+            } else if model.engine.stopAtTrackEnd {
+                Text("After this track")
+            }
             if model.sleepTimerArmed {
                 Button("Turn Off", systemImage: "xmark") { model.cancelSleepTimer() }
             }
@@ -836,6 +842,14 @@ struct NowPlayingView: View {
 
     private var bottomBar: some View {
         HStack {
+            Button { engine.toggleShuffle() } label: {
+                Image(systemName: "shuffle")
+                    .font(.title3)
+                    .foregroundStyle(engine.shuffleEnabled ? DesignTokens.brandPrimary : .white.opacity(0.85))
+            }
+            .accessibilityLabel("Shuffle")
+            .accessibilityValue(engine.shuffleEnabled ? "On" : "Off")
+            Spacer()
             Button { showLyrics = true } label: {
                 Image(systemName: "quote.bubble")
                     .font(.title3)
@@ -850,6 +864,14 @@ struct NowPlayingView: View {
                     .font(.title3)
                     .foregroundStyle(.white.opacity(0.85))
             }
+            Spacer()
+            Button { engine.cycleRepeat() } label: {
+                Image(systemName: engine.repeatMode.systemImage)
+                    .font(.title3)
+                    .foregroundStyle(engine.repeatMode != .off ? DesignTokens.brandPrimary : .white.opacity(0.85))
+            }
+            .accessibilityLabel("Repeat")
+            .accessibilityValue(engine.repeatMode == .off ? "Off" : engine.repeatMode == .one ? "One song" : "All songs")
         }
     }
 }
@@ -859,6 +881,12 @@ struct NowPlayingView: View {
 struct NowPlayingQueueView: View {
     @Environment(AppModel.self) private var model
     private var engine: PlaybackEngine { model.engine }
+
+    /// Queue entries after the current track, carrying their ABSOLUTE queue index
+    /// (enumerate runs before the filter), so a tapped row maps straight to `jump`.
+    private var upcoming: [(offset: Int, element: Track)] {
+        Array(engine.queue.enumerated()).filter { $0.offset > engine.currentIndex }
+    }
 
     var body: some View {
         NavigationStack {
@@ -872,15 +900,20 @@ struct NowPlayingQueueView: View {
                 }
 
                 Section {
-                    let upcoming = Array(engine.queue.enumerated())
-                        .filter { $0.offset > engine.currentIndex }
                     if upcoming.isEmpty {
                         Text("Nothing up next")
                             .font(.subheadline)
                             .foregroundStyle(DesignTokens.textSecondary)
                     }
-                    ForEach(upcoming, id: \.offset) { _, track in
-                        QueueRow(track: track, isCurrent: false)
+                    ForEach(upcoming, id: \.offset) { entry in
+                        // `entry.offset` is the ABSOLUTE queue index (the enumerate
+                        // happens before the upcoming filter), so it maps straight to jump.
+                        Button {
+                            engine.jump(toQueueIndex: entry.offset)
+                        } label: {
+                            QueueRow(track: entry.element, isCurrent: false)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .onDelete { offsets in
                         // Map filtered offsets back to absolute queue indices.
@@ -898,6 +931,13 @@ struct NowPlayingQueueView: View {
                     HStack {
                         Text("Playing Next")
                         Spacer()
+                        if !upcoming.isEmpty {
+                            Button("Clear") { engine.clearUpcoming() }
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(DesignTokens.brandPrimary)
+                                .textCase(nil)
+                                .padding(.trailing, 4)
+                        }
                         Button {
                             engine.toggleShuffle()
                         } label: {
@@ -921,6 +961,8 @@ struct NowPlayingQueueView: View {
             .navigationTitle("Queue")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { EditButton() }
+            // Selection tick when the queue order changes (reorder / jump / clear).
+            .sensoryFeedback(.selection, trigger: engine.queue.map(\.id))
         }
     }
 }
@@ -974,6 +1016,11 @@ struct Scrubber: View {
         return engine.elapsed
     }
 
+    private var accessibilityValue: String {
+        guard engine.duration > 0 else { return elapsedLabel }
+        return "\(elapsedLabel) of \(TimeFormat.clock(engine.duration))"
+    }
+
     private var elapsedLabel: String { TimeFormat.clock(elapsedSeconds) }
 
     private var remainingLabel: String {
@@ -1007,6 +1054,14 @@ struct Scrubber: View {
                             engine.seek(toSeconds: frac * engine.duration)
                         }
                 )
+                .accessibilityElement()
+                .accessibilityLabel("Playback position")
+                .accessibilityValue(accessibilityValue)
+                .accessibilityAdjustableAction { direction in
+                    guard engine.duration > 0 else { return }
+                    let step: Double = direction == .increment ? 15 : -15
+                    engine.seek(toSeconds: min(max(engine.elapsed + step, 0), engine.duration))
+                }
             }
             .frame(height: 24)
 
@@ -1026,7 +1081,6 @@ struct Scrubber: View {
 struct SystemVolumeSlider: UIViewRepresentable {
     func makeUIView(context: Context) -> MPVolumeView {
         let view = MPVolumeView()
-        view.showsRouteButton = false
         view.tintColor = .white
         return view
     }
@@ -1086,7 +1140,11 @@ struct LyricsSheet: View {
                 }
             }
         }
-        .task {
+        // Keyed on the track id: the sheet stays mounted across an auto-advance, so
+        // without this the highlight would track the new track's elapsed against the
+        // old track's timestamps (and show the wrong lyrics).
+        .task(id: track.id) {
+            loading = true
             lines = await model.lyrics(for: track)
             loading = false
         }
