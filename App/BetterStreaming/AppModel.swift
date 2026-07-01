@@ -1383,6 +1383,13 @@ final class AppModel {
         }
     }
 
+    /// Every downloadable album track is already on disk (nothing left to fetch), so
+    /// the menu can offer "Download" until then instead of only "Remove".
+    func albumFullyDownloaded(_ albumID: String) -> Bool {
+        let manageable = tracks(forAlbum: albumID).filter { canManageDownload($0.id) }
+        return !manageable.isEmpty && !manageable.contains { $0.cacheState == .remoteOnly }
+    }
+
     func downloadAlbum(_ albumID: String) {
         let targets = tracks(forAlbum: albumID).filter { canManageDownload($0.id) && $0.cacheState == .remoteOnly }
         guard !targets.isEmpty else { return }

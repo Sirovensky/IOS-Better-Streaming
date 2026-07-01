@@ -417,12 +417,15 @@ private actor RemoteStreamSession {
               only.upperBound >= totalLength else { return }
 
         let fm = FileManager.default
+        // Copy to a per-session-unique temp, then atomically rename into place. A direct
+        // remove+copy could be interrupted (crash/kill) mid-copy, leaving a truncated file
+        // that `fileExists` reports as fully cached forever. The temp is keyed off the
+        // UUID-unique partial name (completeCacheURL is a deterministic per-track hash) so
+        // two concurrent promotions of the same track can't share or half-write one temp.
+        let tmp = completeCacheURL.deletingLastPathComponent()
+            .appendingPathComponent(partialCacheURL.lastPathComponent + ".promote")
         do {
             try fm.createDirectory(at: completeCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            // Copy to a temp then atomically rename into place. A direct
-            // remove+copy could be interrupted (crash/kill) mid-copy, leaving a
-            // truncated file that `fileExists` reports as fully cached forever.
-            let tmp = completeCacheURL.appendingPathExtension("promote-part")
             try? fm.removeItem(at: tmp)
             try fm.copyItem(at: partialCacheURL, to: tmp)
             try? fm.removeItem(at: completeCacheURL)
@@ -433,6 +436,7 @@ private actor RemoteStreamSession {
             #endif
             await onComplete?()
         } catch {
+            try? fm.removeItem(at: tmp)   // don't leave a half-copied promote temp behind
             #if DEBUG
             print("BETTERSTREAMING_STREAM promote_failed error=\(error)")
             #endif

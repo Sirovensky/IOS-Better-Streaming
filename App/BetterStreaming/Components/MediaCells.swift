@@ -12,6 +12,11 @@ struct TrackRowView: View {
     var index: Int?
 
     private var isCurrent: Bool { model.engine.currentTrack?.id == track.id }
+    /// In Offline Mode, a track that isn't downloaded can't play — dim it (Apple-Music
+    /// style) so it reads as unavailable rather than looking tappable-but-dead.
+    private var isUnavailableOffline: Bool {
+        model.offlineMode && !track.cacheState.isPlayableOffline
+    }
 
     var body: some View {
         Button {
@@ -71,6 +76,7 @@ struct TrackRowView: View {
                 }
             }
             .padding(.vertical, 3)
+            .opacity(isUnavailableOffline ? 0.45 : 1)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -96,15 +102,17 @@ struct TrackRowView: View {
 
     @ViewBuilder
     private var availabilityGlyph: some View {
-        let state = track.cacheState
-        if state == .cached || state == .prefetched {
-            Image(systemName: state.systemImage)
-                .font(.caption)
-                .foregroundStyle(state.tint)
-        } else if state == .missingSource || state == .failed {
-            Image(systemName: state.systemImage)
-                .font(.caption)
-                .foregroundStyle(state.tint)
+        switch track.cacheState {
+        case .downloading:
+            // Live feedback while an album/track download runs.
+            ProgressView().controlSize(.mini).tint(DesignTokens.connectionTeal)
+        case .queued:
+            Image(systemName: "clock").font(.caption).foregroundStyle(DesignTokens.connectionTeal)
+        case .cached, .prefetched, .missingSource, .failed:
+            let state = track.cacheState
+            Image(systemName: state.systemImage).font(.caption).foregroundStyle(state.tint)
+        default:
+            EmptyView()
         }
     }
 

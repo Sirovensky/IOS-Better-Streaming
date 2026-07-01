@@ -180,13 +180,14 @@ struct AlbumDetailView: View {
                         Divider()
 
                         if model.canManageAlbumDownload(albumID) {
+                            if !model.albumFullyDownloaded(albumID) {
+                                Button("Download", systemImage: "arrow.down.circle") {
+                                    model.downloadAlbum(albumID)
+                                }
+                            }
                             if model.albumHasDownloads(albumID) {
                                 Button("Remove Download", systemImage: "trash", role: .destructive) {
                                     model.removeAlbumDownloads(albumID)
-                                }
-                            } else {
-                                Button("Download", systemImage: "arrow.down.circle") {
-                                    model.downloadAlbum(albumID)
                                 }
                             }
                         }
@@ -781,10 +782,11 @@ struct AlbumGridCellStatic: View {
         Divider()
 
         if model.canManageAlbumDownload(album.id) {
+            if !model.albumFullyDownloaded(album.id) {
+                Button("Download", systemImage: "arrow.down.circle") { model.downloadAlbum(album.id) }
+            }
             if model.albumHasDownloads(album.id) {
                 Button("Remove Download", systemImage: "trash") { model.removeAlbumDownloads(album.id) }
-            } else {
-                Button("Download", systemImage: "arrow.down.circle") { model.downloadAlbum(album.id) }
             }
         }
         Button {

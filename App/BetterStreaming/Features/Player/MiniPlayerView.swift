@@ -155,7 +155,9 @@ struct MorphingPlayer: View {
     /// `barHeight` matches `MiniPlayerContent` (row 56 + progress strip 8).
     static let barHeight: CGFloat = 64
     private let sideInset: CGFloat = 8
-    private let bottomGap: CGFloat = 50
+    // ~15pt clear of the tab bar (whose content is ~49pt tall above the home
+    // indicator); at 50 the bar sat almost flush on top of the tab icons.
+    private let bottomGap: CGFloat = 64
 
     private func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
     /// Clamped 0→1 ramp of `x` across [lo, hi]; used to time the cross-fades.
@@ -581,10 +583,10 @@ struct NowPlayingView: View {
                         Spacer()
                     }
                 }
-                // NOTE: do NOT re-inset by safeTop/safeBottom here — the enclosing
-                // NavigationStack already insets its content for the safe area, so
-                // adding it again double-padded the header (big gap above the
-                // grabber). The gradient still fills edge to edge via ignoresSafeArea.
+                // The morph host ignores the safe area (so the glass fills the screen)
+                // and there's no NavigationStack here to inset, so the grabber pads by
+                // safeTop itself to clear the Dynamic Island / camera cutout. The
+                // gradient still fills edge to edge via ignoresSafeArea.
             }
             .preferredColorScheme(.dark)
         }
@@ -655,7 +657,7 @@ struct NowPlayingView: View {
             Capsule()
                 .fill(.white.opacity(0.4))
                 .frame(width: 40, height: 5)
-                .padding(.top, 10)
+                .padding(.top, safeTop + 6)
             HStack {
                 Button { collapse() } label: {
                     Image(systemName: "chevron.down")
@@ -849,6 +851,11 @@ struct NowPlayingQueueView: View {
                 Section {
                     let upcoming = Array(engine.queue.enumerated())
                         .filter { $0.offset > engine.currentIndex }
+                    if upcoming.isEmpty {
+                        Text("Nothing up next")
+                            .font(.subheadline)
+                            .foregroundStyle(DesignTokens.textSecondary)
+                    }
                     ForEach(upcoming, id: \.offset) { _, track in
                         QueueRow(track: track, isCurrent: false)
                     }

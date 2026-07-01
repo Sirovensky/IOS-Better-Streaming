@@ -40,17 +40,17 @@ struct SourcesView: View {
         .sheet(item: $shareConfig) { config in
             SourceShareView(shared: config)
         }
-        .confirmationDialog(
+        .alert(
             "Remove source?",
             isPresented: Binding(get: { sourceToRemove != nil }, set: { if !$0 { sourceToRemove = nil } }),
             presenting: sourceToRemove
         ) { source in
-            Button("Remove \(source.name)", role: .destructive) {
+            Button("Remove", role: .destructive) {
                 model.removeSource(source.id)
             }
             Button("Cancel", role: .cancel) {}
         } message: { source in
-            Text("Removes this source and its \(source.trackCount) songs from this device. Your files on the server aren't touched.")
+            Text("Removes “\(source.name)” and its \(source.trackCount) songs from this device. Your files on the server aren't touched.")
         }
     }
 

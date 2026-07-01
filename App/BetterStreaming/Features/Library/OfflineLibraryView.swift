@@ -13,6 +13,7 @@ struct OfflineLibraryView: View {
         var id: String { rawValue }
     }
     @State private var filter: Filter = .all
+    @State private var sort: SongSort = .title
 
     private var downloaded: [Track] { model.tracks.filter { $0.cacheState == .cached } }
     private var autoCached: [Track] { model.tracks.filter { $0.cacheState == .prefetched } }
@@ -31,7 +32,14 @@ struct OfflineLibraryView: View {
         // bucket empties out from under it (e.g. a download removed mid-view), fall back
         // to everything so real offline tracks aren't hidden behind a stale filter.
         let resolved = base.isEmpty ? (downloaded + autoCached) : base
-        return resolved.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        switch sort {
+        case .title:
+            return resolved.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        case .recentlyAdded:
+            return resolved.sorted { ($0.modifiedAtEpoch ?? 0) > ($1.modifiedAtEpoch ?? 0) }
+        case .mostPlayed:
+            return resolved.sorted { model.autoCache.stat(for: $0.id).playCount > model.autoCache.stat(for: $1.id).playCount }
+        }
     }
 
     var body: some View {
@@ -54,6 +62,15 @@ struct OfflineLibraryView: View {
         }
         .appScreenBackground()
         .navigationTitle("Offline")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Picker("Sort", selection: $sort) {
+                        ForEach(SongSort.allCases) { Label($0.rawValue, systemImage: $0.systemImage).tag($0) }
+                    }
+                } label: { Image(systemName: "arrow.up.arrow.down") }
+            }
+        }
         // Reconcile only updates the usage readout on a reachable pass; refresh
         // from disk on appear so it's real at launch and while offline too.
         .task { model.refreshAutoCacheUsage() }

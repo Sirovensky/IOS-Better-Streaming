@@ -1,5 +1,25 @@
 # Changelog
 
+## [2026-06-30 19:45]
+Device-test feedback round plus two regressions the adversary review caught. Build green on the simulator; tests pass.
+
+- Full-screen player top controls (grabber + close arrow) sat under the Dynamic Island / camera cutout on the iPhone 17 Pro. The morph host ignores the safe area and there's no NavigationStack to inset, so the grabber now pads by the top inset itself.
+  - `Features/Player/MiniPlayerView.swift`
+- Mini player was almost flush on the tab bar; raised its float gap to about 15pt of clearance.
+  - `Features/Player/MiniPlayerView.swift`
+- Downloading an album gave no feedback. Track rows now show a spinner while downloading and a clock while queued.
+  - `Components/MediaCells.swift`
+- Album menu showed only "Remove Download" the moment one track was cached, with no way to fetch the rest. It now offers "Download" until every track is on disk and "Remove Download" whenever any are (both appear for a partly-downloaded album).
+  - `AppModel.swift` (`albumFullyDownloaded`), `Features/Library/DetailViews.swift`
+- Remove-source confirmation rendered as an odd floating popover; it's a centered alert now.
+  - `Features/Sources/SourcesView.swift`
+- Offline Mode dims tracks that aren't downloaded (they can't play offline), the way Apple Music greys unavailable songs. Offline also gained the online lists' sort options (Title / Recently Added / Most Played).
+  - `Components/MediaCells.swift`, `Features/Library/OfflineLibraryView.swift`
+- Empty "Playing Next" shows a "Nothing up next" line instead of a bare header.
+  - `Features/Player/MiniPlayerView.swift`
+- Adversary-review regression fixes: the stream-to-complete promote temp is per-session-unique now (a shared name could collide for two concurrent streams of the same track) and is swept on failure; the library-load guard is set before the await again (reentrancy protection) and released only on a transient read error.
+  - `Services/RemoteStreamingService.swift`, `Services/LibraryService.swift`
+
 ## [2026-06-30 19:10]
 Dead-code removal + a polish pass evening the app out beyond the player. Build green on the simulator; core package (48) and new app tests (8) pass.
 

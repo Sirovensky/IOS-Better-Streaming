@@ -1271,11 +1271,14 @@ actor LibraryService {
         // If configs couldn't be read this launch, defer library loading rather
         // than risk pruning/migrating against an empty source list.
         guard configsOK else { return }
-        // Set the loaded-guard only after a SUCCESSFUL read: a transient DB throw must
-        // leave it unset so a later call retries, rather than stranding an empty library
-        // for the whole session.
-        guard let items = try? await mediaStore.listMediaItems() else { return }
+        // Set the guard BEFORE the await (reentrancy protection: a second caller during
+        // the read bails), but release it on a transient read throw so a later call
+        // retries instead of stranding an empty library for the session.
         didLoadLibraryFromDisk = true
+        guard let items = try? await mediaStore.listMediaItems() else {
+            didLoadLibraryFromDisk = false
+            return
+        }
         if !items.isEmpty {
             let knownSourceIDs = Set(configs.compactMap { UUID(uuidString: $0.id) })
             let filteredItems = items.filter { knownSourceIDs.contains($0.identity.sourceID.rawValue) }
