@@ -1541,12 +1541,23 @@ final class AppModel {
 
     /// Artists whose name the query matches, best match first — so typing part of an
     /// artist ("my chemical") surfaces the artist ("My Chemical Romance") as the top
-    /// result above songs and albums. Ranked exact > name-prefix > word-prefix > contains.
-    func artistResults(_ query: String) -> [Artist] {
+    /// result above songs and albums.
+    func artistResults(_ query: String) -> [Artist] { Self.rankedArtists(artists, query: query) }
+
+    /// Rank + order `artists` against a query, best first (pure, so it's unit-tested).
+    /// Ranked exact > name-prefix > word-prefix > contains, ties broken by track count
+    /// then name. A 1-char query matches only an exact name — enough to reach an artist
+    /// literally called "M" without flooding the section with everyone starting with "m".
+    nonisolated static func rankedArtists(_ artists: [Artist], query: String) -> [Artist] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 2 else { return [] }   // avoid single-letter spam
+        guard !trimmed.isEmpty else { return [] }
+        let exactOnly = trimmed.count < 2
         return artists
-            .compactMap { a in Self.artistMatchRank(name: a.name, query: trimmed).map { (a, $0) } }
+            .compactMap { a -> (Artist, Int)? in
+                guard let rank = artistMatchRank(name: a.name, query: trimmed),
+                      !(exactOnly && rank != 0) else { return nil }
+                return (a, rank)
+            }
             .sorted { l, r in
                 if l.1 != r.1 { return l.1 < r.1 }                                   // better rank first
                 if l.0.trackCount != r.0.trackCount { return l.0.trackCount > r.0.trackCount }
@@ -1565,7 +1576,9 @@ final class AppModel {
         guard !q.isEmpty else { return nil }
         if n == q { return 0 }
         if n.hasPrefix(q) { return 1 }
-        if n.split(separator: " ").contains(where: { $0.hasPrefix(q) }) { return 2 }  // "chemical" → "My Chemical Romance"
+        // Interior-word prefix: split on hyphen AND any whitespace so "sophie" matches
+        // "Anne-Sophie Mutter" and tab/NBSP-joined names aren't missed.
+        if n.split(whereSeparator: { $0 == "-" || $0.isWhitespace }).contains(where: { $0.hasPrefix(q) }) { return 2 }
         if n.contains(q) { return 3 }
         return nil
     }

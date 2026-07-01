@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-07-01 09:32]
+Adversary round-1 fixes on the artist features (efc34ad).
+
+- `ArtistDetailView`'s ⋯ menu no longer renders empty during a download. While every track is queued (fully-downloaded true, has-downloads false) the menu now hides instead of showing an item-less platter — the album menu never hit this because it always keeps Play Next / Queue / Edit alongside its download items.
+- The match ranker treats a hyphen as a word boundary, so "sophie" is a word-prefix match for "Anne-Sophie Mutter" (was a weaker contains-match), and it splits on any whitespace (tab/NBSP), not just the space char.
+- A 1-char search matches an artist by exact name only — reaches an artist literally named "M" without listing everyone starting with "m".
+- Ranking extracted into a pure `rankedArtists` and covered: sort order, track-count tie-break, 6-item cap, 1-char gate. Sim test green: 29 app tests, 0 failures.
+  - Files: `AppModel.swift`, `Features/Library/DetailViews.swift`, `App/BetterStreamingTests/ArtistSearchTests.swift`.
+
 ## [2026-07-01 09:20]
 Two search/library features.
 

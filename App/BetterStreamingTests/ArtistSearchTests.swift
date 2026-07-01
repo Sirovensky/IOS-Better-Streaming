@@ -47,4 +47,44 @@ final class ArtistSearchTests: XCTestCase {
         XCTAssertLessThan(exact, prefix)
         XCTAssertLessThan(prefix, word)
     }
+
+    func testHyphenatedInteriorWordIsAPrefixMatch() {
+        // A hyphen counts as a word boundary, so "sophie" is a word-prefix (rank 2),
+        // not a mid-string contains (rank 3).
+        XCTAssertEqual(AppModel.artistMatchRank(name: "Anne-Sophie Mutter", query: "sophie"), 2)
+    }
+
+    // MARK: rankedArtists — the ordering/gating the search UI actually depends on
+
+    private func artist(_ name: String, tracks: Int = 1) -> Artist {
+        Artist(id: name.lowercased(), name: name, albumCount: 1, trackCount: tracks, artworkURL: nil)
+    }
+
+    func testRankedArtistsPutsBestMatchFirst() {
+        let all = [artist("The Cure Tribute"), artist("The Cure"), artist("Robert Cure")]
+        // exact "The Cure" (0) beats the prefix "The Cure Tribute" (1); "Robert Cure"
+        // doesn't match "the cure" at all.
+        XCTAssertEqual(AppModel.rankedArtists(all, query: "the cure").map(\.name), ["The Cure", "The Cure Tribute"])
+    }
+
+    func testRankedArtistsTieBreaksByTrackCount() {
+        // Both are name-prefix matches on "metal" (rank 1) → the bigger artist wins.
+        let all = [artist("Metallica", tracks: 5), artist("Metal Church", tracks: 99)]
+        XCTAssertEqual(AppModel.rankedArtists(all, query: "metal").first?.name, "Metal Church")
+    }
+
+    func testRankedArtistsCapsAtSix() {
+        let all = (1...8).map { artist("Artist \($0)") }   // all contain "artist"
+        XCTAssertEqual(AppModel.rankedArtists(all, query: "artist").count, 6)
+    }
+
+    func testSingleCharQueryMatchesOnlyExactName() {
+        // "M" reaches the artist literally named "M" but not everyone starting with "m".
+        let all = [artist("M"), artist("Metallica"), artist("Madonna")]
+        XCTAssertEqual(AppModel.rankedArtists(all, query: "M").map(\.name), ["M"])
+    }
+
+    func testRankedArtistsEmptyQueryReturnsNothing() {
+        XCTAssertTrue(AppModel.rankedArtists([artist("X")], query: "  ").isEmpty)
+    }
 }

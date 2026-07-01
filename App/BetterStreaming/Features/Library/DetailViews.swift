@@ -368,7 +368,12 @@ struct ArtistDetailView: View {
         .navigationTitle(model.artistName(artistID) ?? "Artist")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if model.canManageArtistDownload(artistID) {
+            // Only surface the ⋯ when it'll hold an item: an artist mid-download is
+            // fully-downloaded (nothing remote-only) yet has-nothing-cached, which would
+            // otherwise render an empty menu — unlike the album menu, which always keeps
+            // Play Next / Queue / Edit alongside its download items.
+            if model.canManageArtistDownload(artistID),
+               !model.artistFullyDownloaded(artistID) || model.artistHasDownloads(artistID) {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         if !model.artistFullyDownloaded(artistID) {

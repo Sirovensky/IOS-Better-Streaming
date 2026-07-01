@@ -10,7 +10,9 @@
 
 **Files created/changed:** `AppModel.swift`, `Features/Search/SearchView.swift`, `Features/Library/DetailViews.swift`, `App/BetterStreamingTests/ArtistSearchTests.swift` (new, 7 tests).
 
-**Verification:** `xcodegen generate` picked up the new test file; sim `xcodebuild test` green — 23 app tests, 0 failures, all 7 ArtistSearch cases pass. Device was disconnected (`unavailable`), so no on-device install this round; feature is UI wiring + pure logic, fully covered by the ranker tests. Status: complete.
+**Verification:** `xcodegen generate` picked up the new test file; sim `xcodebuild test` green — 23 app tests, 0 failures, all 7 ArtistSearch cases pass. Device was disconnected (`unavailable`), so no on-device install this round; feature is UI wiring + pure logic, fully covered by the ranker tests.
+
+**Adversary round 1 (agent ad84a42d15a87403a):** confirmed the download refactor is byte-for-byte behavior-preserving and nav/concurrency/scope are clean. One MED fix — the artist ⋯ menu could render empty mid-download; the toolbar gate now hides it when no item would show. Two LOW fixes — ranker splits on hyphen + any whitespace for interior-word matches, and a 1-char query matches exact names only. Ranking extracted to a pure `rankedArtists` with 5 added tests. Sim green: 29 tests, 0 failures. Skipped with rationale: AC/DC punctuation-insensitive match (spec extension), remove-during-download race (pre-existing in album path, now narrower for artists), folding perf (in line with existing album filter). Status: complete, pending adversary round 2.
 
 ## Dead-code removal + polish evening-out — 2026-06-30 (eve)
 
