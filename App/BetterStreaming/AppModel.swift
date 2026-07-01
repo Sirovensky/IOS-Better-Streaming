@@ -114,6 +114,12 @@ final class AppModel {
     /// Artist ids whose online-photo lookup already came up empty this session, so
     /// reopening their page doesn't re-hit the network every time.
     @ObservationIgnored private var attemptedArtistImageIDs: Set<String> = []
+    /// Classical performance credits by track id (MusicBrainz + OpenOpus), observed so
+    /// the album/player surfaces fill in as enrichment arrives. Persisted to disk.
+    private(set) var classicalCreditsByTrack: [String: ClassicalCredits] = [:]
+    /// Track ids whose classical lookup already ran this session (hit or miss) so
+    /// reopening an album doesn't re-hit the rate-limited API.
+    @ObservationIgnored private var attemptedClassicalIDs: Set<String> = []
     /// Warms the next queued track so advancing/skip is instant. Cancelled and
     /// replaced whenever the current track changes.
     private var prefetchTask: Task<Void, Never>?
@@ -247,6 +253,7 @@ final class AppModel {
         let snapshot = await library.bootstrap()
         sourceConfigs = snapshot.configs
         tracks = snapshot.tracks
+        classicalCreditsByTrack = await library.loadClassicalCredits()
         #if DEBUG
         await applyTestCredentialsIfNeeded()
         autoplayForTestingIfNeeded()
@@ -749,6 +756,54 @@ final class AppModel {
     /// after enabling a source) re-fetches.
     func resetArtistImageAttempts() {
         attemptedArtistImageIDs.removeAll()
+    }
+
+    // MARK: Classical credits (opt-in MusicBrainz + OpenOpus enrichment)
+
+    /// Classical credits for a track, or nil (→ no credits shown).
+    func classicalCredits(for trackID: String) -> ClassicalCredits? { classicalCreditsByTrack[trackID] }
+
+    /// Album-level credits: conductor / orchestra / composer / period are usually shared
+    /// across a classical album, so surface the most common value among its enriched
+    /// tracks. Per-track fields (work, soloists) are intentionally excluded here.
+    func albumClassicalCredits(_ albumID: String) -> ClassicalCredits? {
+        let all = tracks(forAlbum: albumID).compactMap { classicalCreditsByTrack[$0.id] }
+        guard !all.isEmpty else { return nil }
+        func common(_ pick: (ClassicalCredits) -> String?) -> String? {
+            let counts = Dictionary(grouping: all.compactMap(pick), by: { $0 }).mapValues(\.count)
+            // Most common wins; ties break alphabetically so the pick is deterministic.
+            return counts.max { a, b in a.value != b.value ? a.value < b.value : a.key > b.key }?.key
+        }
+        var merged = ClassicalCredits()
+        merged.conductor = common(\.conductor)
+        merged.orchestra = common(\.orchestra)
+        merged.composer = common(\.composer)
+        merged.period = common(\.period)
+        return merged.isEmpty ? nil : merged
+    }
+
+    /// Opt-in: enrich an album's tracks with classical credits, once each. No-op unless
+    /// the Settings toggle is on. Rate-limited by the client; results publish as they
+    /// arrive (observed) and persist once the album finishes.
+    func enrichClassicalCredits(albumID: String) {
+        guard UserDefaults.standard.bool(forKey: LibraryService.classicalCreditsKey) else { return }
+        let pending = tracks(forAlbum: albumID).filter {
+            classicalCreditsByTrack[$0.id] == nil && !attemptedClassicalIDs.contains($0.id)
+        }
+        guard !pending.isEmpty else { return }
+        pending.forEach { attemptedClassicalIDs.insert($0.id) }
+        Task { [weak self] in
+            guard let self else { return }
+            var didFind = false
+            for track in pending {
+                if let credits = await ClassicalMetadataClient.shared.credits(
+                    title: track.title, artist: track.artist, album: track.album) {
+                    self.classicalCreditsByTrack[track.id] = credits
+                    didFind = true
+                }
+            }
+            if didFind { await self.library.saveClassicalCredits(self.classicalCreditsByTrack) }
+        }
     }
 
     /// Per-artist dominant genre family. An artist whose tracks are tagged with a

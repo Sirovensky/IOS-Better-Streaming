@@ -459,6 +459,34 @@ struct Album: Identifiable, Hashable, Sendable {
     var artworkURL: URL?
 }
 
+/// Real-world classical performance credits for a track — fetched on demand from
+/// MusicBrainz + OpenOpus and stored in a per-track overlay (never written into the
+/// scan row, so a rescan can't clobber it). All fields optional: a match may fill in
+/// only some.
+struct ClassicalCredits: Codable, Hashable, Sendable {
+    var composer: String?
+    var conductor: String?
+    var orchestra: String?
+    var soloists: [String] = []
+    var work: String?
+    /// Composer's era from OpenOpus (e.g. "Baroque", "Classical", "Early Romantic").
+    var period: String?
+
+    /// "Empty" means no classical marker: a composer, conductor, or orchestra. Soloists
+    /// or a work title alone — which pop recordings also carry — don't qualify, so a
+    /// non-classical album isn't stored or shown with junk credits.
+    var isEmpty: Bool {
+        composer == nil && conductor == nil && orchestra == nil
+    }
+
+    /// Compact one-line summary for the player subtitle — the performers (conductor /
+    /// orchestra / soloists) when known, otherwise the composer.
+    var playerSummary: String? {
+        let performers = [conductor, orchestra].compactMap { $0 } + soloists
+        return performers.isEmpty ? composer : performers.joined(separator: " · ")
+    }
+}
+
 struct Artist: Identifiable, Hashable, Sendable {
     let id: String
     var name: String

@@ -92,3 +92,35 @@ Reverted the live-favourite row lookup: the adversary confirmed `toggleFavorite`
 Pre-existing (NOT from these commits, reported to user for a decision): the "Year" album sort is a no-op because `Album.year` is always nil (no scan-time year parsing; `Track` has no year field). Either wire year from file tags (a scanner feature) or remove the sort option.
 
 Files: `Services/LibraryService.swift`, `Components/MediaCells.swift`. Device build + install pending.
+
+## [2026-06-30 21:40] Classical credits (MusicBrainz + OpenOpus)
+
+**Discussed/decided:** User asked for real-world classical performer data (singers, orchestra, conductor). Researched sources; user chose MusicBrainz + OpenOpus (skipping AcoustID/Chromaprint fingerprinting — too heavy an iOS lift). Tag-based matching.
+
+**API shapes locked against live responses (not guessed):**
+- MB recording search: `ws/2/recording/?query=recording:"…" AND artist:"…" AND release:"…"&fmt=json` → `recordings[].id`.
+- MB recording lookup: `ws/2/recording/{id}?inc=artist-rels+work-rels&fmt=json` → `relations[]` with `type` in {`conductor`, `performing orchestra` (NOT "orchestra"), `performer`, `performance`→`work.id`}.
+- MB work lookup: `ws/2/work/{id}?inc=artist-rels&fmt=json` → `relations[].type=="composer"`.
+- OpenOpus: `api.openopus.org/composer/list/search/{surname}.json` → `composers[].complete_name` + `epoch`.
+
+**Implemented (all built + installed to device; toggle default OFF):**
+- `ClassicalMetadataClient` (actor) — mirrors `OnlineArtworkClient`: MB User-Agent, 1.1s MB rate limit (shared slot reservation), keyless. Pure `credits(fromRecordingRelations:)` extracted for unit testing.
+- `ClassicalCredits` model + `classical.json` overlay (LibraryService load/save, keyed by track id — never touches the scan row).
+- `AppModel`: observed `classicalCreditsByTrack`, `attemptedClassicalIDs` session set, `classicalCredits(for:)`, `albumClassicalCredits(_:)` (most-common merge for album header), `enrichClassicalCredits(albumID:)` (opt-in, gated on the toggle, background trickle, persists on completion).
+- Settings → Library toggle (`classicalCreditsKey`). Album detail credits card + full-player conductor·orchestra subtitle. Trigger on album open (`.task`).
+- Tests: `ClassicalMetadataTests` (7) over decoding + mapping, all green.
+
+**Deferred (noted to user):** wiring the "Year" album sort from MB release year (needs a release lookup + plumbing year into the `Album` model); enrichment currently runs for any opened album when on (bounded by attempted-set + rate limit + cache) — a genre gate is a possible refinement.
+
+**Status:** complete (core + UI + tests). Live enrichment quality on the user's real classical files pending their device test.
+
+### Classical feature — adversary review + fixes (folded into the same commit)
+
+A focused adversary pass on the classical feature caught a self-inflicted blocker and real quality bugs:
+
+- **H1 (blocker):** `LibraryService.classicalCreditsKey` was referenced (AppModel, SettingsView) but never defined — I planned the constant and missed the edit. The feature did NOT compile. Root cause of the false "green": the earlier build/test background commands ended with `echo`, so the harness "exit 0" was the echo's, not xcodebuild's; the `.app` "install" pushed the last good pre-classical build. **Fix:** added the constant. Re-verified with the true xcodebuild exit (no pipe) — `** BUILD SUCCEEDED **` / `** TEST SUCCEEDED **`, 16 tests, 0 failures.
+- **M1 (wrong data):** OpenOpus normalization matched by surname and took `.first`, so a shared-surname family (Bach, Strauss, Haydn) could show the wrong composer + era. **Fix:** only accept an exact full-name match or a single surname result; otherwise keep the authoritative MusicBrainz composer name (no period).
+- **L1 (junk):** `soloists` alone made credits non-empty, so a pop album stored + persisted credits that never display. **Fix:** `isEmpty` now requires composer/conductor/orchestra; soloists now also surface in the player line so they're not dead data.
+- **L2 (nondeterminism):** the album-level most-common merge broke ties by dictionary order. **Fix:** deterministic tie-break (count, then alphabetical).
+
+Verification lesson recorded: never trust a piped `${PIPESTATUS}`/`echo` exit for a build — grep the log for `** BUILD SUCCEEDED **` and read xcodebuild's own exit.

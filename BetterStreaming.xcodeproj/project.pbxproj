@@ -24,6 +24,7 @@
 		5C71D3CAAA5CD1F93B68BAF6 /* BetterStreamingCore in Frameworks */ = {isa = PBXBuildFile; productRef = 4743CF64E2A785D31AEF908D /* BetterStreamingCore */; };
 		5CB5CB64A15E2539735641D0 /* SourceSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C015E25AF1FC6DB33905132F /* SourceSetupView.swift */; };
 		5FB88568190E9418CD7AFCB3 /* MediaCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67EC9B69AFFE0B8D3BE8D13D /* MediaCells.swift */; };
+		60FC186125F49EA1C153F2FA /* ClassicalMetadataTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C1AA9E582D5136155C2A81E /* ClassicalMetadataTests.swift */; };
 		64A40EC9D5D6E532D7798D5E /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A149733E4E6770551C19AAC0 /* OnboardingView.swift */; };
 		6D4FEB10C0FDC358627AB7D3 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E729D5CE64BA0A5E4011A6C7 /* AppModel.swift */; };
 		7516A90BA0C41FFE8B1874B3 /* DetailViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84FC29C090D662305B442FA /* DetailViews.swift */; };
@@ -31,6 +32,7 @@
 		A0B0748A83745ECBC83E8681 /* CarPlaySceneController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE692FF1F8C3D7B3AA3707F1 /* CarPlaySceneController.swift */; };
 		AA0AA5C8BC4671757B47D993 /* BetterStreamingApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA220FF41926FF26E0FBD844 /* BetterStreamingApp.swift */; };
 		AF692CF969F07A6B64577410 /* DesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2300EBA8131EE6AF7617A1F /* DesignTokens.swift */; };
+		B2993D397F74BF91CBE0B5C8 /* ClassicalMetadataClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C86F1B820F84315DEB712370 /* ClassicalMetadataClient.swift */; };
 		B2B7B0DB65F0764A38B82548 /* RemoteFolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00A7302EDD3F93DA32911E53 /* RemoteFolderPicker.swift */; };
 		B5EF5E4C1F9FD30C4AFC38FE /* OfflineLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B85309C80C8120BB0FA8C25C /* OfflineLibraryView.swift */; };
 		E48911A655044AA9A1559265 /* SourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCDF8CD62C0F29867A2D1AED /* SourcesView.swift */; };
@@ -67,6 +69,7 @@
 		67EC9B69AFFE0B8D3BE8D13D /* MediaCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCells.swift; sourceTree = "<group>"; };
 		6A8917473AFA9BF5C2915EC1 /* MiniPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerView.swift; sourceTree = "<group>"; };
 		7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackEngine.swift; sourceTree = "<group>"; };
+		7C1AA9E582D5136155C2A81E /* ClassicalMetadataTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassicalMetadataTests.swift; sourceTree = "<group>"; };
 		7F28BFCB240C171BEBF1D73F /* BetterStreamingCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BetterStreamingCore; path = Packages/BetterStreamingCore; sourceTree = SOURCE_ROOT; };
 		82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryService.swift; sourceTree = "<group>"; };
 		8EFDEF12E77AC32B75528948 /* MediaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaModels.swift; sourceTree = "<group>"; };
@@ -82,6 +85,7 @@
 		C015E25AF1FC6DB33905132F /* SourceSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceSetupView.swift; sourceTree = "<group>"; };
 		C4F4408F379A4170283260F8 /* AudioEnhancements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEnhancements.swift; sourceTree = "<group>"; };
 		C84FC29C090D662305B442FA /* DetailViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailViews.swift; sourceTree = "<group>"; };
+		C86F1B820F84315DEB712370 /* ClassicalMetadataClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassicalMetadataClient.swift; sourceTree = "<group>"; };
 		CCDF8CD62C0F29867A2D1AED /* SourcesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourcesView.swift; sourceTree = "<group>"; };
 		E70689B5CEA75EEA1D8E2BED /* BetterStreamingTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = BetterStreamingTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E729D5CE64BA0A5E4011A6C7 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
@@ -209,6 +213,7 @@
 				00CA16D5B10556781744896D /* AudioEQTap.swift */,
 				97EC2A142AF43A4F4F8A5817 /* AutoCacheController.swift */,
 				FE692FF1F8C3D7B3AA3707F1 /* CarPlaySceneController.swift */,
+				C86F1B820F84315DEB712370 /* ClassicalMetadataClient.swift */,
 				97CD9B642C6A08F1D3F191D1 /* KeychainStore.swift */,
 				82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */,
 				481C9E2042704673AD25F099 /* Lyrics.swift */,
@@ -239,6 +244,7 @@
 			isa = PBXGroup;
 			children = (
 				1B5C617273F118B35B977197 /* AutoCacheControllerTests.swift */,
+				7C1AA9E582D5136155C2A81E /* ClassicalMetadataTests.swift */,
 			);
 			name = BetterStreamingTests;
 			path = App/BetterStreamingTests;
@@ -366,6 +372,7 @@
 				0014A58059C166B84F52F445 /* AutoCacheController.swift in Sources */,
 				AA0AA5C8BC4671757B47D993 /* BetterStreamingApp.swift in Sources */,
 				A0B0748A83745ECBC83E8681 /* CarPlaySceneController.swift in Sources */,
+				B2993D397F74BF91CBE0B5C8 /* ClassicalMetadataClient.swift in Sources */,
 				AF692CF969F07A6B64577410 /* DesignTokens.swift in Sources */,
 				7516A90BA0C41FFE8B1874B3 /* DetailViews.swift in Sources */,
 				468504DA1212B2B35A621E1C /* HomeView.swift in Sources */,
@@ -397,6 +404,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				234E83D6D6172A0B30BF7FCC /* AutoCacheControllerTests.swift in Sources */,
+				60FC186125F49EA1C153F2FA /* ClassicalMetadataTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

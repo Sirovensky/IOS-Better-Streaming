@@ -711,6 +711,12 @@ struct NowPlayingView: View {
                         .lineLimit(1)
                 }
                 .buttonStyle(.plain)
+                if let summary = model.classicalCredits(for: track.id)?.playerSummary {
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.6))
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
 

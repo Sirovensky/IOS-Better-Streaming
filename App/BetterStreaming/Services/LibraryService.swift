@@ -63,6 +63,7 @@ actor LibraryService {
     private let configsURL: URL
     private let legacyLibraryURL: URL
     private let autoCacheIndexURL: URL
+    private let classicalCreditsURL: URL
     private let mediaStore: MediaStore
     private let streamingService = RemoteStreamingService()
 
@@ -151,6 +152,7 @@ actor LibraryService {
         configsURL = support.appendingPathComponent("sources.json")
         legacyLibraryURL = support.appendingPathComponent("library.json")
         autoCacheIndexURL = support.appendingPathComponent("autocache.json")
+        classicalCreditsURL = support.appendingPathComponent("classical.json")
         mediaStore = MediaStore(configuration: MediaStoreConfiguration(databaseURL: support.appendingPathComponent("library.sqlite")))
         // Partial streaming scratch is per-session and not reused across
         // launches; reclaim any partials orphaned by a previous run.
@@ -808,6 +810,20 @@ actor LibraryService {
         }
     }
 
+    // MARK: Classical credits overlay (MusicBrainz + OpenOpus, keyed by track id)
+
+    func loadClassicalCredits() -> [String: ClassicalCredits] {
+        guard let data = try? Data(contentsOf: classicalCreditsURL),
+              let decoded = try? JSONDecoder().decode([String: ClassicalCredits].self, from: data) else { return [:] }
+        return decoded
+    }
+
+    func saveClassicalCredits(_ credits: [String: ClassicalCredits]) {
+        if let data = try? JSONEncoder().encode(credits) {
+            try? data.write(to: classicalCreditsURL, options: .atomic)
+        }
+    }
+
     private func markAutoCached(_ id: String) {
         loadAutoCacheIndexIfNeeded()
         if autoCachedIDs.insert(id).inserted { persistAutoCacheIndex() }
@@ -955,6 +971,7 @@ actor LibraryService {
     }
 
     static let onlineArtworkKey = "onlineArtwork.enabled.v1"
+    static let classicalCreditsKey = "classicalCredits.enabled.v1"
 
     /// Resolves an album cover and reports whether the (negative) result is
     /// CONCLUSIVE — i.e. an op didn't time out / disconnect along the way. A

@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @AppStorage(LibraryService.onlineArtworkKey) private var onlineArtwork = false
+    @AppStorage(LibraryService.classicalCreditsKey) private var classicalCredits = false
     /// Debounces live re-apply of audio enhancements while the user drags sliders
     /// (one re-prep after they settle, not one per step).
     @State private var enhApplyTask: Task<Void, Never>?
@@ -294,6 +295,16 @@ struct SettingsView: View {
                     .padding(12)
                 }
                 .buttonStyle(.plain)
+
+                rowDivider
+
+                Toggle(isOn: $classicalCredits) {
+                    settingsLabel("Classical credits",
+                                  "Pull conductor, orchestra, soloists, and composer from MusicBrainz when you open a classical album",
+                                  icon: "music.quarternote.3")
+                }
+                .tint(DesignTokens.brandPrimary)
+                .padding(12)
             }
             .surfaceCard(fill: DesignTokens.surfaceCard)
         }

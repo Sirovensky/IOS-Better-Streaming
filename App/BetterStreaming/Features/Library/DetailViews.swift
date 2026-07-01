@@ -159,6 +159,11 @@ struct AlbumDetailView: View {
                     .padding(.bottom, 12)
                 }
 
+                if let credits = model.albumClassicalCredits(albumID) {
+                    classicalCreditsCard(credits)
+                        .padding(.bottom, 10)
+                }
+
                 ForEach(Array(albumTracks.enumerated()), id: \.element.id) { idx, track in
                     TrackRowView(track: track, context: albumTracks, index: idx + 1)
                     Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
@@ -212,7 +217,45 @@ struct AlbumDetailView: View {
                 }
             }
         }
-        .task { model.ensureAlbumArtwork(albumID) }
+        .task {
+            model.ensureAlbumArtwork(albumID)
+            model.enrichClassicalCredits(albumID: albumID)
+        }
+    }
+
+    @ViewBuilder
+    private func classicalCreditsCard(_ credits: ClassicalCredits) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "music.quarternote.3").font(.caption).foregroundStyle(DesignTokens.brandPrimary)
+                Text("Classical credits").font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
+                Spacer(minLength: 0)
+                if let period = credits.period {
+                    Text(period).font(.caption2.weight(.medium)).foregroundStyle(DesignTokens.textSecondary)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(DesignTokens.surfaceCanvas, in: Capsule())
+                }
+            }
+            creditRow("Composer", credits.composer)
+            creditRow("Conductor", credits.conductor)
+            creditRow("Orchestra", credits.orchestra)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .surfaceCard(fill: DesignTokens.surfaceCard)
+    }
+
+    @ViewBuilder
+    private func creditRow(_ label: String, _ value: String?) -> some View {
+        if let value {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(label).font(.caption).foregroundStyle(DesignTokens.textSecondary)
+                    .frame(width: 76, alignment: .leading)
+                Text(value).font(.caption.weight(.medium)).foregroundStyle(DesignTokens.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+        }
     }
 }
 

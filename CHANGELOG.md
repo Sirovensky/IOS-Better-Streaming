@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-06-30 21:40]
+New feature: opt-in classical credits from MusicBrainz + OpenOpus.
+
+- A track's real performance credits — conductor, performing orchestra, soloists, and composer — pulled from MusicBrainz recording/work relationships, with the composer's full name and era normalized via OpenOpus. Off by default; a Settings → Library toggle turns it on. When on, opening a classical album trickles enrichment in the background (rate-limited to MusicBrainz's 1 req/s, each track tried once per session) and the results persist to `classical.json`.
+  - New `ClassicalMetadataClient` (actor, mirrors `OnlineArtworkClient`'s User-Agent + rate limit), `ClassicalCredits` model, per-track overlay in `AppModel`, and `LibraryService` load/save.
+  - Album detail shows a "Classical credits" card (composer / conductor / orchestra + era); the full player shows a compact conductor·orchestra line under the title. Both appear only when data exists.
+  - Files: `Services/ClassicalMetadataClient.swift` (new), `Model/MediaModels.swift`, `AppModel.swift`, `Services/LibraryService.swift`, `Features/Settings/SettingsView.swift`, `Features/Library/DetailViews.swift`, `Features/Player/MiniPlayerView.swift`.
+  - Tests: `ClassicalMetadataTests` — 7 cases over the MB/OpenOpus JSON decoding + the relations→credits mapping, against real response shapes.
+
 ## [2026-06-30 21:20]
 - Completed the launch cache sweep: it now also removes `*.art` (the remote folder-cover download temp), the last stranded-temp class. Full set swept from both media and artwork caches: `.part`, `.download`, `.art`, `.promote`.
   - `Services/LibraryService.swift`
