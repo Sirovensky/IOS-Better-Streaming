@@ -11,6 +11,7 @@
 		08245D20643E9CDB6CCA67F2 /* Artwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12E89289617B809FA95582A3 /* Artwork.swift */; };
 		09CB91B7CE09CC0517254724 /* LibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82A6A8CA823ABB2AD5D3EDA8 /* LibraryService.swift */; };
 		0C2915DAA2525F4DC783977C /* PlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7877EE6CC69C6DE310A789F0 /* PlaybackEngine.swift */; };
+		0C310313D0B8BC6B4B5F627E /* ArtistSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 383822CF956F1725ED939271 /* ArtistSearchTests.swift */; };
 		0E46E85BBB9BDEB1DE9A940F /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A775D9D0F736C93341DC053D /* LibraryView.swift */; };
 		18577502559950ADF1A0FE66 /* RadioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29D42752E6AB53570E3B5878 /* RadioView.swift */; };
 		2020D1F1D03AAD056E2AD787 /* MediaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EFDEF12E77AC32B75528948 /* MediaModels.swift */; };
@@ -60,6 +61,7 @@
 		1B5C617273F118B35B977197 /* AutoCacheControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoCacheControllerTests.swift; sourceTree = "<group>"; };
 		2114B2D425EAA3BC44AFC9E2 /* OnlineArtworkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineArtworkClient.swift; sourceTree = "<group>"; };
 		29D42752E6AB53570E3B5878 /* RadioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RadioView.swift; sourceTree = "<group>"; };
+		383822CF956F1725ED939271 /* ArtistSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtistSearchTests.swift; sourceTree = "<group>"; };
 		46FFD8508D86BB73EEB8878B /* BetterStreaming.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = BetterStreaming.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		481C9E2042704673AD25F099 /* Lyrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Lyrics.swift; sourceTree = "<group>"; };
 		4C690EE398FFC66BC3A5A3DF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -243,6 +245,7 @@
 		BA89438545CCF79F935148FC /* BetterStreamingTests */ = {
 			isa = PBXGroup;
 			children = (
+				383822CF956F1725ED939271 /* ArtistSearchTests.swift */,
 				1B5C617273F118B35B977197 /* AutoCacheControllerTests.swift */,
 				7C1AA9E582D5136155C2A81E /* ClassicalMetadataTests.swift */,
 			);
@@ -403,6 +406,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0C310313D0B8BC6B4B5F627E /* ArtistSearchTests.swift in Sources */,
 				234E83D6D6172A0B30BF7FCC /* AutoCacheControllerTests.swift in Sources */,
 				60FC186125F49EA1C153F2FA /* ClassicalMetadataTests.swift in Sources */,
 			);

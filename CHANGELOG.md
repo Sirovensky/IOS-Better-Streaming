@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-07-01 09:20]
+Two search/library features.
+
+- Artists now show up in Search. Typing part of an artist name surfaces the artist itself as the top result, above albums and songs — "my chemical" finds "My Chemical Romance". Matching is case- and accent-insensitive and ranked exact > name-prefix > word-prefix > contains, so the closest name wins. Tapping the row opens the artist page.
+  - New `AppModel.artistResults(_:)` + pure `artistMatchRank(name:query:)`; an "Artists" section at the top of `SearchView`'s results.
+- "Download All" for an artist. The artist page has an options menu (⋯) to download every remote track by that artist for offline, and to remove those downloads again — the same pair the album page offers. Downloads run one at a time through a shared batch path so they don't all fight for the source connection.
+  - New `downloadArtist` / `removeArtistDownloads` / `canManageArtistDownload` / `artistHasDownloads` / `artistFullyDownloaded` in `AppModel`; `downloadAlbum` refactored onto the same `startDownloads` core (behavior unchanged).
+  - Files: `AppModel.swift`, `Features/Search/SearchView.swift`, `Features/Library/DetailViews.swift`.
+  - Tests: `ArtistSearchTests` — 7 cases over the match ranker (exact / prefix / word-prefix / contains / diacritics / no-match / ordering). Sim `xcodebuild test` green: 23 app tests, 0 failures.
+
 ## [2026-06-30 21:40]
 New feature: opt-in classical credits from MusicBrainz + OpenOpus.
 

@@ -367,6 +367,27 @@ struct ArtistDetailView: View {
         .appScreenBackground()
         .navigationTitle(model.artistName(artistID) ?? "Artist")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if model.canManageArtistDownload(artistID) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        if !model.artistFullyDownloaded(artistID) {
+                            Button("Download All", systemImage: "arrow.down.circle") {
+                                model.downloadArtist(artistID)
+                            }
+                        }
+                        if model.artistHasDownloads(artistID) {
+                            Button("Remove Downloads", systemImage: "trash", role: .destructive) {
+                                model.removeArtistDownloads(artistID)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("Artist options")
+                }
+            }
+        }
         .task(id: artistID) { model.ensureArtistImage(artistID) }
     }
 }

@@ -1464,26 +1464,52 @@ final class AppModel {
         return !manageable.isEmpty && !manageable.contains { $0.cacheState == .remoteOnly }
     }
 
-    func downloadAlbum(_ albumID: String) {
-        let targets = tracks(forAlbum: albumID).filter { canManageDownload($0.id) && $0.cacheState == .remoteOnly }
-        guard !targets.isEmpty else { return }
-        // Mark all queued, then download sequentially in ONE task — not N
-        // fire-and-forget tasks all contending for the source's background client.
-        for t in targets where trackIndex[t.id] != nil { tracks[trackIndex[t.id]!].cacheState = .downloading }
-        libraryRevision &+= 1   // one rebuild for the whole batch, not per track
+    func downloadAlbum(_ albumID: String) { startDownloads(tracks(forAlbum: albumID)) }
+
+    func removeAlbumDownloads(_ albumID: String) { removeDownloads(tracks(forAlbum: albumID)) }
+
+    // MARK: Artist-level downloads (mirror the album actions over an artist's tracks)
+
+    /// A remote artist (at least one track can be downloaded/pinned).
+    func canManageArtistDownload(_ artistID: String) -> Bool {
+        tracks(forArtist: artistID).contains { canManageDownload($0.id) }
+    }
+
+    /// At least one of the artist's tracks is already on disk (pinned or auto-cached).
+    func artistHasDownloads(_ artistID: String) -> Bool {
+        tracks(forArtist: artistID).contains { $0.cacheState == .cached || $0.cacheState == .prefetched }
+    }
+
+    /// Every downloadable track by the artist is already on disk, so the menu can keep
+    /// offering "Download All" until then instead of only "Remove".
+    func artistFullyDownloaded(_ artistID: String) -> Bool {
+        let manageable = tracks(forArtist: artistID).filter { canManageDownload($0.id) }
+        return !manageable.isEmpty && !manageable.contains { $0.cacheState == .remoteOnly }
+    }
+
+    func downloadArtist(_ artistID: String) { startDownloads(tracks(forArtist: artistID)) }
+
+    func removeArtistDownloads(_ artistID: String) { removeDownloads(tracks(forArtist: artistID)) }
+
+    /// Mark every not-yet-cached, downloadable track in `targets` as downloading, then
+    /// fetch them sequentially in ONE task — not N fire-and-forget tasks all contending
+    /// for the source's background client. Bumps `libraryRevision` once for the batch.
+    private func startDownloads(_ targets: [Track]) {
+        let pending = targets.filter { canManageDownload($0.id) && $0.cacheState == .remoteOnly }
+        guard !pending.isEmpty else { return }
+        for t in pending where trackIndex[t.id] != nil { tracks[trackIndex[t.id]!].cacheState = .downloading }
+        libraryRevision &+= 1
         Task { [weak self] in
             guard let self else { return }
-            for t in targets {
+            for t in pending {
                 let ok = await self.library.ensureCached(t)
                 self.setCacheState(trackID: t.id, ok ? .cached : .remoteOnly)
             }
         }
     }
 
-    func removeAlbumDownloads(_ albumID: String) {
-        for track in tracks(forAlbum: albumID) where canManageDownload(track.id) {
-            removeDownload(track.id)
-        }
+    private func removeDownloads(_ targets: [Track]) {
+        for track in targets where canManageDownload(track.id) { removeDownload(track.id) }
     }
 
     /// An album is "favorite" when every track is favorited; toggling sets them all.
@@ -1511,6 +1537,37 @@ final class AppModel {
         // Scan the precomputed lowercased haystack (built in rebuildIndex) instead of
         // five locale-aware `contains` per track on every keystroke.
         return tracks.filter { (searchHaystack[$0.id] ?? "").contains(trimmed) }
+    }
+
+    /// Artists whose name the query matches, best match first — so typing part of an
+    /// artist ("my chemical") surfaces the artist ("My Chemical Romance") as the top
+    /// result above songs and albums. Ranked exact > name-prefix > word-prefix > contains.
+    func artistResults(_ query: String) -> [Artist] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2 else { return [] }   // avoid single-letter spam
+        return artists
+            .compactMap { a in Self.artistMatchRank(name: a.name, query: trimmed).map { (a, $0) } }
+            .sorted { l, r in
+                if l.1 != r.1 { return l.1 < r.1 }                                   // better rank first
+                if l.0.trackCount != r.0.trackCount { return l.0.trackCount > r.0.trackCount }
+                return l.0.name.localizedStandardCompare(r.0.name) == .orderedAscending
+            }
+            .prefix(6)
+            .map(\.0)
+    }
+
+    /// Rank of how well `name` matches `query`, or nil if it doesn't match at all.
+    /// Lower is better. Case- and diacritic-insensitive so "faure" matches "Fauré".
+    nonisolated static func artistMatchRank(name: String, query: String) -> Int? {
+        let opts: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        let n = name.folding(options: opts, locale: nil)
+        let q = query.folding(options: opts, locale: nil).trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return nil }
+        if n == q { return 0 }
+        if n.hasPrefix(q) { return 1 }
+        if n.split(separator: " ").contains(where: { $0.hasPrefix(q) }) { return 2 }  // "chemical" → "My Chemical Romance"
+        if n.contains(q) { return 3 }
+        return nil
     }
 
     // MARK: Wiring

@@ -24,6 +24,7 @@ struct SearchView: View {
     // was the search-scroll lag.
     @State private var results: [Track] = []
     @State private var matchingAlbums: [Album] = []
+    @State private var matchingArtists: [Artist] = []
     @State private var searchTask: Task<Void, Never>?
 
     private var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -33,7 +34,7 @@ struct SearchView: View {
             Group {
                 if trimmedQuery.isEmpty {
                     browse
-                } else if results.isEmpty && matchingAlbums.isEmpty {
+                } else if results.isEmpty && matchingAlbums.isEmpty && matchingArtists.isEmpty {
                     ContentUnavailableView.search(text: query)
                 } else {
                     resultsList
@@ -74,9 +75,11 @@ struct SearchView: View {
         guard !trimmed.isEmpty else {
             results = []
             matchingAlbums = []
+            matchingArtists = []
             return
         }
         results = model.searchResults(q)
+        matchingArtists = model.artistResults(q)
         matchingAlbums = model.albums.filter {
             $0.title.localizedCaseInsensitiveContains(trimmed) || $0.artist.localizedCaseInsensitiveContains(trimmed)
         }
@@ -85,6 +88,30 @@ struct SearchView: View {
     private var resultsList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
+                if !matchingArtists.isEmpty {
+                    SectionHeader(title: "Artists")
+                    LazyVStack(spacing: 0) {
+                        ForEach(matchingArtists) { artist in
+                            NavigationLink(value: LibraryRoute.artist(artist.id)) {
+                                HStack(spacing: 12) {
+                                    ArtworkView(url: model.artistImage(artist.id), artworkKey: artist.id, glyph: "music.mic", cornerRadius: 26)
+                                        .frame(width: 52, height: 52)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(artist.name).font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
+                                        Text("\(artist.albumCount) albums · \(artist.trackCount) songs")
+                                            .font(.caption).foregroundStyle(DesignTokens.textSecondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right").font(.footnote).foregroundStyle(DesignTokens.textTertiary)
+                                }
+                                .padding(.vertical, 6)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
+                        }
+                    }
+                }
                 if !matchingAlbums.isEmpty {
                     SectionHeader(title: "Albums")
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 18) {

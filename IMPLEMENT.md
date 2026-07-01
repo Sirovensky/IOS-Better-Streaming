@@ -1,5 +1,17 @@
 # Implementation log
 
+## Artist search results + "Download All" for an artist — 2026-07-01
+
+**Discussed/decided:** User asked for (1) a "Download all" action for a specific artist, and (2) artists to appear as search results — first result — when a query matches the name, even loosely ("My chemical" → "My Chemical Romance").
+
+**What was implemented:**
+- Search now returns artists. `AppModel.artistResults(_:)` ranks artists with a pure `artistMatchRank(name:query:)` (exact 0 > name-prefix 1 > word-prefix 2 > contains 3), case- and diacritic-insensitive, best first, capped at 6, min 2-char query. `SearchView` renders an "Artists" section at the top of the results list (above Albums and Songs) so the matched artist is the first thing shown; each row pushes `LibraryRoute.artist`.
+- Artist-level downloads. `ArtistDetailView` gained a ⋯ toolbar menu (shown only when the artist has downloadable tracks) with "Download All" and "Remove Downloads", mirroring the album page. New `AppModel` methods `downloadArtist` / `removeArtistDownloads` / `canManageArtistDownload` / `artistHasDownloads` / `artistFullyDownloaded`. Extracted the album download loop into a shared private `startDownloads(_:)` / `removeDownloads(_:)` (second copy → DRY); `downloadAlbum` / `removeAlbumDownloads` now delegate, behavior unchanged.
+
+**Files created/changed:** `AppModel.swift`, `Features/Search/SearchView.swift`, `Features/Library/DetailViews.swift`, `App/BetterStreamingTests/ArtistSearchTests.swift` (new, 7 tests).
+
+**Verification:** `xcodegen generate` picked up the new test file; sim `xcodebuild test` green — 23 app tests, 0 failures, all 7 ArtistSearch cases pass. Device was disconnected (`unavailable`), so no on-device install this round; feature is UI wiring + pure logic, fully covered by the ranker tests. Status: complete.
+
 ## Dead-code removal + polish evening-out — 2026-06-30 (eve)
 
 **Discussed/decided:** After a max-effort adversarial bird's-eye review, the user set the goal: commit current work as a revert point, clean up the binary (remove/merge unused code), and even out polish across visuals / core / other surfaces rather than obsessing over the player. Then run an adversary-review agent, fix, respawn until nothing surfaces.
