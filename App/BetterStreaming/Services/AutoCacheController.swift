@@ -65,6 +65,10 @@ final class AutoCacheController {
 
     private(set) var autoCachedBytes: Int64 = 0
     private(set) var lastReconcileSummary: String = "Idle"
+    /// Bumped on every play-count / stat mutation. Views key stat-dependent caches
+    /// (e.g. "Most Played") on it so they refresh when counts change without waiting
+    /// on an unrelated library rescan.
+    private(set) var statsRevision: Int = 0
 
     // MARK: Dependencies
 
@@ -127,6 +131,7 @@ final class AutoCacheController {
         if playEvents.count > Self.maxPlayEvents {
             playEvents.removeFirst(playEvents.count - Self.maxPlayEvents)
         }
+        statsRevision &+= 1
         persistStatsSoon()
     }
 
@@ -147,6 +152,38 @@ final class AutoCacheController {
     func flushStats() {
         persistTask?.cancel()
         persistStats()
+    }
+
+    /// Migrate play stats + events after a scan re-keyed files (identity remap) —
+    /// without this a re-tagged track reads as never-played and drops out of
+    /// Heavy Rotation / Top This Month / the auto-cache score.
+    func remapKeys(_ remap: [String: String]) {
+        guard !remap.isEmpty else { return }
+        var changed = false
+        for (old, new) in remap {
+            guard let stat = stats.removeValue(forKey: old) else { continue }
+            if var existing = stats[new] {
+                existing.playCount += stat.playCount
+                existing.lastPlayedAtEpoch = max(existing.lastPlayedAtEpoch, stat.lastPlayedAtEpoch)
+                existing.firstPlayedAtEpoch = existing.firstPlayedAtEpoch == 0
+                    ? stat.firstPlayedAtEpoch
+                    : min(existing.firstPlayedAtEpoch, stat.firstPlayedAtEpoch)
+                stats[new] = existing
+            } else {
+                stats[new] = stat
+            }
+            changed = true
+        }
+        for i in playEvents.indices {
+            if let new = remap[playEvents[i].id] {
+                playEvents[i].id = new
+                changed = true
+            }
+        }
+        if changed {
+            statsRevision &+= 1
+            persistStatsSoon()
+        }
     }
 
     func stat(for trackID: String) -> PlayStat { stats[trackID] ?? PlayStat() }
@@ -243,7 +280,17 @@ final class AutoCacheController {
             .sorted { $0.1 > $1.1 }
 
         var keep: [String] = []
+        var keepSet = Set<String>()
         var used: Int64 = 0
+
+        // Manual downloads (`.cached`) are tracked separately and are NOT bound by
+        // the auto budget: keep them (so they're never mistaken for evictable) but
+        // don't charge their bytes against the budget.
+        func retain(_ track: Track) -> Bool {
+            guard keepSet.insert(track.id).inserted else { return false }
+            keep.append(track.id)
+            return true
+        }
 
         // Favourites are kept warm first, but still bounded by the budget so a
         // large favourited library can't fill the device. Highest-scored (most
@@ -253,22 +300,21 @@ final class AutoCacheController {
                 .filter { $0.isFavorite }
                 .sorted { score(for: $0.id, now: now) > score(for: $1.id, now: now) }
             for track in favorites {
+                if track.cacheState == .cached { _ = retain(track); continue }
                 let size = bytesEstimate(for: track)
                 if used + size > budgetBytes { continue }
-                keep.append(track.id)
-                used += size
+                if retain(track) { used += size }
             }
         }
 
         for (track, _) in scored {
-            if keep.contains(track.id) { continue }
+            if keepSet.contains(track.id) { continue }
+            if track.cacheState == .cached { _ = retain(track); continue }
             let size = bytesEstimate(for: track)
             if used + size > budgetBytes { continue }
-            keep.append(track.id)
-            used += size
+            if retain(track) { used += size }
         }
 
-        let keepSet = Set(keep)
         // Evict tracks that the auto-cache previously held but are no longer in
         // the hot set. Manual downloads use `.cached`; auto-cache uses `.prefetched`.
         let evict = library
@@ -301,6 +347,7 @@ final class AutoCacheController {
     func resetStats() {
         stats = [:]
         playEvents = []
+        statsRevision &+= 1
         persistStats()
         autoCachedBytes = 0
         lastReconcileSummary = "Listening history cleared"

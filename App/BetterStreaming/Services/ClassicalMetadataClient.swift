@@ -50,7 +50,10 @@ actor ClassicalMetadataClient {
                 credits.conductor = relation.artist?.name ?? credits.conductor
             case "performing orchestra":
                 credits.orchestra = relation.artist?.name ?? credits.orchestra
-            case "performer":
+            // MusicBrainz encodes an instrumental soloist as "instrument" and a
+            // singer as "vocal"; bare "performer" is the minority, so mapping only
+            // it left soloists nearly always empty.
+            case "instrument", "vocal", "performer":
                 if let name = relation.artist?.name, !credits.soloists.contains(name) {
                     credits.soloists.append(name)
                 }

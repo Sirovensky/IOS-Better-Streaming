@@ -99,7 +99,7 @@ private final class DevicePlaybackProbe {
     private let streamCacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("BetterStreamingProbeRanges", isDirectory: true)
 
     func run(update: @escaping @MainActor (String) -> Void) async -> Int32 {
-        print("BETTERSTREAMING_PROBE start")
+        AppLog.source.info("BETTERSTREAMING_PROBE start")
         do {
             try configureAudioSession()
             try FileManager.default.createDirectory(at: streamCacheDir, withIntermediateDirectories: true)
@@ -119,13 +119,13 @@ private final class DevicePlaybackProbe {
             )
 
             let connection = await client.testConnection()
-            print("BETTERSTREAMING_PROBE connection=\(connection.state.rawValue)")
+            AppLog.source.info("BETTERSTREAMING_PROBE connection=\(connection.state.rawValue)")
             guard connection.state == .online else {
                 throw connection.failure ?? ProbeError.connectionFailed
             }
 
             let candidates = try await findCandidates(client: client, rootPath: source.rootPath, targetExtensions: source.targetExtensions)
-            print("BETTERSTREAMING_PROBE candidates=\(candidates.map(\.label).joined(separator: ","))")
+            AppLog.source.info("BETTERSTREAMING_PROBE candidates=\(candidates.map(\.label).joined(separator: ","), privacy: .public)")
             guard !candidates.isEmpty else {
                 throw ProbeError.noTracks
             }
@@ -134,25 +134,25 @@ private final class DevicePlaybackProbe {
             for candidate in candidates {
                 update("Testing \(candidate.label)...")
                 let result = await test(candidate, client: client)
-                print(result.logLine)
+                AppLog.source.info("\(result.logLine, privacy: .public)")
                 if result.passed { passed += 1 }
             }
 
             let missing = missingLabels(in: candidates)
             if !missing.isEmpty {
-                print("BETTERSTREAMING_PROBE missing=\(missing.joined(separator: ","))")
+                AppLog.source.info("BETTERSTREAMING_PROBE missing=\(missing.joined(separator: ","), privacy: .public)")
             }
 
             guard passed == candidates.count else {
                 throw ProbeError.playbackFailed
             }
 
-            print("BETTERSTREAMING_PROBE pass tested=\(candidates.map(\.label).joined(separator: ","))")
+            AppLog.source.info("BETTERSTREAMING_PROBE pass tested=\(candidates.map(\.label).joined(separator: ","), privacy: .public)")
             update("Playback probe passed")
             return EXIT_SUCCESS
         } catch {
             player.pause()
-            print("BETTERSTREAMING_PROBE fail reason=\(String(describing: error))")
+            AppLog.source.error("BETTERSTREAMING_PROBE fail reason=\(String(describing: error), privacy: .public)")
             update("Playback probe failed")
             return EXIT_FAILURE
         }
@@ -205,7 +205,7 @@ private final class DevicePlaybackProbe {
         }
 
         let ordered = targetExtensions.compactMap { foundByExtension[$0] }
-        print("BETTERSTREAMING_PROBE listedDirectories=\(listedDirectories)")
+        AppLog.source.info("BETTERSTREAMING_PROBE listedDirectories=\(listedDirectories)")
         return ordered
     }
 

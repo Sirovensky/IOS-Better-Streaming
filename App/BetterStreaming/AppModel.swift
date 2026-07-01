@@ -88,6 +88,8 @@ final class AppModel {
     @ObservationIgnored private var _songsSortedCache: [Track] = []
     @ObservationIgnored private var _needsAttentionCacheRev = -1
     @ObservationIgnored private var _needsAttentionCache: [Track] = []
+    @ObservationIgnored private var _genreConsensusRev = -1
+    @ObservationIgnored private var _genreConsensusCache: [String: String] = [:]
     @ObservationIgnored private var _statsCacheRev = -1
     @ObservationIgnored private var _statsCache = LibraryStats(
         songs: 0, albums: 0, artists: 0, totalDurationSeconds: 0,
@@ -195,6 +197,9 @@ final class AppModel {
         var elapsed: Double
         var shuffle: Bool
         var repeatMode: String
+        /// The pre-shuffle order, so shuffle-off after relaunch yields the real
+        /// order instead of freezing the shuffled one. Optional for back-compat.
+        var unshuffledIDs: [String]?
     }
 
     /// Persist the current queue + position. `throttled` saves at most every 5s
@@ -216,7 +221,8 @@ final class AppModel {
             index: engine.currentIndex,
             elapsed: engine.elapsed,
             shuffle: engine.shuffleEnabled,
-            repeatMode: engine.repeatMode.rawValue
+            repeatMode: engine.repeatMode.rawValue,
+            unshuffledIDs: engine.unshuffledQueue.map(\.id)
         )
         if let data = try? JSONEncoder().encode(snapshot) {
             UserDefaults.standard.set(data, forKey: Self.playbackSnapshotKey)
@@ -238,18 +244,24 @@ final class AppModel {
         let foundIndex = savedID.flatMap { id in queue.firstIndex { $0.id == id } }
         // If the exact saved track is gone, start the surviving queue at its head
         // from 0 — don't carry the old track's elapsed onto a different song.
+        // Restore the pre-shuffle order too so a later shuffle-off is honored.
+        let unshuffled = snapshot.unshuffledIDs.map(tracks).flatMap { $0.isEmpty ? nil : $0 }
         engine.restore(
             queue: queue,
             index: foundIndex ?? 0,
             elapsed: foundIndex != nil ? snapshot.elapsed : 0,
             shuffle: snapshot.shuffle,
-            repeatMode: RepeatMode(rawValue: snapshot.repeatMode) ?? .off
+            repeatMode: RepeatMode(rawValue: snapshot.repeatMode) ?? .off,
+            unshuffled: unshuffled
         )
     }
 
     // MARK: Bootstrap / scan
 
     private func bootstrap() async {
+        await library.setStreamCacheCallback { [weak self] id in
+            Task { @MainActor in self?.handleTrackFullyCached(id) }
+        }
         let snapshot = await library.bootstrap()
         sourceConfigs = snapshot.configs
         tracks = snapshot.tracks
@@ -310,6 +322,8 @@ final class AppModel {
             guard !Task.isCancelled else { return }
             self.tracks = saved
             self.rebuildIndex()
+            self.prunePlaylistDeadIDs()
+            self.classicalCreditsByTrack = await self.library.loadClassicalCredits()   // prunes dead keys now the library is loaded
             self.rebuildSources()
             self.isLoadingSavedLibrary = false
             self.restorePlaybackIfNeeded()   // re-select last track, paused at saved position
@@ -320,7 +334,10 @@ final class AppModel {
             guard !Task.isCancelled else { return }
             let refreshed = await self.library.refreshCacheSnapshot()
             guard !Task.isCancelled else { return }
-            self.tracks = refreshed
+            // Merge, preferring this session's optimistic in-flight states over the
+            // service copy so a download/queue started in the launch window isn't
+            // clobbered back to the on-disk snapshot.
+            self.tracks = self.mergingOptimisticCacheStates(into: refreshed)
             self.rebuildIndex()
             self.rebuildSources()
         }
@@ -345,6 +362,11 @@ final class AppModel {
             }
             tracks = updated
             rebuildIndex()
+            // Carry favorites/playlists/snapshot/recents/credits forward for any
+            // files that re-keyed (in-place re-tag/touch), then drop playlist ids
+            // that genuinely went away.
+            applyIdentityRemap(await library.takeIdentityRemap(sourceID: sourceID))
+            prunePlaylistDeadIDs()
             sourceHealth[sourceID] = .online
             let sourceCount = updated.filter { $0.sourceID == sourceID }.count
             if await library.lastScanIncomplete {
@@ -387,12 +409,15 @@ final class AppModel {
             if forceRetry { await self.library.resetArtworkAttempts() }
             for _ in 0..<12 {
                 if Task.isCancelled { return }
-                let map = await self.library.backfillAlbumArtwork(for: self.tracks)
-                if Task.isCancelled || map.isEmpty { return }
+                let pass = await self.library.backfillAlbumArtwork(for: self.tracks)
+                if Task.isCancelled { return }
                 for i in self.tracks.indices where self.tracks[i].artworkURL == nil {
-                    if let url = map[self.tracks[i].albumID] { self.tracks[i].artworkURL = url }
+                    if let url = pass.found[self.tracks[i].albumID] { self.tracks[i].artworkURL = url }
                 }
-                self.libraryRevision &+= 1
+                if !pass.found.isEmpty { self.libraryRevision &+= 1 }
+                // Exit when there was nothing left to try this run — a single
+                // cover-less batch no longer kills the whole backfill.
+                if pass.attempted == 0 { return }
             }
         }
     }
@@ -517,6 +542,7 @@ final class AppModel {
         sourceHealth[id] = nil
         tracks.removeAll { $0.sourceID == id }
         rebuildIndex()
+        prunePlaylistDeadIDs()
         rebuildSources()
     }
 
@@ -586,9 +612,11 @@ final class AppModel {
         var haystack: [String: String] = [:]
         haystack.reserveCapacity(tracks.count)
         for track in tracks {
-            haystack[track.id] = "\(track.title) \(track.artist) \(track.album) \(track.genre) \(track.folderPath)".lowercased()
+            haystack[track.id] = "\(track.title) \(track.artist) \(track.album) \(track.genre) \(track.folderPath)"
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
         }
         searchHaystack = haystack
+        refreshPlaylistArtwork()   // playlist tiles derive from resolved tracks
         libraryRevision &+= 1   // invalidate albums/stats caches
     }
 
@@ -715,6 +743,7 @@ final class AppModel {
     /// source and the online-artwork setting). Called when an album with no art is
     /// opened, so the user doesn't have to wait for a background backfill pass.
     func ensureAlbumArtwork(_ albumID: String) {
+        guard !offlineMode else { return }   // no source to read a cover from while offline
         let albumTracks = tracks(forAlbum: albumID)
         guard let representative = albumTracks.first,
               !albumTracks.contains(where: { $0.artworkURL != nil }) else { return }
@@ -740,6 +769,7 @@ final class AppModel {
     /// offline too; a genuine miss is remembered for the session so the page open
     /// doesn't re-hit the network each time.
     func ensureArtistImage(_ artistID: String) {
+        guard !offlineMode else { return }   // don't dial the network for a photo while offline
         guard artistImageURLs[artistID] == nil, !attemptedArtistImageIDs.contains(artistID) else { return }
         let sources = ArtistImageSource.enabled
         guard !sources.isEmpty, let name = artistName(artistID) ?? tracks(forArtist: artistID).first?.artist else { return }
@@ -786,6 +816,7 @@ final class AppModel {
     /// the Settings toggle is on. Rate-limited by the client; results publish as they
     /// arrive (observed) and persist once the album finishes.
     func enrichClassicalCredits(albumID: String) {
+        guard !offlineMode else { return }   // enrichment is a MusicBrainz/OpenOpus round trip
         guard UserDefaults.standard.bool(forKey: LibraryService.classicalCreditsKey) else { return }
         let pending = tracks(forAlbum: albumID).filter {
             classicalCreditsByTrack[$0.id] == nil && !attemptedClassicalIDs.contains($0.id)
@@ -810,6 +841,12 @@ final class AppModel {
     /// mix of sub-genres (Amaranthe: rock / symphonic metal / heavy metal) gets
     /// one consensus family, so a station pulls their whole catalog.
     var genreConsensusByArtist: [String: String] {
+        let rev = libraryRevision   // registers observation; recompute once per change
+        if _genreConsensusRev != rev { _genreConsensusCache = computeGenreConsensus(); _genreConsensusRev = rev }
+        return _genreConsensusCache
+    }
+
+    private func computeGenreConsensus() -> [String: String] {
         var counts: [String: [String: Int]] = [:]
         for track in tracks where track.kind == .audio {
             guard let g = MetadataGrouping.canonicalGenre(track.genre) else { continue }
@@ -941,23 +978,29 @@ final class AppModel {
 
     // MARK: Playback intents
 
+    /// Clear the play-count dedup so a deliberate user play/replay of the same
+    /// track counts (the dedup exists only to swallow engine-internal stall re-fires).
+    private func clearReplayDedup() { lastNotedPlayID = nil }
+
     func play(_ track: Track, in context: [Track]) {
+        clearReplayDedup()
         let playable = playableContext(context)
         #if DEBUG
-        print("BETTERSTREAMING_MODEL play_request title=\(track.title) ext=\(track.fileExtension) context=\(context.count) playable=\(playable.count) offline=\(offlineMode)")
+        AppLog.playback.debug("BETTERSTREAMING_MODEL play_request title=\(track.title) ext=\(track.fileExtension, privacy: .public) context=\(context.count) playable=\(playable.count) offline=\(self.offlineMode)")
         #endif
         engine.setShuffle(false)
         if let start = playable.firstIndex(where: { $0.id == track.id }) {
             engine.play(playable, startAt: start)
         } else {
             #if DEBUG
-            print("BETTERSTREAMING_MODEL play_fallback_single title=\(track.title)")
+            AppLog.playback.debug("BETTERSTREAMING_MODEL play_fallback_single title=\(track.title)")
             #endif
             engine.play([track], startAt: 0)
         }
     }
 
     func playAlbum(_ albumID: String, shuffled: Bool = false) {
+        clearReplayDedup()
         let list = playableContext(tracks(forAlbum: albumID))
         guard !list.isEmpty else { return }
         if shuffled { engine.playShuffled(list) }
@@ -965,9 +1008,10 @@ final class AppModel {
     }
 
     /// Lyrics for a track (`.lrc` sidecar), synced when timestamped.
-    func lyrics(for track: Track) async -> [LyricsLine]? { await library.lyrics(for: track) }
+    func lyrics(for track: Track) async -> [LyricsLine]? { await library.lyrics(for: track, offline: offlineMode) }
 
     func playPlaylist(_ playlist: Playlist, shuffled: Bool = false) {
+        clearReplayDedup()
         let list = playableContext(tracks(playlist.trackIDs))
         guard !list.isEmpty else { return }
         if shuffled { engine.playShuffled(list) }
@@ -979,17 +1023,104 @@ final class AppModel {
     private static let playlistsKey = "playlists.v1"
 
     func loadPlaylists() {
-        guard let data = UserDefaults.standard.data(forKey: Self.playlistsKey),
-              let decoded = try? JSONDecoder().decode([Playlist].self, from: data) else { return }
+        guard let data = UserDefaults.standard.data(forKey: Self.playlistsKey) else { return }
+        guard let decoded = try? JSONDecoder().decode([Playlist].self, from: data) else {
+            // Corrupt blob: preserve it under a backup key instead of letting the next
+            // mutation silently overwrite it, and keep the empty state visible.
+            UserDefaults.standard.set(data, forKey: Self.playlistsKey + ".corrupt")
+            UserDefaults.standard.removeObject(forKey: Self.playlistsKey)
+            return
+        }
         // Keep only user playlists (not live folders, which are derived).
         playlists = decoded
+        refreshPlaylistArtwork()
     }
 
+    /// Persist WITHOUT the derived artwork URLs — those are cached-file paths under a
+    /// data-container UUID that changes on every app update, so a persisted absolute
+    /// path dies (the same bug already fixed for media_items). Artwork is re-derived
+    /// from the resolved tracks at load/read time via `refreshPlaylistArtwork`.
     private func persistPlaylists() {
-        let userPlaylists = playlists.filter { !$0.isLiveFolder }
+        let userPlaylists = playlists.filter { !$0.isLiveFolder }.map { p -> Playlist in
+            var copy = p; copy.artworkURLs = []; return copy
+        }
         if let data = try? JSONEncoder().encode(userPlaylists) {
             UserDefaults.standard.set(data, forKey: Self.playlistsKey)
         }
+    }
+
+    /// Re-derive each playlist's cover tiles from its currently-resolved tracks (an
+    /// in-memory value only; never persisted).
+    private func refreshPlaylistArtwork() {
+        for i in playlists.indices {
+            playlists[i].artworkURLs = artworkURLs(for: playlists[i].trackIDs)
+        }
+    }
+
+    /// Drop playlist track ids that resolve to nothing (removed source / genuinely
+    /// gone). Runs after the library loads and after a rescan (once any id-remap has
+    /// carried re-keyed ids forward), so a tile's count matches what actually plays.
+    /// Migrate the app's own id-keyed state after a scan re-keyed some files
+    /// (`LibraryService.identityRemap`): playlist track ids, recently-played, the
+    /// persisted playback snapshot (queue + pre-shuffle order), and classical
+    /// credits. Favorites/duration/artwork/overrides + the cache file are carried by
+    /// the library; play stats/events migrate via `AutoCacheController.remapKeys`.
+    private func applyIdentityRemap(_ remap: [String: String]) {
+        guard !remap.isEmpty else { return }
+        autoCache.remapKeys(remap)
+
+        // Swap re-keyed tracks into the live engine queue FIRST — otherwise the
+        // next snapshot tick re-persists the dead old ids over the corrected
+        // snapshot written below, and the queue drops on next launch.
+        var engineMapping: [String: Track] = [:]
+        for (old, new) in remap {
+            if let fresh = track(new) { engineMapping[old] = fresh }
+        }
+        engine.remapQueueTracks(engineMapping)
+        var playlistsChanged = false
+        for i in playlists.indices {
+            let mapped = playlists[i].trackIDs.map { remap[$0] ?? $0 }
+            if mapped != playlists[i].trackIDs { playlists[i].trackIDs = mapped; playlistsChanged = true }
+        }
+        if playlistsChanged { persistPlaylists() }
+
+        let mappedRecents = recentlyPlayedIDs.map { remap[$0] ?? $0 }
+        if mappedRecents != recentlyPlayedIDs {
+            recentlyPlayedIDs = mappedRecents
+            UserDefaults.standard.set(recentlyPlayedIDs, forKey: Self.recentlyPlayedKey)
+        }
+
+        if let data = UserDefaults.standard.data(forKey: Self.playbackSnapshotKey),
+           var snapshot = try? JSONDecoder().decode(PlaybackSnapshot.self, from: data) {
+            snapshot.queueIDs = snapshot.queueIDs.map { remap[$0] ?? $0 }
+            snapshot.unshuffledIDs = snapshot.unshuffledIDs?.map { remap[$0] ?? $0 }
+            if let encoded = try? JSONEncoder().encode(snapshot) {
+                UserDefaults.standard.set(encoded, forKey: Self.playbackSnapshotKey)
+            }
+        }
+
+        var newCredits = classicalCreditsByTrack
+        var creditsChanged = false
+        for (old, new) in remap where newCredits[old] != nil {
+            newCredits[new] = newCredits.removeValue(forKey: old)
+            creditsChanged = true
+        }
+        if creditsChanged {
+            classicalCreditsByTrack = newCredits
+            let snapshot = newCredits
+            Task { await library.saveClassicalCredits(snapshot) }
+        }
+    }
+
+    private func prunePlaylistDeadIDs() {
+        guard !tracks.isEmpty else { return }
+        var changed = false
+        for i in playlists.indices {
+            let live = playlists[i].trackIDs.filter { trackIndex[$0] != nil }
+            if live.count != playlists[i].trackIDs.count { playlists[i].trackIDs = live; changed = true }
+        }
+        refreshPlaylistArtwork()
+        if changed { persistPlaylists() }
     }
 
     @discardableResult
@@ -1037,6 +1168,13 @@ final class AppModel {
         persistPlaylists()
     }
 
+    func moveInPlaylist(_ playlistID: String, fromOffsets source: IndexSet, toOffset destination: Int) {
+        guard let i = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        playlists[i].trackIDs.move(fromOffsets: source, toOffset: destination)
+        playlists[i].artworkURLs = artworkURLs(for: playlists[i].trackIDs)
+        persistPlaylists()
+    }
+
     private func artworkURLs(for trackIDs: [String]) -> [URL] {
         trackIDs.prefix(4).compactMap { track($0)?.artworkURL }
     }
@@ -1071,18 +1209,21 @@ final class AppModel {
     }
 
     func shuffleAll() {
+        clearReplayDedup()
         let list = playableContext(audioTracks)
         guard !list.isEmpty else { return }
         engine.playShuffled(list)
     }
 
     func playArtistRadio(_ artistID: String) {
+        clearReplayDedup()
         let list = playableContext(tracks(forArtist: artistID))
         guard !list.isEmpty else { return }
         engine.playShuffled(list)
     }
 
     func playGenreRadio(_ genre: String) {
+        clearReplayDedup()
         let list = playableContext(tracks(forGenre: genre))
         guard !list.isEmpty else { return }
         engine.playShuffled(list)
@@ -1110,6 +1251,7 @@ final class AppModel {
     }
 
     func playSimilarRadio(seed: Track) {
+        clearReplayDedup()
         let station = progressiveStation(seed: seed)
         guard !station.isEmpty else { return }
         // Station defines its own order (seed first, then widening genre bands);
@@ -1252,6 +1394,7 @@ final class AppModel {
         tracks[i].artistID = MetadataGrouping.artistID(artist)
         Task { await library.setMetadataOverride(forTrack: id, title: title, artist: artist, album: album, genre: genre) }
         rebuildIndex()
+        syncEngineQueueMetadata()
     }
 
     /// Apply album/artist/genre to every track in an album in one pass (one index
@@ -1269,6 +1412,7 @@ final class AppModel {
             Task { await library.setMetadataOverride(forTrack: id, title: nil, artist: artist, album: album, genre: genre) }
         }
         rebuildIndex()
+        syncEngineQueueMetadata()
     }
 
     /// Drop a track's override and restore the file-scanned values.
@@ -1283,6 +1427,7 @@ final class AppModel {
             tracks[i].albumID = MetadataGrouping.albumID(path: tracks[i].remotePath ?? tracks[i].folderPath, album: restored.album)
             tracks[i].artistID = MetadataGrouping.artistID(restored.artist)
             rebuildIndex()
+            syncEngineQueueMetadata()
         }
     }
 
@@ -1339,6 +1484,7 @@ final class AppModel {
         }
         await library.applyMetadataOverrides(fixes)
         rebuildIndex()
+        syncEngineQueueMetadata()
         return fixes.count
     }
 
@@ -1399,6 +1545,30 @@ final class AppModel {
         guard let i = trackIndex[id], tracks.indices.contains(i) else { return }
         tracks[i].cacheState = state
         libraryRevision &+= 1
+        // Keep the engine's value-copy queue in sync so gapless preload / the lock
+        // screen see the new cache state (a just-prefetched next track can preload).
+        if engine.queue.contains(where: { $0.id == id }) { engine.updateQueueTracks([tracks[i]]) }
+    }
+
+    /// Push current library copies of the queued tracks into the engine so its
+    /// value-copy queue doesn't show stale metadata after an edit/revert.
+    private func syncEngineQueueMetadata() {
+        let refreshed = engine.queue.compactMap { track($0.id) }
+        if !refreshed.isEmpty { engine.updateQueueTracks(refreshed) }
+    }
+
+    /// Merge a freshly-loaded library snapshot with this session's optimistic
+    /// in-flight cache states (.downloading/.queued), which the on-disk snapshot
+    /// doesn't know about — so a wholesale replace in the launch window doesn't
+    /// flip a just-started download back to its stored state.
+    private func mergingOptimisticCacheStates(into incoming: [Track]) -> [Track] {
+        let optimistic: Set<CacheState> = [.downloading, .queued]
+        let current = Dictionary(tracks.map { ($0.id, $0.cacheState) }, uniquingKeysWith: { a, _ in a })
+        var result = incoming
+        for i in result.indices where optimistic.contains(current[result[i].id] ?? .remoteOnly) {
+            result[i].cacheState = current[result[i].id]!
+        }
+        return result
     }
 
     func download(_ id: String) {
@@ -1408,6 +1578,7 @@ final class AppModel {
         Task {
             let ok = await library.ensureCached(target)
             setCacheState(trackID: id, ok ? .cached : .failed)
+            if !ok { markSourceUnreachable(target.sourceID) }
         }
     }
 
@@ -1503,7 +1674,7 @@ final class AppModel {
             guard let self else { return }
             for t in pending {
                 let ok = await self.library.ensureCached(t)
-                self.setCacheState(trackID: t.id, ok ? .cached : .remoteOnly)
+                self.setCacheState(trackID: t.id, ok ? .cached : .failed)
             }
         }
     }
@@ -1532,10 +1703,12 @@ final class AppModel {
     // MARK: Search
 
     func searchResults(_ query: String) -> [Track] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
         guard !trimmed.isEmpty else { return [] }
-        // Scan the precomputed lowercased haystack (built in rebuildIndex) instead of
-        // five locale-aware `contains` per track on every keystroke.
+        // Scan the precomputed folded haystack (built in rebuildIndex) instead of
+        // five locale-aware `contains` per track on every keystroke. Diacritic-folded
+        // both sides so "faure" matches "Fauré: Pavane".
         return tracks.filter { (searchHaystack[$0.id] ?? "").contains(trimmed) }
     }
 
@@ -1592,8 +1765,18 @@ final class AppModel {
     /// When the user has listened to most of a streamed track, cache the entire
     /// file so it's saved offline — not only when the stream happens to cover 100%
     /// (which never happens if you skip the last bytes).
+    /// A track just finished streaming fully to disk — reflect it immediately so the
+    /// Offline view and badges update without waiting for the next play/relaunch.
+    /// It's an evictable auto-cache entry, so `.prefetched` (not `.cached`).
+    private func handleTrackFullyCached(_ id: String) {
+        guard let i = trackIndex[id] else { return }
+        if tracks[i].cacheState == .remoteOnly || tracks[i].cacheState == .downloading {
+            setCacheState(trackID: id, .prefetched)
+        }
+    }
+
     private func maybeCacheMostlyPlayed() {
-        guard autoCache.isEnabled,
+        guard autoCache.isEnabled, !offlineMode,
               let track = engine.currentTrack,
               engine.duration > 60,
               engine.elapsed / engine.duration >= 0.75,
@@ -1602,8 +1785,11 @@ final class AppModel {
         partialCacheTriggeredID = track.id
         Task { [weak self] in
             guard let self else { return }
+            // Auto-cache promotion is EVICTABLE (.prefetched), not a manual pin
+            // (.cached) — a .cached badge here minted a phantom "Downloaded" pin the
+            // eviction pass ignored while it still ate the auto budget.
             if await self.library.ensureCached(track, auto: true) {
-                self.setCacheState(trackID: track.id, .cached)
+                self.setCacheState(trackID: track.id, .prefetched)
             }
         }
     }
@@ -1611,11 +1797,17 @@ final class AppModel {
     private func wireEngine() {
         engine.resolvePlayerItem = { [weak self] track in
             guard let self else { return nil }
-            return await self.library.playableItem(for: track, offline: self.offlineMode)
+            let item = await self.library.playableItem(for: track, offline: self.offlineMode)
+            // A remote resolve that came back empty means the source didn't answer —
+            // demote its health so eviction doesn't run on a stale "reachable".
+            if item == nil, self.cacheState(track.id) == .remoteOnly { self.markSourceUnreachable(track.sourceID) }
+            return item
         }
         engine.resolveAsset = { [weak self] track in
             guard let self else { return nil }
-            return await self.library.playableURL(for: track, offline: self.offlineMode)
+            let url = await self.library.playableURL(for: track, offline: self.offlineMode)
+            if url == nil, self.cacheState(track.id) == .remoteOnly { self.markSourceUnreachable(track.sourceID) }
+            return url
         }
         engine.loadArtwork = { [weak self] track in
             if let self {
@@ -1623,8 +1815,9 @@ final class AppModel {
                     return image
                 }
                 // Streamed track with no local file yet: pull the album cover
-                // from the remote source so the lock screen still shows art.
-                if let url = await self.library.remoteAlbumArtwork(for: track),
+                // from the remote source so the lock screen still shows art. Skipped
+                // while offline (no source to reach — cached playback shouldn't dial).
+                if !self.offlineMode, let url = await self.library.remoteAlbumArtwork(for: track),
                    let image = UIImage(contentsOfFile: url.path) {
                     return image
                 }
@@ -1673,7 +1866,7 @@ final class AppModel {
                         self.setCacheState(trackID: track.id, .prefetched)
                     }
                 }
-                if let art = await self.library.remoteAlbumArtwork(for: track) {
+                if !self.offlineMode, let art = await self.library.remoteAlbumArtwork(for: track) {
                     for idx in self.tracks.indices
                     where self.tracks[idx].albumID == track.albumID && self.tracks[idx].artworkURL == nil {
                         self.tracks[idx].artworkURL = art
@@ -1687,18 +1880,13 @@ final class AppModel {
     private func wireAutoCache() {
         autoCache.applyPlan = { [weak self] plan in
             guard let self else { return }
-            // Never delete the file backing the currently-playing or gapless-preloaded
-            // track, even if the policy wants to evict it (budget filled by favourites).
-            let protected = self.engine.protectedTrackIDs
-            for id in plan.evict where !protected.contains(id) {
-                guard let target = self.track(id) else { continue }
-                await self.library.evict(target)
-                if let i = self.trackIndex[id], self.tracks[i].cacheState == .prefetched {
-                    self.setCacheState(trackID: id, .remoteOnly)
-                }
-            }
+            // FETCH BEFORE EVICT. The old order evicted first, then fetches failed
+            // against a dead NAS — net content LOSS exactly when the source died.
+            // Track which sources actually served a file this pass; only evict from
+            // a source we just proved reachable (or one still marked healthy).
             var downloaded = 0
             var moreToFetch = false
+            var fetchedSources = Set<String>()
             for id in plan.keep {
                 guard let target = self.track(id), target.cacheState == .remoteOnly else { continue }
                 // Small bites: each fetch is a full-file download on its own SMB
@@ -1708,7 +1896,23 @@ final class AppModel {
                 if downloaded >= 3 { moreToFetch = true; break }
                 if await self.library.ensureCached(target, auto: true) {
                     self.setCacheState(trackID: id, .prefetched)
+                    fetchedSources.insert(target.sourceID)
                     downloaded += 1
+                } else {
+                    self.markSourceUnreachable(target.sourceID)
+                }
+            }
+            // Never delete the file backing the currently-playing or gapless-preloaded
+            // track, even if the policy wants to evict it (budget filled by favourites).
+            let protected = self.engine.protectedTrackIDs
+            for id in plan.evict where !protected.contains(id) {
+                guard let target = self.track(id) else { continue }
+                let reachable = fetchedSources.contains(target.sourceID)
+                    || self.sourceHealth[target.sourceID]?.isReachable == true
+                guard reachable else { continue }
+                await self.library.evict(target)
+                if let i = self.trackIndex[id], self.tracks[i].cacheState == .prefetched {
+                    self.setCacheState(trackID: id, .remoteOnly)
                 }
             }
             self.autoCache.setUsage(await self.library.autoCachedBytes())
@@ -1741,7 +1945,10 @@ final class AppModel {
         let raw = engine.currentIndex + 1
         let nextIndex = (raw >= queue.count && engine.repeatMode == .all) ? 0 : raw
         guard queue.indices.contains(nextIndex) else { return }
-        let next = queue[nextIndex]
+        // The engine's queue holds a value COPY; read the LIVE track so a track
+        // evicted/cached after it was queued isn't judged on a stale cacheState.
+        let queued = queue[nextIndex]
+        let next = track(queued.id) ?? queued
         guard next.kind != .video else { return }   // don't pre-pull large video
         let localIDs = Set(sourceConfigs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
         guard !localIDs.contains(next.sourceID) else { return }
@@ -1764,12 +1971,28 @@ final class AppModel {
     }
 
     private func reconcileAutoCache() {
-        let reachable = sourceHealth.values.contains { $0.isReachable }
         // Local-file tracks are always on-device; never auto-cache/evict them.
         let localIDs = Set(sourceConfigs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
-        let evictable = audioTracks.filter { !localIDs.contains($0.sourceID) }
-        autoCache.scheduleReconcile(library: evictable, reachable: reachable && !offlineMode)
+        // Per-source reachability: only feed the reconcile tracks from sources that
+        // are actually reachable. An unreachable source's tracks are excluded, so its
+        // already-cached files are neither re-fetched NOR seen by the eviction pass
+        // (which only evicts tracks present in the passed library) — the one
+        // component that deletes bytes never acts on a dead source.
+        let reachableSourceIDs = Set(sourceConfigs.filter { sourceHealth[$0.id]?.isReachable == true }.map(\.id))
+        let anyReachable = !reachableSourceIDs.isEmpty
+        let evictable = audioTracks.filter { !localIDs.contains($0.sourceID) && reachableSourceIDs.contains($0.sourceID) }
+        autoCache.scheduleReconcile(library: evictable, reachable: anyReachable && !offlineMode)
         libraryRevision &+= 1   // favorites / cache-state / play-count may have changed
+    }
+
+    /// Demote a source's health on a resolve/stream/download failure (the health
+    /// signal previously only ratcheted UP, so eviction ran on a stale "reachable").
+    /// No-op for local sources, offline mode, or an already-unreachable source.
+    private func markSourceUnreachable(_ sourceID: String) {
+        guard !offlineMode, !isLocalSource(sourceID),
+              sourceHealth[sourceID]?.isReachable == true else { return }
+        sourceHealth[sourceID] = .unreachable
+        rebuildSources()
     }
 
     /// Recompute the auto-cache storage readout from what is actually on disk.

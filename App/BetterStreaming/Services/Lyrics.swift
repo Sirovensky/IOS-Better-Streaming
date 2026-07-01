@@ -12,6 +12,7 @@ enum LyricsParser {
     /// line) or plain text. Returns lines in time order; plain text keeps file
     /// order with nil times.
     static func parse(_ raw: String) -> [LyricsLine] {
+        let offset = parseOffset(raw)   // seconds; subtracted from every stamp
         var out: [LyricsLine] = []
         var sawTimestamp = false
         for rawLine in raw.split(whereSeparator: \.isNewline) {
@@ -24,14 +25,49 @@ enum LyricsParser {
                 out.append(LyricsLine(time: nil, text: text))
             } else {
                 sawTimestamp = true
-                let text = textAfterStamps(line).trimmingCharacters(in: .whitespaces)
-                for t in stamps { out.append(LyricsLine(time: t, text: text)) }
+                // Strip enhanced-LRC word stamps (<mm:ss.xx>) before display.
+                let text = stripInlineWordStamps(textAfterStamps(line)).trimmingCharacters(in: .whitespaces)
+                for t in stamps { out.append(LyricsLine(time: max(0, t - offset), text: text)) }
             }
         }
         if sawTimestamp {
             out.sort { ($0.time ?? 0) < ($1.time ?? 0) }
         }
         return out
+    }
+
+    /// `[offset:±ms]` — a global shift in milliseconds. A positive value makes the
+    /// lyrics appear earlier, so it is subtracted from every stamp. Returns seconds.
+    private static func parseOffset(_ raw: String) -> TimeInterval {
+        for rawLine in raw.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("[offset:"), line.hasSuffix("]") else { continue }
+            let inner = line.dropFirst("[offset:".count).dropLast()
+            if let ms = Double(inner.trimmingCharacters(in: .whitespaces)) { return ms / 1000.0 }
+        }
+        return 0
+    }
+
+    /// Remove enhanced-LRC per-word stamps `<mm:ss.xx>` that are interleaved in the
+    /// text for karaoke highlighting, leaving the plain display text. Non-timestamp
+    /// angle-bracket content is preserved verbatim.
+    private static func stripInlineWordStamps(_ text: String) -> String {
+        guard text.contains("<") else { return text }
+        var result = ""
+        var rest = Substring(text)
+        while let open = rest.firstIndex(of: "<") {
+            result += rest[rest.startIndex..<open]
+            let afterOpen = rest.index(after: open)
+            if let close = rest[afterOpen...].firstIndex(of: ">"),
+               parseStamp(String(rest[afterOpen..<close])) != nil {
+                rest = rest[rest.index(after: close)...]
+            } else {
+                result.append("<")
+                rest = rest[afterOpen...]
+            }
+        }
+        result += rest
+        return result
     }
 
     /// Extract `[mm:ss.xx]` / `[mm:ss]` timestamps from the start of a line.

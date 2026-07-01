@@ -1,6 +1,7 @@
 import AVFoundation
 import BetterStreamingDomain
 import Foundation
+import ImageIO
 import FTPRemote
 import LibraryIndexer
 import MediaStore
@@ -89,6 +90,18 @@ actor LibraryService {
     /// merged rather than pruned). Lets the UI warn the user to rescan on a
     /// stable connection instead of trusting a shrunken count.
     private(set) var lastScanIncomplete = false
+    /// old id → new id for files that re-keyed (in-place re-tag/touch) on the last
+    /// scan, so AppModel can carry playlists / snapshot / recents / play-stats /
+    /// classical credits forward. Empty when nothing re-keyed. Read after `scan`.
+    /// Per-source identity remaps from the most recent scan, consumed once by the
+    /// caller. Keyed by source so two concurrent rescans can't clobber each
+    /// other's remap before AppModel migrates its id-keyed state.
+    private var identityRemapsBySource: [String: [String: String]] = [:]
+
+    /// Hand the caller the remap its scan produced (and forget it).
+    func takeIdentityRemap(sourceID: String) -> [String: String] {
+        identityRemapsBySource.removeValue(forKey: sourceID) ?? [:]
+    }
     /// A scan is walking the tree right now. While set, app-background must NOT
     /// tear down the background client — that would interrupt the walk (forcing a
     /// reconnect mid-scan and risking skipped folders).
@@ -154,11 +167,20 @@ actor LibraryService {
         autoCacheIndexURL = support.appendingPathComponent("autocache.json")
         classicalCreditsURL = support.appendingPathComponent("classical.json")
         mediaStore = MediaStore(configuration: MediaStoreConfiguration(databaseURL: support.appendingPathComponent("library.sqlite")))
-        // Partial streaming scratch is per-session and not reused across
-        // launches; reclaim any partials orphaned by a previous run.
-        if let stale = try? fm.contentsOfDirectory(at: streamCacheDir, includingPropertiesForKeys: nil) {
-            for url in stale { try? fm.removeItem(at: url) }
-        }
+    }
+
+    /// Reclaim leaked scratch/temp files. Kept OUT of `init` (which runs on the
+    /// MainActor where the service is constructed) — these directory walks are
+    /// synchronous file IO and belong on the actor's executor, driven from the
+    /// bootstrap task. Idempotent, safe to run once per launch.
+    private func reclaimTempFiles() {
+        let fm = FileManager.default
+        // NOTE: the partial-stream scratch dir is intentionally NOT wiped at launch.
+        // The streaming service writes a `<partial>.ranges` sidecar next to each
+        // partial and resumes from it on a later session (a 90%-streamed track
+        // doesn't refetch from byte 0), so the last-playing track's partial must
+        // survive an app kill. The service caps live partials (8) and reclaims its
+        // own on teardown; iOS purges this Caches dir under pressure.
         // A crash mid-write can strand a temp in a persistent cache dir: "<uuid>.part"
         // (SMB download destination), "<uuid>.download" (WebDAV/SFTP/FTP stream temp),
         // "<uuid>.art" (remote folder-cover download), or "<uuid>.<ext>.promote" (a
@@ -194,8 +216,41 @@ actor LibraryService {
     // MARK: Load
 
     func bootstrap() -> (configs: [SourceConfig], tracks: [Track]) {
+        reclaimTempFiles()
         loadConfigsFromDiskIfNeeded()
         return (configs, [])
+    }
+
+    /// Reclaim cache files with no matching track — a removed source, a
+    /// clean-rescan-pruned file, or a re-keyed (identity-drifted) orphan. The keep
+    /// set is derived from the LIVE library, so this runs ONLY once the library is
+    /// loaded and non-empty; never against an empty set (which would wipe the cache).
+    /// In-flight download temps ("<uuid>.part"/".download"/".promote") are left to
+    /// `reclaimTempFiles`. Callable (launch + a Settings "Reclaim" action).
+    func reconcileCacheFiles() {
+        guard didLoadLibraryFromDisk, !allTracks.isEmpty else { return }
+        loadAutoCacheIndexIfNeeded()
+        let fm = FileManager.default
+        let keep = Set(allTracks.map { Self.stableHash($0.id) })
+        guard let entries = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) else { return }
+        let tempSuffixes = [".part", ".download", ".promote"]
+        var prunedIndex = false
+        for url in entries where !tempSuffixes.contains(where: url.lastPathComponent.hasSuffix) {
+            let name = url.lastPathComponent
+            let base = name.firstIndex(of: ".").map { String(name[..<$0]) } ?? name
+            guard !keep.contains(base) else { continue }
+            try? fm.removeItem(at: url)
+            // A file removed here can't be identified back to a track id, so drop any
+            // auto-cache flag whose file is now gone on the next refresh; also prune
+            // flags for ids no longer in the library.
+            prunedIndex = true
+        }
+        if prunedIndex {
+            let liveHashes = keep
+            let before = autoCachedIDs.count
+            autoCachedIDs = autoCachedIDs.filter { liveHashes.contains(Self.stableHash($0)) }
+            if autoCachedIDs.count != before { persistAutoCacheIndex() }
+        }
     }
 
     func loadSavedLibrary() async -> [Track] {
@@ -224,7 +279,11 @@ actor LibraryService {
     ) -> SourceConfig {
         loadConfigsFromDiskIfNeeded()
         let id = UUID().uuidString
-        KeychainStore.set(password, account: id)
+        if !KeychainStore.set(password, account: id), let password, !password.isEmpty {
+            // Keychain write failed — the session password below keeps this launch
+            // working, but relaunch will lose the credential. Surface it in the log.
+            streamLog.error("keychain set_failed source=\(id, privacy: .public)")
+        }
         if let password, !password.isEmpty { sessionPasswords[id] = password }
         let cfg = SourceConfig(
             id: id,
@@ -272,6 +331,17 @@ actor LibraryService {
             url.stopAccessingSecurityScopedResource()
             localRoots[id] = nil
         }
+        // Delete the source's on-disk cache files (and drop their auto-cache flags)
+        // BEFORE the tracks leave `allTracks` — once they're gone nothing can map the
+        // "<hash>.<ext>" filenames back, and the bytes would leak until reinstall.
+        loadAutoCacheIndexIfNeeded()
+        let fm = FileManager.default
+        var prunedIndex = false
+        for track in allTracks where track.sourceID == id {
+            try? fm.removeItem(at: cacheFileURL(for: track))
+            if autoCachedIDs.remove(track.id) != nil { prunedIndex = true }
+        }
+        if prunedIndex { persistAutoCacheIndex() }
         configs.removeAll { $0.id == id }
         allTracks.removeAll { $0.sourceID == id }
         KeychainStore.delete(account: id)
@@ -357,7 +427,7 @@ actor LibraryService {
         var listFailures = 0
         var filesSeen = 0
         #if DEBUG
-        print("BETTERSTREAMING_SCAN start source=\(sourceID) root=\(cfg.rootPath) priorTracks=\(existing.count)")
+        AppLog.library.debug("BETTERSTREAMING_SCAN start source=\(sourceID, privacy: .public) root=\(cfg.rootPath) priorTracks=\(existing.count)")
         #endif
 
         while let dir = pending.popLast() {
@@ -385,7 +455,7 @@ actor LibraryService {
                 } else {
                     listFailures += 1
                     #if DEBUG
-                    print("BETTERSTREAMING_SCAN list_failed dir=\(dir.displayPath) err=\(error)")
+                    AppLog.library.error("BETTERSTREAMING_SCAN list_failed dir=\(dir.displayPath) err=\(error, privacy: .public)")
                     #endif
                     continue
                 }
@@ -394,7 +464,7 @@ actor LibraryService {
             #if DEBUG
             let dirCount = entries.filter { $0.kind == .directory }.count
             let fileCount = entries.filter { $0.kind == .file }.count
-            print("BETTERSTREAMING_SCAN dir=\(dir.displayPath) entries=\(entries.count) dirs=\(dirCount) files=\(fileCount)")
+            AppLog.library.debug("BETTERSTREAMING_SCAN dir=\(dir.displayPath) entries=\(entries.count) dirs=\(dirCount) files=\(fileCount)")
             #endif
 
             for entry in entries {
@@ -410,10 +480,7 @@ actor LibraryService {
                     } else {
                         let ext = (entry.name as NSString).pathExtension
                         let probe = await embeddedProbe(for: entry, client: client)
-                        let embedded = probe.flatMap { data -> EmbeddedMediaMetadata? in
-                            let parsed = EmbeddedMetadataReader.parse(data, fileExtension: ext)
-                            return parsed.isEmpty ? nil : parsed
-                        }
+                        let embedded = await parsedEmbedded(entry: entry, client: client, probe: probe, ext: ext)
                         scanned.append(track(fromEntry: entry, kind: kind, cfg: cfg, embedded: embedded))
                     }
                     filesSeen += 1
@@ -431,7 +498,7 @@ actor LibraryService {
         // instead — keep prior tracks we didn't re-scan so skipped folders survive.
         // (Genuinely-deleted files are pruned on the next clean scan.)
         #if DEBUG
-        print("BETTERSTREAMING_SCAN done visited=\(visited.count) filesSeen=\(filesSeen) scanned=\(scanned.count) listFailures=\(listFailures) cancelled=\(Task.isCancelled)")
+        AppLog.library.debug("BETTERSTREAMING_SCAN done visited=\(visited.count) filesSeen=\(filesSeen) scanned=\(scanned.count) listFailures=\(listFailures) cancelled=\(Task.isCancelled)")
         #endif
         // Cancelled mid-walk → `scanned` is partial. NEVER persist it (that would
         // replace the library with a half-walk and prune the rest). Leave the
@@ -441,7 +508,7 @@ actor LibraryService {
             return allTracks
         }
         lastScanIncomplete = listFailures > 0
-        let merged: [Track]
+        var merged: [Track]
         if listFailures == 0 {
             merged = scanned
         } else {
@@ -451,11 +518,68 @@ actor LibraryService {
             streamLog.error("scan partial sourceID=\(sourceID, privacy: .public) listFailures=\(listFailures) scanned=\(scanned.count) kept=\(priorKept.count)")
         }
 
+        let oldForSource = allTracks.filter { $0.sourceID == sourceID }
+        identityRemapsBySource[sourceID] = await applyIdentityRemap(old: oldForSource, new: &merged)
+
         allTracks.removeAll { $0.sourceID == sourceID }
         allTracks.append(contentsOf: merged)
         refreshCacheStates()
         await persistLibrary(sourceID: sourceID, tracks: merged)
+        reconcileCacheFiles()   // reclaim files for tracks this scan pruned/re-keyed
         return allTracks
+    }
+
+    /// Conservative identity re-key map for a rescan: old id → new id for every new
+    /// id whose path-stable prefix matches EXACTLY ONE non-surviving old id (and one
+    /// new id). An in-place re-tag/touch mints a fresh stableKey for the same file;
+    /// this carries it forward. Ambiguous (0 or >1 match) → no remap. Pure/testable.
+    nonisolated static func identityRemap(oldIDs: [String], newIDs: [String]) -> [String: String] {
+        let oldSet = Set(oldIDs), newSet = Set(newIDs)
+        var oldByPrefix: [String: [String]] = [:]
+        for id in oldIDs where !newSet.contains(id) {
+            guard let p = MediaStore.pathStablePrefix(ofStableKey: id) else { continue }
+            oldByPrefix[p, default: []].append(id)
+        }
+        var newByPrefix: [String: [String]] = [:]
+        for id in newIDs where !oldSet.contains(id) {
+            guard let p = MediaStore.pathStablePrefix(ofStableKey: id) else { continue }
+            newByPrefix[p, default: []].append(id)
+        }
+        var remap: [String: String] = [:]
+        for (prefix, olds) in oldByPrefix where olds.count == 1 {
+            guard let news = newByPrefix[prefix], news.count == 1 else { continue }
+            remap[olds[0]] = news[0]
+        }
+        return remap
+    }
+
+    /// Carry base-row state (favorite, duration, artwork) from each re-keyed old
+    /// track onto its new track, rename the cache file to the new hash (keeping
+    /// cacheState), move the auto-cache flag, and rewrite the DB override key.
+    /// Returns the old→new map for AppModel to migrate its own id-keyed state.
+    private func applyIdentityRemap(old: [Track], new merged: inout [Track]) async -> [String: String] {
+        let remap = Self.identityRemap(oldIDs: old.map(\.id), newIDs: merged.map(\.id))
+        guard !remap.isEmpty else { return [:] }
+        let oldByID = Dictionary(old.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let newToOld = Dictionary(remap.map { ($0.value, $0.key) }, uniquingKeysWith: { a, _ in a })
+        loadAutoCacheIndexIfNeeded()
+        let fm = FileManager.default
+        var autoChanged = false
+        for i in merged.indices {
+            guard let oldID = newToOld[merged[i].id], let prior = oldByID[oldID] else { continue }
+            merged[i].isFavorite = prior.isFavorite
+            if merged[i].durationSeconds <= 0, prior.durationSeconds > 0 { merged[i].durationSeconds = prior.durationSeconds }
+            if merged[i].artworkURL == nil { merged[i].artworkURL = prior.artworkURL }
+            let oldURL = Self.cacheFileURL(for: prior, cacheDir: cacheDir)
+            let newURL = Self.cacheFileURL(for: merged[i], cacheDir: cacheDir)
+            if fm.fileExists(atPath: oldURL.path), !fm.fileExists(atPath: newURL.path) {
+                try? fm.moveItem(at: oldURL, to: newURL)
+            }
+            if autoCachedIDs.remove(oldID) != nil { autoCachedIDs.insert(merged[i].id); autoChanged = true }
+        }
+        if autoChanged { persistAutoCacheIndex() }
+        try? await mediaStore.remapMetadataOverrides(remap)
+        return remap
     }
 
     private func entryIdentity(_ entry: RemoteEntry, cfg: SourceConfig) -> RemoteItemIdentity {
@@ -520,6 +644,31 @@ actor LibraryService {
         return try? await client.read(entry.path, range: 0..<readLength)
     }
 
+    /// Parse embedded tags from a head probe, with a moov-at-end fallback for
+    /// MP4/M4A files (non-faststart): when the head yields nothing, derive the
+    /// trailing-`moov` byte range, ranged-read just that region, and merge. Bounded
+    /// so a pathological layout can't pull the whole file.
+    private func parsedEmbedded(
+        entry: RemoteEntry,
+        client: any RemoteFileSystemClient,
+        probe: Data?,
+        ext: String
+    ) async -> EmbeddedMediaMetadata? {
+        guard let probe else { return nil }
+        let head = EmbeddedMetadataReader.parse(probe, fileExtension: ext)
+        if !head.isEmpty { return head }
+        guard client.capabilities.supportsByteRangeRead else { return nil }
+        var size = entry.size
+        if size == nil { size = (try? await client.stat(entry.path))?.size }
+        guard let size, size > 0,
+              let tailRange = EmbeddedMetadataReader.mp4MetadataTailRange(head: [UInt8](probe), fileLength: size),
+              tailRange.upperBound > tailRange.lowerBound,
+              tailRange.upperBound - tailRange.lowerBound <= 8 * 1_024 * 1_024,
+              let tail = try? await client.read(entry.path, range: tailRange) else { return nil }
+        let merged = EmbeddedMetadataReader.parse(head: probe, tail: tail, fileExtension: ext)
+        return merged.isEmpty ? nil : merged
+    }
+
     /// Extract embedded album art from a remote file. The 256KB probe often does
     /// NOT contain a hi-res cover (e.g. FLAC PICTURE blocks can be 0.5–2MB), so:
     ///  1. use art already present in the probe, else
@@ -559,7 +708,7 @@ actor LibraryService {
         return nil
     }
 
-    private struct ResolvedTrackMetadata {
+    struct ResolvedTrackMetadata {
         var title: String
         var artist: String
         var album: String
@@ -569,7 +718,7 @@ actor LibraryService {
         var discNumber: Int?
     }
 
-    nonisolated private static func resolvedTrackMetadata(
+    nonisolated static func resolvedTrackMetadata(
         fileName: String,
         pathComponents: [String],
         rootComponents: [String],
@@ -583,12 +732,16 @@ actor LibraryService {
         let fallbackAlbum = cleanMetadataValue(folders.last) ?? sourceName
         let fallbackArtist = fallbackArtist(folders: Array(folders), rootComponents: rootComponents)
 
-        let embeddedTitle = cleanMetadataValue(embedded?.title).map(parseTrack)
+        // An embedded TITLE tag is authoritative — use it verbatim. Running it
+        // through parseTrack stripped a leading 1-3 digit run ("99 Problems" →
+        // "Problems", "7 Years" → "Years") and stole it as a track number. Only
+        // filenames need number-stripping.
+        let embeddedTitle = cleanMetadataValue(embedded?.title)
         // Recover "Artist - Title" from the file name when tags are missing —
         // common for downloads stored as ".../NN - Artist - Title.ext" inside a
         // junk username folder, where the real artist would otherwise be lost.
         let fromName = splitArtistTitle(parsed.title)
-        let title = embeddedTitle?.title
+        let title = embeddedTitle
             ?? fromName.title
             ?? (parsed.title.isEmpty ? fileName : parsed.title)
         let artist = cleanMetadataValue(embedded?.artist)
@@ -604,7 +757,7 @@ actor LibraryService {
             album: album,
             genre: genre,
             durationSeconds: duration,
-            trackNumber: embedded?.trackNumber ?? embeddedTitle?.number ?? parsed.number,
+            trackNumber: embedded?.trackNumber ?? parsed.number,
             discNumber: embedded?.discNumber
         )
     }
@@ -674,7 +827,7 @@ actor LibraryService {
         loadConfigsFromDiskIfNeeded()
         if let localURL = localFileURL(for: track) ?? cachedFileURLIfPresent(for: track) {
             #if DEBUG
-            print("BETTERSTREAMING_RESOLVE local_or_cached title=\(track.title) url=\(localURL.path)")
+            AppLog.cache.debug("BETTERSTREAMING_RESOLVE local_or_cached title=\(track.title) url=\(localURL.path)")
             #endif
             // Precise timing: forces AVFoundation to compute the true duration by
             // scanning frame headers instead of estimating from bitrate. VBR MP3s
@@ -696,7 +849,7 @@ actor LibraryService {
         let identity = remoteIdentity(for: track, cfg: cfg)
         guard client.capabilities.supportsByteRangeRead else {
             #if DEBUG
-            print("BETTERSTREAMING_RESOLVE full_download_fallback no_range title=\(track.title)")
+            AppLog.cache.debug("BETTERSTREAMING_RESOLVE full_download_fallback no_range title=\(track.title)")
             #endif
             guard let url = await playableURL(for: track, offline: false) else { return nil }
             return AVPlayerItem(url: url)
@@ -709,7 +862,7 @@ actor LibraryService {
                   size > 0,
                   metadata.supportsRangeRead else {
                 #if DEBUG
-                print("BETTERSTREAMING_RESOLVE full_download_fallback stat title=\(track.title) kind=\(metadata.kind) size=\(metadata.size ?? -1) range=\(metadata.supportsRangeRead)")
+                AppLog.cache.debug("BETTERSTREAMING_RESOLVE full_download_fallback stat title=\(track.title) kind=\(String(describing: metadata.kind), privacy: .public) size=\(metadata.size ?? -1) range=\(metadata.supportsRangeRead)")
                 #endif
                 guard let url = await playableURL(for: track, offline: false) else { return nil }
                 return AVPlayerItem(url: url)
@@ -732,7 +885,8 @@ actor LibraryService {
                 fallbackExtension: track.fileExtension,
                 partialCacheURL: streamCacheFileURL(for: track),
                 completeCacheURL: cacheFileURL(for: track),
-                onComplete: { [weak self] in await self?.onStreamFullyCached(trackID) }
+                onComplete: { [weak self] in await self?.onStreamFullyCached(trackID) },
+                onTeardown: { [weak self] in await self?.onStreamSessionTornDown(trackID) }
             )
         } catch {
             streamLog.error("resolve stat_error title=\(track.title, privacy: .public) err=\(String(describing: error), privacy: .public)")
@@ -785,12 +939,30 @@ actor LibraryService {
         unmarkAutoCached(track.id)
     }
 
+    /// Fired (off-actor, Sendable) when a track finishes streaming fully to disk, so
+    /// AppModel can flip its in-memory cache state immediately instead of waiting for
+    /// the next play/relaunch. Set by AppModel via `setStreamCacheCallback`.
+    private var onTrackFullyCached: (@Sendable (String) -> Void)?
+
+    func setStreamCacheCallback(_ callback: @escaping @Sendable (String) -> Void) {
+        onTrackFullyCached = callback
+    }
+
     /// Called by the streaming service once a track has been fully streamed and
     /// copied into the media cache. Treated as an (evictable) auto-cache entry.
     func onStreamFullyCached(_ id: String) {
+        liveStreamTrackIDs.remove(id)
         markAutoCached(id)
         applyPlaybackFileProtectionForCached(id)
         refreshCacheStates()
+        onTrackFullyCached?(id)
+    }
+
+    /// Called when a stream session is torn down (skip / LRU eviction) without
+    /// completing: release the track's deterministic partial-file name so the
+    /// next play of it can resume from the `.ranges` sidecar again.
+    func onStreamSessionTornDown(_ id: String) {
+        liveStreamTrackIDs.remove(id)
     }
 
     // MARK: Auto-cache index (evictable vs pinned)
@@ -815,7 +987,19 @@ actor LibraryService {
     func loadClassicalCredits() -> [String: ClassicalCredits] {
         guard let data = try? Data(contentsOf: classicalCreditsURL),
               let decoded = try? JSONDecoder().decode([String: ClassicalCredits].self, from: data) else { return [:] }
-        return decoded
+        // Prune credits whose track is gone (removed source / NAS drift), so the
+        // file doesn't grow unbounded. Match by exact id (covers local ids) OR the
+        // path-stable prefix (so an identity re-key doesn't orphan a live credit).
+        // Skip pruning until the library is actually loaded — never wipe against an
+        // empty set at cold bootstrap.
+        guard didLoadLibraryFromDisk, !allTracks.isEmpty else { return decoded }
+        let liveIDs = Set(allTracks.map(\.id))
+        let livePrefixes = Set(allTracks.compactMap { MediaStore.pathStablePrefix(ofStableKey: $0.id) })
+        let pruned = decoded.filter { key, _ in
+            liveIDs.contains(key) || (MediaStore.pathStablePrefix(ofStableKey: key).map(livePrefixes.contains) ?? false)
+        }
+        if pruned.count != decoded.count { saveClassicalCredits(pruned) }
+        return pruned
     }
 
     func saveClassicalCredits(_ credits: [String: ClassicalCredits]) {
@@ -887,7 +1071,7 @@ actor LibraryService {
     /// Fetch lyrics for a track: a `.lrc` sidecar (same path, `.lrc` extension)
     /// from the source — synced if it carries timestamps — else nil. Bounded read
     /// (lyrics files are tiny).
-    func lyrics(for track: Track) async -> [LyricsLine]? {
+    func lyrics(for track: Track, offline: Bool = false) async -> [LyricsLine]? {
         loadConfigsFromDiskIfNeeded()
         func parse(_ data: Data) -> [LyricsLine]? {
             let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
@@ -895,12 +1079,14 @@ actor LibraryService {
             let lines = LyricsParser.parse(text)
             return lines.isEmpty ? nil : lines
         }
-        // Local source: read the sidecar straight off disk.
+        // Local source: read the sidecar straight off disk (works offline).
         if let localURL = localFileURL(for: track) {
             let lrc = localURL.deletingPathExtension().appendingPathExtension("lrc")
             if let data = try? Data(contentsOf: lrc) { return parse(data) }
             return nil
         }
+        // Remote sidecar fetch dials the source — skip it in Offline Mode.
+        if offline { return nil }
         guard let cfg = configs.first(where: { $0.id == track.sourceID }),
               cfg.proto != SourceProtocol.local.rawValue,
               let client = backgroundClient(for: cfg),
@@ -933,9 +1119,11 @@ actor LibraryService {
         if FileManager.default.fileExists(atPath: dest.path) { return dest }
         guard !sources.isEmpty,
               let data = await ArtistImageClient.shared.imageData(forArtist: name, sources: sources),
-              !data.isEmpty else { return nil }
+              !data.isEmpty, OnlineArtworkClient.isImageData(data), Self.isDecodableImage(data) else { return nil }
         try? data.write(to: dest, options: .atomic)
-        return FileManager.default.fileExists(atPath: dest.path) ? dest : nil
+        guard FileManager.default.fileExists(atPath: dest.path) else { return nil }
+        applyPlaybackFileProtection(dest)
+        return dest
     }
 
     /// Album artwork for a track fetched straight from the remote source —
@@ -1054,7 +1242,7 @@ actor LibraryService {
         albumsWithNoRemoteArtwork.removeAll()
     }
 
-    func backfillAlbumArtwork(for tracks: [Track], limit: Int = 40) async -> [String: URL] {
+    func backfillAlbumArtwork(for tracks: [Track], limit: Int = 40) async -> (found: [String: URL], attempted: Int) {
         var hasArt: Set<String> = []
         var representative: [String: Track] = [:]
         for track in tracks where track.kind == .audio {
@@ -1074,6 +1262,7 @@ actor LibraryService {
             .sorted { $0.key < $1.key }
             .prefix(limit)
         var result: [String: URL] = [:]
+        let attempted = targets.count
         for (albumID, track) in targets {
             if Task.isCancelled { break }
             // Mark attempted ONLY on a conclusive outcome — a found cover, or a
@@ -1088,7 +1277,7 @@ actor LibraryService {
             }
         }
         await applyAlbumArtwork(result)
-        return result
+        return (result, attempted)
     }
 
     /// Persist a track's real (asset-resolved) duration. A tag-only scan has no
@@ -1289,7 +1478,7 @@ actor LibraryService {
             // treat as empty (that would wipe the library).
             configLoadState = .failed
             #if DEBUG
-            print("BETTERSTREAMING_CONFIG load_failed error=\(error)")
+            AppLog.library.error("BETTERSTREAMING_CONFIG load_failed error=\(error, privacy: .public)")
             #endif
             return false
         }
@@ -1320,11 +1509,12 @@ actor LibraryService {
             }
             #if DEBUG
             if filteredItems.count != items.count {
-                print("BETTERSTREAMING_LIBRARY dropped_orphan_tracks count=\(items.count - filteredItems.count) sources=\(orphanedSourceIDs.count)")
+                AppLog.library.debug("BETTERSTREAMING_LIBRARY dropped_orphan_tracks count=\(items.count - filteredItems.count) sources=\(orphanedSourceIDs.count)")
             }
             #endif
             allTracks = filteredItems.map(track(fromMediaItem:))
             refreshCacheStates()
+            reconcileCacheFiles()
             return
         }
         if let data = try? Data(contentsOf: legacyLibraryURL),
@@ -1332,6 +1522,7 @@ actor LibraryService {
             let knownSourceIDs = Set(configs.map(\.id))
             allTracks = decoded.filter { knownSourceIDs.contains($0.sourceID) }
             refreshCacheStates()
+            reconcileCacheFiles()
             await persistLibrary(tracks: allTracks)
         }
     }
@@ -1400,7 +1591,11 @@ actor LibraryService {
             return SMBRemoteClient(configuration: configuration, authentication: auth)
         case SourceProtocol.webDAV.rawValue:
             #if canImport(WebDAVRemote)
-            let scheme = port == 80 ? "http" : "https"
+            // 80 = plain http by definition; 5005 = Synology's HTTP-WebDAV default.
+            // 8080 deliberately NOT listed — it's a common https reverse-proxy port
+            // and forcing http there would break working setups. Real fix (an
+            // explicit scheme field on the source) stays queued.
+            let scheme = [80, 5005].contains(port) ? "http" : "https"
             guard let base = URL(string: "\(scheme)://\(host):\(port)/\(share)") else { return nil }
             return WebDAVRemoteClient(baseURL: base, username: username, password: password)
             #else
@@ -1580,7 +1775,18 @@ actor LibraryService {
             return nil
         }
         let metadata = EmbeddedMetadataReader.parse(data, fileExtension: url.pathExtension)
-        return metadata.isEmpty ? nil : metadata
+        if !metadata.isEmpty { return metadata }
+        // MP4/M4A with moov at end of file: the head read missed the tags. Derive
+        // the trailing-moov range and read just that region.
+        let fileLength = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? nil
+        guard let fileLength, fileLength > 0,
+              let tailRange = EmbeddedMetadataReader.mp4MetadataTailRange(head: [UInt8](data), fileLength: fileLength),
+              tailRange.upperBound - tailRange.lowerBound <= 8 * 1_024 * 1_024,
+              (try? handle.seek(toOffset: UInt64(tailRange.lowerBound))) != nil,
+              let tail = try? handle.read(upToCount: Int(tailRange.upperBound - tailRange.lowerBound)),
+              !tail.isEmpty else { return nil }
+        let merged = EmbeddedMetadataReader.parse(head: data, tail: tail, fileExtension: url.pathExtension)
+        return merged.isEmpty ? nil : merged
     }
 
     /// Resolved on-disk URL for a local-source track (security scope active), else nil.
@@ -1612,13 +1818,25 @@ actor LibraryService {
         return FileManager.default.fileExists(atPath: local.path) ? local : nil
     }
 
-    /// A fresh, per-session partial-scratch path. Keyed on a unique UUID (NOT
-    /// `track.id`) so replaying / re-resolving the same track gets a distinct file:
-    /// otherwise two `RemoteStreamSession`s share one path and the older one's
-    /// teardown deletes the file out from under the live newer session.
+    /// Track ids whose partial-stream scratch file is currently in use by a live
+    /// session, so a second concurrent session for the same track doesn't get the
+    /// same deterministic path (which its teardown could delete under the first).
+    private var liveStreamTrackIDs: Set<String> = []
+
+    /// Partial-stream scratch path. Deterministic per track
+    /// (`stream-<hash>.<ext>`) so the `.ranges` sidecar written by the streaming
+    /// service is found again on a later session — a 90%-streamed track resumes
+    /// instead of refetching from byte 0. BUT if a session for this track is already
+    /// live, fall back to a UUID-suffixed name so two live sessions never share one
+    /// file (whose older teardown would delete the newer session's bytes).
     private func streamCacheFileURL(for track: Track) -> URL {
         let ext = track.fileExtension.isEmpty ? "dat" : track.fileExtension
-        return streamCacheDir.appendingPathComponent("\(UUID().uuidString).\(ext)")
+        let base = "stream-\(Self.stableHash(track.id))"
+        if liveStreamTrackIDs.contains(track.id) {
+            return streamCacheDir.appendingPathComponent("\(base)-\(UUID().uuidString).\(ext)")
+        }
+        liveStreamTrackIDs.insert(track.id)
+        return streamCacheDir.appendingPathComponent("\(base).\(ext)")
     }
 
     private func refreshCacheStates() {
@@ -1667,7 +1885,11 @@ actor LibraryService {
             try await mediaStore.replaceMediaItems(tracks.map(mediaItem(from:)), for: SourceID(rawValue: uuid))
             try? FileManager.default.removeItem(at: legacyLibraryURL)
         } catch {
-            await persistLegacyLibrary()
+            // The old `library.json` fallback was write-only (only ever READ when the
+            // store is empty, which it isn't after a failed write), so it created a
+            // false sense of durability. Log loudly instead; the in-memory library
+            // still holds this scan until the next successful persist.
+            streamLog.error("persist sqlite_write_failed source=\(sourceID, privacy: .public) err=\(String(describing: error), privacy: .public)")
         }
     }
 
@@ -1676,13 +1898,7 @@ actor LibraryService {
             try await mediaStore.replaceAllMediaItems(tracks.map(mediaItem(from:)))
             try? FileManager.default.removeItem(at: legacyLibraryURL)
         } catch {
-            await persistLegacyLibrary()
-        }
-    }
-
-    private func persistLegacyLibrary() async {
-        if let data = try? JSONEncoder().encode(allTracks) {
-            try? data.write(to: legacyLibraryURL, options: .atomic)
+            streamLog.error("persist sqlite_write_failed_all err=\(String(describing: error), privacy: .public)")
         }
     }
 
@@ -1797,6 +2013,13 @@ actor LibraryService {
         rest = rest.drop(while: { " .-_)\t".contains($0) })
         let title = rest.trimmingCharacters(in: .whitespaces)
         return (number, title.isEmpty ? trimmed : title)
+    }
+
+    /// True when the bytes decode as an image (guards against a valid-magic but
+    /// truncated/corrupt payload the magic-byte check alone would accept).
+    nonisolated private static func isDecodableImage(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return false }
+        return CGImageSourceGetCount(source) > 0 && CGImageSourceGetType(source) != nil
     }
 
     private static func stableHash(_ string: String) -> String {

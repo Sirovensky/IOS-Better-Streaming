@@ -6,9 +6,13 @@ import Security
 enum KeychainStore {
     private static let service = "com.betterstreaming.credentials"
 
-    static func set(_ value: String?, account: String) {
+    /// Store (or clear) a password. Returns true on success. A dropped write means
+    /// the credential won't survive relaunch, so the caller can warn/fall back to
+    /// the in-memory session password instead of failing silently next launch.
+    @discardableResult
+    static func set(_ value: String?, account: String) -> Bool {
         delete(account: account)
-        guard let value, let data = value.data(using: .utf8) else { return }
+        guard let value, let data = value.data(using: .utf8) else { return true }  // clearing is a success
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -16,7 +20,8 @@ enum KeychainStore {
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
-        SecItemAdd(query as CFDictionary, nil)
+        let status = SecItemAdd(query as CFDictionary, nil)
+        return status == errSecSuccess
     }
 
     static func get(account: String) -> String? {

@@ -35,6 +35,24 @@ final class ClassicalMetadataTests: XCTestCase {
         XCTAssertFalse(credits.isEmpty)
     }
 
+    func testInstrumentAndVocalRelationsMapToSoloists() throws {
+        // MusicBrainz encodes an instrumental soloist as "instrument" and a singer as
+        // "vocal"; bare "performer" is the minority. All three must land in soloists.
+        let json = Data("""
+        { "relations": [
+            {"type":"instrument","target-type":"artist","artist":{"id":"a1","name":"Yo-Yo Ma"}},
+            {"type":"vocal","target-type":"artist","artist":{"id":"a2","name":"Cecilia Bartoli"}},
+            {"type":"performer","target-type":"artist","artist":{"id":"a3","name":"Lang Lang"}},
+            {"type":"conductor","target-type":"artist","artist":{"id":"a4","name":"Simon Rattle"}}
+        ]}
+        """.utf8)
+        let recording = try JSONDecoder().decode(MBRecording.self, from: json)
+        let (credits, _) = ClassicalMetadataClient.credits(fromRecordingRelations: recording.relations ?? [])
+        XCTAssertEqual(credits.soloists, ["Yo-Yo Ma", "Cecilia Bartoli", "Lang Lang"])
+        XCTAssertEqual(credits.conductor, "Simon Rattle")
+        XCTAssertFalse(credits.isEmpty)
+    }
+
     func testPerformerDedupedAndOrchestraNotCountedAsSoloist() throws {
         let json = Data("""
         { "relations": [

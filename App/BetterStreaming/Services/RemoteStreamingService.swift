@@ -46,7 +46,8 @@ final class RemoteStreamingService: NSObject, @unchecked Sendable {
         fallbackExtension: String,
         partialCacheURL: URL,
         completeCacheURL: URL,
-        onComplete: (@Sendable () async -> Void)? = nil
+        onComplete: (@Sendable () async -> Void)? = nil,
+        onTeardown: (@Sendable () async -> Void)? = nil
     ) -> AVPlayerItem {
         let id = UUID().uuidString
         let session = RemoteStreamSession(
@@ -57,7 +58,8 @@ final class RemoteStreamingService: NSObject, @unchecked Sendable {
             fallbackExtension: fallbackExtension,
             partialCacheURL: partialCacheURL,
             completeCacheURL: completeCacheURL,
-            onComplete: onComplete
+            onComplete: onComplete,
+            onTeardown: onTeardown
         )
 
         var evicted: [RemoteStreamSession] = []
@@ -115,7 +117,7 @@ extension RemoteStreamingService: AVAssetResourceLoaderDelegate {
         box?.cancel()
         streamLog.info("didCancel offset=\(loadingRequest.dataRequest?.requestedOffset ?? -1)")
         #if DEBUG
-        print("BETTERSTREAMING_STREAM didCancel offset=\(loadingRequest.dataRequest?.requestedOffset ?? -1)")
+        streamLog.debug("BETTERSTREAMING_STREAM didCancel offset=\(loadingRequest.dataRequest?.requestedOffset ?? -1)")
         #endif
     }
 
@@ -153,6 +155,7 @@ private actor RemoteStreamSession {
     private let partialCacheURL: URL
     private let completeCacheURL: URL
     private let onComplete: (@Sendable () async -> Void)?
+    private let onTeardown: (@Sendable () async -> Void)?
     private var cachedRanges: [Range<Int64>] = []
     /// True once the partial cache file has been created+sized, so we only
     /// truncate to the full logical length once.
@@ -177,7 +180,8 @@ private actor RemoteStreamSession {
         fallbackExtension: String,
         partialCacheURL: URL,
         completeCacheURL: URL,
-        onComplete: (@Sendable () async -> Void)?
+        onComplete: (@Sendable () async -> Void)?,
+        onTeardown: (@Sendable () async -> Void)? = nil
     ) {
         self.id = id
         self.client = client
@@ -187,12 +191,83 @@ private actor RemoteStreamSession {
         self.partialCacheURL = partialCacheURL
         self.completeCacheURL = completeCacheURL
         self.onComplete = onComplete
+        self.onTeardown = onTeardown
+        // Restore any byte ranges a previous session cached in a matching partial
+        // file, so playback resumes from disk instead of re-streaming from byte 0.
+        if let restored = Self.restorePersistedRanges(
+            sidecarURL: partialCacheURL.appendingPathExtension("ranges"),
+            partialCacheURL: partialCacheURL,
+            metadata: metadata
+        ) {
+            self.cachedRanges = restored
+            self.didSizeCacheFile = true
+        }
     }
 
-    /// Delete the session's partial scratch file. Safe even after promotion —
-    /// the complete copy lives in the media cache.
-    func teardown() {
+    /// Sidecar next to the partial file recording which byte ranges are already on
+    /// disk, so a re-opened session with a matching partial can skip re-fetching
+    /// them instead of streaming from byte 0.
+    nonisolated private var sidecarURL: URL {
+        partialCacheURL.appendingPathExtension("ranges")
+    }
+
+    /// Read + validate the sidecar. Returns the on-disk ranges when the partial is
+    /// intact and the remote file is unchanged; otherwise deletes the stale sidecar
+    /// and partial and returns nil. Pure/`static` so it can run from the actor init.
+    nonisolated private static func restorePersistedRanges(
+        sidecarURL: URL,
+        partialCacheURL: URL,
+        metadata: RemoteMetadata
+    ) -> [Range<Int64>]? {
+        let fm = FileManager.default
+        guard let data = try? Data(contentsOf: sidecarURL),
+              let sidecar = try? JSONDecoder().decode(RangesSidecar.self, from: data) else { return nil }
+        func discard() -> [Range<Int64>]? {
+            try? fm.removeItem(at: sidecarURL)
+            try? fm.removeItem(at: partialCacheURL)
+            return nil
+        }
+        // The remote file must be unchanged since these ranges were cached.
+        guard sidecar.sourceSize == metadata.size,
+              sameInstant(sidecar.sourceModifiedAtEpoch, metadata.modifiedAt) else { return discard() }
+        // The partial must exist and be sized to the full logical length (writeCache
+        // truncates it there before writing at absolute offsets).
+        guard let length = metadata.size, length > 0,
+              let attrs = try? fm.attributesOfItem(atPath: partialCacheURL.path),
+              let fileSize = (attrs[.size] as? NSNumber)?.int64Value, fileSize == length else { return discard() }
+        let restored = sidecar.ranges
+            .map { $0.lower..<$0.upper }
+            .filter { $0.lowerBound >= 0 && $0.upperBound <= length && $0.lowerBound < $0.upperBound }
+        return restored.isEmpty ? nil : restored
+    }
+
+    nonisolated private static func sameInstant(_ epoch: Double?, _ date: Date?) -> Bool {
+        switch (epoch, date) {
+        case (nil, nil): return true
+        case let (e?, d?): return abs(e - d.timeIntervalSince1970) < 1.0
+        default: return false
+        }
+    }
+
+    /// Write the merged ranges (plus source identity for validation) to the sidecar.
+    private func persistRanges() {
+        let sidecar = RangesSidecar(
+            sourceSize: metadata.size,
+            sourceModifiedAtEpoch: metadata.modifiedAt?.timeIntervalSince1970,
+            ranges: cachedRanges.map { CachedRange(lower: $0.lowerBound, upper: $0.upperBound) }
+        )
+        guard let data = try? JSONEncoder().encode(sidecar) else { return }
+        try? data.write(to: sidecarURL, options: .atomic)
+    }
+
+    /// Delete the session's partial scratch file and its ranges sidecar. Safe even
+    /// after promotion — the complete copy lives in the media cache. Signals the
+    /// owner so it can release this track's deterministic partial-file name (else
+    /// a skipped-then-replayed track is stuck on the UUID fallback all session).
+    func teardown() async {
         try? FileManager.default.removeItem(at: partialCacheURL)
+        try? FileManager.default.removeItem(at: sidecarURL)
+        await onTeardown?()
     }
 
     func respond(to box: LoadingRequestBox) async {
@@ -259,7 +334,7 @@ private actor RemoteStreamSession {
 
         streamLog.info("request ext=\(self.fallbackExtension, privacy: .public) offset=\(offset) upper=\(upper) allToEnd=\(isAllToEnd) len=\(length)")
         #if DEBUG
-        print("BETTERSTREAMING_STREAM request offset=\(offset) upper=\(upper) allToEnd=\(isAllToEnd) len=\(length)")
+        streamLog.debug("BETTERSTREAMING_STREAM request offset=\(offset) upper=\(upper) allToEnd=\(isAllToEnd) len=\(length)")
         #endif
 
         var cursor = offset
@@ -432,13 +507,13 @@ private actor RemoteStreamSession {
             try fm.moveItem(at: tmp, to: completeCacheURL)   // atomic rename on one volume
             promoted = true
             #if DEBUG
-            print("BETTERSTREAMING_STREAM promoted ext=\(fallbackExtension) bytes=\(totalLength)")
+            streamLog.debug("BETTERSTREAMING_STREAM promoted ext=\(self.fallbackExtension, privacy: .public) bytes=\(totalLength)")
             #endif
             await onComplete?()
         } catch {
             try? fm.removeItem(at: tmp)   // don't leave a half-copied promote temp behind
             #if DEBUG
-            print("BETTERSTREAMING_STREAM promote_failed error=\(error)")
+            streamLog.error("BETTERSTREAMING_STREAM promote_failed error=\(error, privacy: .public)")
             #endif
         }
     }
@@ -460,7 +535,21 @@ private actor RemoteStreamSession {
             }
         }
         cachedRanges = merged
+        persistRanges()
     }
+}
+
+/// On-disk record of the byte ranges cached in a partial file, keyed to the remote
+/// file's size + mtime so a changed source invalidates it.
+private struct RangesSidecar: Codable {
+    var sourceSize: Int64?
+    var sourceModifiedAtEpoch: Double?
+    var ranges: [CachedRange]
+}
+
+private struct CachedRange: Codable {
+    var lower: Int64
+    var upper: Int64
 }
 
 private enum StreamingError: LocalizedError {

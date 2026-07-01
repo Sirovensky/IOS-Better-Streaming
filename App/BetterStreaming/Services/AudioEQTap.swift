@@ -152,7 +152,11 @@ private func tapProcess(
     let frames = vDSP_Length(numberFramesOut.pointee)
     let buffers = UnsafeMutableAudioBufferListPointer(bufferListInOut)
 
-    // Apply preamp (cheap, always safe) then the biquad cascade per channel.
+    // Only touch the samples for the canonical non-interleaved Float32 format
+    // (`context.isFloat`). Reinterpreting integer PCM — or interleaved float — as
+    // `Float` and scaling it produces loud garbage, so preamp AND biquad both gate
+    // on the same guard; anything else passes through untouched.
+    guard context.isFloat else { return }
     for (index, buffer) in buffers.enumerated() {
         guard let raw = buffer.mData else { continue }
         let samples = raw.assumingMemoryBound(to: Float.self)
@@ -160,7 +164,7 @@ private func tapProcess(
             var gain = context.preampLinear
             vDSP_vsmul(samples, 1, &gain, samples, 1, frames)
         }
-        if context.isFloat, let setup = context.setup, context.sections > 0, index < context.delays.count {
+        if let setup = context.setup, context.sections > 0, index < context.delays.count {
             context.delays[index].withUnsafeMutableBufferPointer { delay in
                 vDSP_biquad(setup, delay.baseAddress!, samples, 1, samples, 1, frames)
             }

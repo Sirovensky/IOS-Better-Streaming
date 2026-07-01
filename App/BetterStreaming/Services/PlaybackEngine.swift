@@ -133,7 +133,9 @@ final class PlaybackEngine {
     /// and the queue index it represents. Cleared on any queue mutation.
     private var preloadedNextItem: AVPlayerItem?
     private var preloadedNextIndex: Int?
-    private var unshuffledQueue: [Track] = []
+    /// The pre-shuffle play order, so shuffle-off restores it. Readable so a
+    /// session snapshot can persist it and restore true un-shuffle after relaunch.
+    private(set) var unshuffledQueue: [Track] = []
     private var resolveGeneration = 0
     /// Generation for which onTrackStarted has already fired, so a "play" is
     /// counted once and only after the item is actually ready (not on load,
@@ -152,7 +154,7 @@ final class PlaybackEngine {
     /// hero is shown; its tap calls `resume()`, which seeks to the saved `elapsed`.
     var hasRestorableSession: Bool { needsInitialLoad && currentTrack != nil }
 
-    /// Fires on the periodic time observer (~every 0.5s) so an owner can persist
+    /// Fires on the periodic time observer (~every 0.1s) so an owner can persist
     /// the current position. Throttle on the receiving side.
     var onPlaybackTick: (@MainActor () -> Void)?
     /// When a fresh item should resume mid-track (stall recovery), the seconds to
@@ -194,6 +196,8 @@ final class PlaybackEngine {
         observeTimeControlStatus()
         configureRemoteCommands()
         observeInterruptions()
+        observeRouteChanges()
+        observeMediaServicesReset()
     }
 
     // Note: no explicit `deinit` to remove the periodic time observer — AVPlayer
@@ -220,13 +224,15 @@ final class PlaybackEngine {
     /// touching the network. The user lands paused on `queue[index]` at `elapsed`;
     /// the first resume/seek resolves the item and seeks there. `queue` is the
     /// live (already-shuffled, if applicable) order.
-    func restore(queue: [Track], index: Int, elapsed: Double, shuffle: Bool, repeatMode: RepeatMode) {
+    func restore(queue: [Track], index: Int, elapsed: Double, shuffle: Bool, repeatMode: RepeatMode, unshuffled: [Track]? = nil) {
         guard !queue.isEmpty, queue.indices.contains(index) else { return }
         cancelStallWatchdog()
         cancelPreroll()
         resolveGeneration += 1
         self.queue = queue
-        self.unshuffledQueue = queue
+        // A snapshot that persisted the pre-shuffle order restores it so shuffle-off
+        // yields the real order; otherwise fall back to the live (possibly shuffled) queue.
+        self.unshuffledQueue = unshuffled ?? queue
         self.currentIndex = index
         self.shuffleEnabled = shuffle
         self.repeatMode = repeatMode
@@ -325,6 +331,76 @@ final class PlaybackEngine {
         updateNowPlayingInfo()
     }
 
+    /// Push refreshed `Track` value-copies into the live queue (after a metadata
+    /// edit or a cacheState change on the owner's side). Matches by id and preserves
+    /// order, `currentIndex`, and which item is current — only the value contents
+    /// change. Refreshes the lock screen when the current track's data changed, and
+    /// re-stages the gapless preload when the NEXT track's cacheState changed (the
+    /// copy `preloadNextIfGapless` reads was stale, so a just-cached next now
+    /// becomes preloadable).
+    func updateQueueTracks(_ updated: [Track]) {
+        guard !updated.isEmpty else { return }
+        let byID = Dictionary(updated.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+        let currentID = currentTrack?.id
+        let nextIndex = gaplessNextIndex
+        let oldNextCacheState = nextIndex.flatMap { queue.indices.contains($0) ? queue[$0].cacheState : nil }
+
+        var currentChanged = false
+        for i in queue.indices {
+            guard let fresh = byID[queue[i].id] else { continue }
+            if queue[i].id == currentID { currentChanged = true }
+            queue[i] = fresh
+        }
+        for i in unshuffledQueue.indices {
+            if let fresh = byID[unshuffledQueue[i].id] { unshuffledQueue[i] = fresh }
+        }
+
+        if currentChanged { updateNowPlayingInfo() }
+        if let nextIndex, queue.indices.contains(nextIndex),
+           queue[nextIndex].cacheState != oldNextCacheState {
+            clearPreload()
+            preloadNextIfGapless()
+        }
+    }
+
+    /// Swap re-keyed tracks into the live queue after a rescan identity remap:
+    /// `mapping` is OLD id → the NEW `Track`. Unlike `updateQueueTracks` (which
+    /// matches by unchanged id), the id itself changes here — without this, the
+    /// periodic snapshot tick re-persists the dead old ids and clobbers the
+    /// corrected snapshot, dropping the queue on next launch.
+    func remapQueueTracks(_ mapping: [String: Track]) {
+        guard !mapping.isEmpty else { return }
+        var currentChanged = false
+        for i in queue.indices {
+            guard let fresh = mapping[queue[i].id] else { continue }
+            if i == currentIndex { currentChanged = true }
+            queue[i] = fresh
+        }
+        for i in unshuffledQueue.indices {
+            if let fresh = mapping[unshuffledQueue[i].id] { unshuffledQueue[i] = fresh }
+        }
+        if currentChanged { updateNowPlayingInfo() }
+    }
+
+    /// Jump straight to a queue position and play it (queue UI tap-to-jump).
+    func jump(toQueueIndex index: Int) {
+        guard queue.indices.contains(index) else { return }
+        currentIndex = index
+        startCurrentItem(autoPlay: true)
+    }
+
+    /// Drop everything after the current track ("Clear Playing Next"), keeping the
+    /// current item playing. Removes the matching entries from the shuffle source
+    /// too (so a later shuffle-off can't resurrect them) and invalidates the preload.
+    func clearUpcoming() {
+        guard queue.indices.contains(currentIndex), currentIndex < queue.count - 1 else { return }
+        let removedIDs = Set(queue[(currentIndex + 1)...].map(\.id))
+        queue.removeSubrange((currentIndex + 1)...)
+        unshuffledQueue.removeAll { removedIDs.contains($0.id) && $0.id != currentTrack?.id }
+        clearPreload()
+        preloadNextIfGapless()
+    }
+
     // MARK: Transport
 
     func togglePlayPause() {
@@ -335,6 +411,13 @@ final class PlaybackEngine {
         guard currentTrack != nil else { return }
         if needsInitialLoad {
             // Restored session: resolve the item now and resume at the saved point.
+            startCurrentItem(autoPlay: true, resumeAt: elapsed)
+            return
+        }
+        // After a resolve/playback failure the current item was torn down (nil) or is
+        // in a `.failed` state; a bare `play()` would resume the PREVIOUS track's audio
+        // or silently no-op. Re-resolve the current track from scratch instead.
+        if currentPlayerItem == nil || currentPlayerItem?.status == .failed {
             startCurrentItem(autoPlay: true, resumeAt: elapsed)
             return
         }
@@ -393,7 +476,7 @@ final class PlaybackEngine {
         if isSeeking {
             pendingSeekSeconds = clamped   // coalesce rapid scrubs to the latest
             #if DEBUG
-            print("BETTERSTREAMING_SEEK coalesce pending=\(clamped) elapsed=\(elapsed) (in-flight)")
+            AppLog.playback.debug("BETTERSTREAMING_SEEK coalesce pending=\(clamped) elapsed=\(self.elapsed) (in-flight)")
             #endif
             return
         }
@@ -403,7 +486,7 @@ final class PlaybackEngine {
     private func performSeek(to seconds: Double) {
         isSeeking = true
         #if DEBUG
-        print("BETTERSTREAMING_SEEK perform to=\(seconds) gen=\(resolveGeneration) elapsed=\(elapsed) dur=\(duration)")
+        AppLog.playback.debug("BETTERSTREAMING_SEEK perform to=\(seconds) gen=\(self.resolveGeneration) elapsed=\(self.elapsed) dur=\(self.duration)")
         #endif
         cancelPreroll()   // a fresh seek supersedes any in-progress pre-roll
         // Scrubbing to an un-cached position must fetch from the source; show
@@ -419,7 +502,7 @@ final class PlaybackEngine {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 #if DEBUG
-                print("BETTERSTREAMING_SEEK done to=\(seconds) finished=\(finished) gen=\(generation) curGen=\(self.resolveGeneration) pending=\(self.pendingSeekSeconds ?? -1) playerTime=\(self.player.currentTime().seconds) ctrl=\(self.player.timeControlStatus.rawValue)")
+                AppLog.playback.debug("BETTERSTREAMING_SEEK done to=\(seconds) finished=\(finished) gen=\(generation) curGen=\(self.resolveGeneration) pending=\(self.pendingSeekSeconds ?? -1) playerTime=\(self.player.currentTime().seconds) ctrl=\(self.player.timeControlStatus.rawValue)")
                 #endif
                 // The track changed mid-seek: abandon this stale completion so it
                 // can't seek the new item (the new item resets seek state itself).
@@ -641,7 +724,7 @@ final class PlaybackEngine {
     private func startCurrentItem(autoPlay: Bool, resumeAt: Double = 0) {
         guard let track = currentTrack else { return }
         #if DEBUG
-        print("BETTERSTREAMING_PLAY start title=\(track.title) ext=\(track.fileExtension) source=\(track.sourceID) remote=\(track.remotePath ?? "nil") resumeAt=\(resumeAt)")
+        AppLog.playback.debug("BETTERSTREAMING_PLAY start title=\(track.title) ext=\(track.fileExtension, privacy: .public) source=\(track.sourceID, privacy: .public) remote=\(track.remotePath ?? "nil") resumeAt=\(resumeAt)")
         #endif
         cancelStallWatchdog()
         cancelPreroll()
@@ -679,13 +762,13 @@ final class PlaybackEngine {
                 self.isBuffering = false
                 self.lastErrorMessage = "“\(track.title)” isn’t available offline."
                 #if DEBUG
-                print("BETTERSTREAMING_PLAY resolve_nil title=\(track.title) ext=\(track.fileExtension)")
+                AppLog.playback.debug("BETTERSTREAMING_PLAY resolve_nil title=\(track.title) ext=\(track.fileExtension, privacy: .public)")
                 #endif
                 self.stopAfterFailure()
                 return
             }
             #if DEBUG
-            print("BETTERSTREAMING_PLAY resolved title=\(track.title) ext=\(track.fileExtension)")
+            AppLog.playback.debug("BETTERSTREAMING_PLAY resolved title=\(track.title) ext=\(track.fileExtension, privacy: .public)")
             #endif
             self.loadPlayerItem(item: item, autoPlay: autoPlay, generation: generation)
         }
@@ -803,9 +886,12 @@ final class PlaybackEngine {
         isSwitchFading = false
     }
 
-    /// Build a "CODEC · 24-bit · 96 kHz" label from a decoded asset's audio format.
-    /// Bit depth is omitted for compressed formats (mBitsPerChannel == 0, e.g. AAC/
-    /// MP3). Returns the codec alone if the asset format can't be read (e.g. a
+    /// Build the player's format chip from a decoded asset's audio format:
+    /// "FLAC · 24-bit · 96 kHz" for lossless (bit depth + rate are the quality),
+    /// "MP3 · 320 kbps" for lossy (bitrate is the true quality; the sample rate
+    /// is ~always 44.1/48 and tells the listener nothing). Classified by the
+    /// decoder's mFormatID, not the file extension (an .m4a can be AAC or ALAC).
+    /// Returns the codec alone if the asset format can't be read (e.g. a
     /// still-loading remote stream), so the chip always shows something. Stays on
     /// the MainActor (the async loaders hop off internally) so the non-Sendable
     /// AVAsset never crosses an actor boundary.
@@ -815,11 +901,21 @@ final class PlaybackEngine {
         if let track = try? await asset.loadTracks(withMediaType: .audio).first,
            let desc = try? await track.load(.formatDescriptions).first,
            let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
-            if asbd.mBitsPerChannel > 0 { parts.append("\(asbd.mBitsPerChannel)-bit") }
-            if asbd.mSampleRate > 0 {
-                let khz = asbd.mSampleRate / 1000
-                let label = khz == khz.rounded() ? String(format: "%.0f kHz", khz) : String(format: "%.1f kHz", khz)
-                parts.append(label)
+            let losslessIDs: Set<AudioFormatID> = [
+                kAudioFormatLinearPCM, kAudioFormatAppleLossless, kAudioFormatFLAC
+            ]
+            if losslessIDs.contains(asbd.mFormatID) {
+                if asbd.mBitsPerChannel > 0 { parts.append("\(asbd.mBitsPerChannel)-bit") }
+                if asbd.mSampleRate > 0 {
+                    let khz = asbd.mSampleRate / 1000
+                    let label = khz == khz.rounded() ? String(format: "%.0f kHz", khz) : String(format: "%.1f kHz", khz)
+                    parts.append(label)
+                }
+            } else if let rate = try? await track.load(.estimatedDataRate), rate > 0 {
+                parts.append("\(Int((rate / 1000).rounded())) kbps")
+            } else if asbd.mSampleRate > 0 {
+                // Bitrate unknown (still-buffering stream) — sample rate beats nothing.
+                parts.append(String(format: "%.0f kHz", asbd.mSampleRate / 1000))
             }
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
@@ -853,15 +949,17 @@ final class PlaybackEngine {
     private func attachItemObservers(_ item: AVPlayerItem, generation: Int) {
         let durationAsset = item.asset
         Task { @MainActor in
-            guard generation == self.resolveGeneration else { return }
-            if let cmDuration = try? await durationAsset.load(.duration) {
-                let seconds = cmDuration.seconds
-                if seconds.isFinite, seconds > 0 {
-                    self.duration = seconds
-                    self.updateNowPlayingInfo()
-                    if self.queue.indices.contains(self.currentIndex) {
-                        self.onDurationResolved?(self.queue[self.currentIndex].id, seconds)
-                    }
+            // Guard AFTER the load: a slow duration resolve for track A that lands
+            // once the user has skipped to B must not stamp A's duration onto B
+            // (persisting the wrong duration under B's id). Mirrors the format task.
+            guard let cmDuration = try? await durationAsset.load(.duration),
+                  generation == self.resolveGeneration else { return }
+            let seconds = cmDuration.seconds
+            if seconds.isFinite, seconds > 0 {
+                self.duration = seconds
+                self.updateNowPlayingInfo()
+                if self.queue.indices.contains(self.currentIndex) {
+                    self.onDurationResolved?(self.queue[self.currentIndex].id, seconds)
                 }
             }
         }
@@ -899,7 +997,7 @@ final class PlaybackEngine {
                     }
                     #if DEBUG
                     let duration = self.duration.isFinite ? self.duration : -1
-                    print("BETTERSTREAMING_PLAY ready index=\(self.currentIndex) duration=\(duration)")
+                    AppLog.playback.debug("BETTERSTREAMING_PLAY ready index=\(self.currentIndex) duration=\(duration)")
                     #endif
                     // Count the play only once the item is genuinely ready.
                     if self.notedPlayGeneration != generation,
@@ -952,7 +1050,7 @@ final class PlaybackEngine {
             isPlaying = true
             #if DEBUG
             let route = AVAudioSession.sharedInstance().currentRoute.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
-            print("BETTERSTREAMING_PLAY player_play route=\(route) volume=\(AVAudioSession.sharedInstance().outputVolume)")
+            AppLog.playback.debug("BETTERSTREAMING_PLAY player_play route=\(route, privacy: .public) volume=\(AVAudioSession.sharedInstance().outputVolume)")
             #endif
         }
         // onTrackStarted is fired from the .readyToPlay observation, not here,
@@ -1005,12 +1103,15 @@ final class PlaybackEngine {
     }
 
     private func advance(userInitiated: Bool) {
+        // A user tapping Next while paused advances without force-playing (mirrors
+        // previous()); an auto-advance at track end keeps playback rolling.
+        let autoPlay = userInitiated ? isPlaying : true
         if currentIndex < queue.count - 1 {
             currentIndex += 1
-            startCurrentItem(autoPlay: true)
+            startCurrentItem(autoPlay: autoPlay)
         } else if repeatMode == .all, !queue.isEmpty {
             currentIndex = 0
-            startCurrentItem(autoPlay: true)
+            startCurrentItem(autoPlay: autoPlay)
         } else {
             // Reached the end of the queue.
             isPlaying = false
@@ -1022,10 +1123,18 @@ final class PlaybackEngine {
     /// Keep the failed selection visible instead of racing through the queue.
     private func stopAfterFailure() {
         player.pause()
+        // Drop the dead/failed item so a later resume() can't play the PREVIOUS
+        // track's still-queued audio; resume() re-resolves the current track.
+        player.removeAllItems()
+        currentPlayerItem = nil
         isPlaying = false
         isBuffering = false
+        // A switch-fade may have ramped player.volume toward 0 for the failed
+        // load; hand volume back to applyVolume so a retry isn't near-silent.
+        endSwitchFade()
+        applyVolume()
         #if DEBUG
-        print("BETTERSTREAMING_PLAY stop_after_failure message=\(lastErrorMessage ?? "nil")")
+        AppLog.playback.debug("BETTERSTREAMING_PLAY stop_after_failure message=\(self.lastErrorMessage ?? "nil")")
         #endif
         updateNowPlayingInfo()
     }
@@ -1069,7 +1178,11 @@ final class PlaybackEngine {
                 guard let self else { return }
                 // Buffering = waiting to play (initial fill or a mid-track stall),
                 // or holding for the post-seek pre-roll. Show activity, not a freeze.
+                let wasBuffering = self.isBuffering
                 self.isBuffering = (status == .waitingToPlayAtSpecifiedRate) || self.isPrerolling
+                // The lock-screen playback rate depends on isBuffering; push a fresh
+                // Now Playing update when it flips so the system clock stops/starts.
+                if self.isBuffering != wasBuffering { self.updateNowPlayingInfo() }
                 switch status {
                 case .playing:
                     self.recoveryAttempts = 0
@@ -1206,6 +1319,62 @@ final class PlaybackEngine {
         }
     }
 
+    /// Output ports that, when yanked, should pause playback (the "unplug the
+    /// headphones, don't blast the speaker" behaviour).
+    private static let headphoneOutputPorts: Set<AVAudioSession.Port> = [
+        .headphones, .bluetoothA2DP, .bluetoothLE, .bluetoothHFP
+    ]
+
+    private func observeRouteChanges() {
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let reasonValue = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+            let previousRoute = note.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription
+            Task { @MainActor [weak self] in
+                self?.handleRouteChange(reasonValue: reasonValue, previousRoute: previousRoute)
+            }
+        }
+    }
+
+    private func handleRouteChange(reasonValue: UInt?, previousRoute: AVAudioSessionRouteDescription?) {
+        guard let reasonValue,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue),
+              reason == .oldDeviceUnavailable else { return }
+        // Only pause when the route we LOST was headphones/BT. iOS already pauses
+        // the player, but never flips our `isPlaying`, so the transport icon and
+        // lock screen desync; going through `pause()` keeps them in sync.
+        let lostHeadphones = (previousRoute?.outputs ?? []).contains {
+            Self.headphoneOutputPorts.contains($0.portType)
+        }
+        guard lostHeadphones, isPlaying else { return }
+        pause()
+    }
+
+    private func observeMediaServicesReset() {
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleMediaServicesReset()
+            }
+        }
+    }
+
+    private func handleMediaServicesReset() {
+        // mediaserverd crashed and restarted: the audio session is torn down and
+        // every AVPlayerItem is dead. Force a fresh session configure and rebuild
+        // the current item, preserving position and the user's play/pause intent.
+        audioSessionConfigured = false
+        guard currentTrack != nil else { return }
+        let wasPlaying = isPlaying
+        startCurrentItem(autoPlay: wasPlaying, resumeAt: elapsed)
+    }
+
     // MARK: Now Playing + remote commands
 
     private func updateNowPlayingInfo() {
@@ -1221,7 +1390,9 @@ final class PlaybackEngine {
             MPMediaItemPropertyAlbumTitle: track.album,
             MPMediaItemPropertyPlaybackDuration: safeDuration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: safeElapsed,
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
+            // Report 0 while buffering so the lock-screen clock doesn't tick ahead of
+            // stalled audio; it resumes to 1.0 once playback actually rolls.
+            MPNowPlayingInfoPropertyPlaybackRate: (isPlaying && !isBuffering) ? 1.0 : 0.0
         ]
         if let art = currentArtwork {
             info[MPMediaItemPropertyArtwork] = Self.nowPlayingArtwork(from: art)

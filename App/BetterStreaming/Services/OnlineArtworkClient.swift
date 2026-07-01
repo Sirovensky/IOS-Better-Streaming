@@ -67,7 +67,7 @@ actor OnlineArtworkClient {
 
     /// Reject non-image payloads (e.g. an HTML error page that's still >512 bytes)
     /// by checking the magic bytes for JPEG (`FF D8`) or PNG (`89 50 4E 47`).
-    private static func isImageData(_ data: Data) -> Bool {
+    static func isImageData(_ data: Data) -> Bool {
         let bytes = [UInt8](data.prefix(4))
         if bytes.count >= 2, bytes[0] == 0xFF, bytes[1] == 0xD8 { return true }
         if bytes.count >= 4, bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47 { return true }
@@ -152,7 +152,8 @@ actor ArtistImageClient {
         guard !q.isEmpty, lowered != "unknown artist", lowered != "unknown", lowered != "various artists" else { return nil }
         for source in sources {
             if let url = await imageURL(for: q, from: source),
-               let data = await download(url), data.count > 512 {
+               let data = await download(url), data.count > 512,
+               OnlineArtworkClient.isImageData(data) {
                 return data
             }
         }
