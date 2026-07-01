@@ -433,16 +433,39 @@ enum SongSort: String, CaseIterable, Identifiable {
     var isAlphabetical: Bool { self == .title }
 }
 
+/// View-local memo for the big A–Z library lists (Songs / Albums / Artists). Sorting and
+/// sectioning are O(n) and were re-running on every SwiftUI body pass — several per
+/// navigation push — which is what made these lists lag on large libraries. This builds
+/// the ordered items + sections once per (library revision + a sort/filter variant) and
+/// returns cached values on every other body pass. It's a plain class held in `@State`,
+/// so populating it inside `body` doesn't invalidate the view (nothing observed mutates).
+private final class SectionCache<Item> {
+    private struct Signature: Equatable { let rev: Int; let variant: String }
+    private var signature: Signature?
+    private(set) var items: [Item] = []
+    private(set) var sections: [LetterSection<Item>] = []
+
+    func resolve(rev: Int, variant: String, sectioned: Bool,
+                 build: () -> [Item], sectionKey: (Item) -> String) {
+        let sig = Signature(rev: rev, variant: variant)
+        guard signature != sig else { return }
+        let built = build()
+        items = built
+        sections = sectioned ? LibraryIndex.sections(built, key: sectionKey) : []
+        signature = sig
+    }
+}
+
 struct AllSongsView: View {
     @Environment(AppModel.self) private var model
     @State private var sort: SongSort = .title
     @State private var genreFilter: String? = nil
     @State private var genres: [String] = []
+    @State private var cache = SectionCache<Track>()
 
-    private var songs: [Track] {
-        // Title is the default and re-derives on every body pass, so it reads the
-        // model's revision-cached sort instead of re-sorting thousands of tracks here.
-        // Genre filtering is order-preserving, so it's applied after the sort.
+    private func buildSongs() -> [Track] {
+        // Title (the default) reads the model's revision-cached sort; genre filtering is
+        // order-preserving, so it's applied after the sort.
         let base: [Track]
         switch sort {
         case .title:
@@ -457,10 +480,16 @@ struct AllSongsView: View {
     }
 
     var body: some View {
-        let list = songs
+        // Build the sorted list + sections once per (revision, sort, genre); reading
+        // `libraryRevision` here keeps the memo reactive to library changes.
+        let _ = cache.resolve(rev: model.libraryRevision,
+                              variant: "\(sort.rawValue)|\(genreFilter ?? "")",
+                              sectioned: sort.isAlphabetical,
+                              build: buildSongs, sectionKey: { $0.title })
+        let list = cache.items
+        let sections = cache.sections
         Group {
             if sort.isAlphabetical {
-                let sections = LibraryIndex.sections(list) { $0.title }
                 AlphabetIndexedScroll(sections: sections) {
                     header(list)
                 } sectionContent: { section in
@@ -569,31 +598,44 @@ enum AlbumSort: String, CaseIterable, Identifiable {
 struct AllAlbumsView: View {
     @Environment(AppModel.self) private var model
     @State private var sort: AlbumSort = .title
+    @State private var cache = SectionCache<Album>()
     private let columns = [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)]
 
-    /// Alphabetical ordering (used only when `sort.isAlphabetical`).
-    private var albums: [Album] {
-        if sort == .artist {
+    /// Albums ordered for the current sort. Alphabetical sorts are also sectioned; the
+    /// non-alphabetical ones (recently-added, year) render as a flat grid.
+    private func buildAlbums() -> [Album] {
+        switch sort {
+        case .title:
+            return model.albums.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        case .artist:
             return model.albums.sorted {
                 let c = $0.artist.localizedStandardCompare($1.artist)
                 return c == .orderedSame
                     ? $0.title.localizedStandardCompare($1.title) == .orderedAscending
                     : c == .orderedAscending
             }
+        case .recentlyAdded:
+            return model.recentlyAddedAlbums
+        case .year:
+            return model.albums.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
         }
-        return model.albums.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
 
     var body: some View {
+        let _ = cache.resolve(rev: model.libraryRevision, variant: sort.rawValue,
+                              sectioned: sort.isAlphabetical,
+                              build: buildAlbums,
+                              sectionKey: { sort == .artist ? $0.artist : $0.title })
+        let ordered = cache.items
+        let sections = cache.sections
         Group {
             if sort.isAlphabetical {
-                let sections = LibraryIndex.sections(albums) { sort == .artist ? $0.artist : $0.title }
                 AlphabetIndexedScroll(sections: sections) { section in
                     grid(section.items)
                 }
             } else {
                 ScrollView {
-                    grid(orderedAlbums)
+                    grid(ordered)
                         .padding(.horizontal, DesignTokens.phonePadding)
                         .padding(.bottom, 120)
                 }
@@ -614,16 +656,6 @@ struct AllAlbumsView: View {
         }
     }
 
-    /// Albums in the active non-alphabetical order (recently-added uses the
-    /// model's date-ordered list; year sorts newest first).
-    private var orderedAlbums: [Album] {
-        switch sort {
-        case .recentlyAdded: return model.recentlyAddedAlbums
-        case .year: return model.albums.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
-        default: return albums
-        }
-    }
-
     private func grid(_ items: [Album]) -> some View {
         LazyVGrid(columns: columns, spacing: 18) {
             ForEach(items) { album in
@@ -638,8 +670,11 @@ struct AllAlbumsView: View {
 
 struct AllArtistsView: View {
     @Environment(AppModel.self) private var model
+    @State private var cache = SectionCache<Artist>()
     var body: some View {
-        let sections = LibraryIndex.sections(model.artists) { $0.name }
+        let _ = cache.resolve(rev: model.libraryRevision, variant: "", sectioned: true,
+                              build: { model.artists }, sectionKey: { $0.name })
+        let sections = cache.sections
         AlphabetIndexedScroll(sections: sections) { section in
             ForEach(section.items) { artist in
                 NavigationLink(value: LibraryRoute.artist(artist.id)) {

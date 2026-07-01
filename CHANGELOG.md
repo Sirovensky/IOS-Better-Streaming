@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-06-30 20:55]
+Follow-up on the Songs-list perf report ("still 1-2s, worse on bigger libraries") and the adversary's `.part` residual.
+
+- The model sort cache removed the repeated sort, but the A–Z sectioning still bucketed every item on each SwiftUI body pass (several per navigation push). Added a view-local memo (`SectionCache`) that builds the ordered items + sections once per (library revision, sort, filter) and returns cached values on every other pass. Applied to all three big lists — Songs, Albums, Artists — so opening is O(1) after the first build and scales to large libraries.
+  - `Features/Library/DetailViews.swift`
+- Song rows now read the live favourite state instead of the row's cached copy, so the star updates instantly even though the memoized list doesn't re-derive on a favourite toggle.
+  - `Components/MediaCells.swift`
+- The launch cache sweep now also removes stranded `*.part` files (an interrupted download temp), not just `*.promote` — same disk-leak class, same directory.
+  - `Services/LibraryService.swift`
+
 ## [2026-06-30 20:30]
 Two player/cache fixes from device testing plus the adversary's last residual.
 
@@ -7,7 +17,7 @@ Two player/cache fixes from device testing plus the adversary's last residual.
   - `Features/Player/MiniPlayerView.swift`
 - During an unfinished collapse, an upward swipe over empty space could re-open the player, because the mini-bar's expand gesture was live over the still-animating (large) frame. A morph-settling flag now gates the expand tap/drag: they're dead until the collapse finishes.
   - `AppModel.swift` (`isPlayerMorphSettling`), `Features/Player/MiniPlayerView.swift`
-- A crash between the cache promote copy and its atomic rename could strand a `*.promote` temp in the media cache, inflating the storage readout. Launch now sweeps those (real cached files never carry the suffix).
+- A crash between the cache promote copy and its atomic rename could strand a `*.promote` temp in the media cache, leaking disk permanently. Launch now sweeps those (real cached files never carry the suffix).
   - `Services/LibraryService.swift`
 
 ## [2026-06-30 19:45]

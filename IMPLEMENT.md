@@ -72,3 +72,13 @@
    - `App/BetterStreaming/AppModel.swift`, `App/BetterStreaming/Features/Library/DetailViews.swift`
 
 **Status:** complete. Device build succeeded and installed to the iPhone 17 Pro. On-device confirmation of the perf win pending user test.
+
+### [2026-06-30 20:55] Follow-up: list memo + `.part` sweep
+
+User re-tested: Songs still 1-2s, "on bigger libraries it would be worse." The model sort cache killed the repeated sort but A–Z sectioning still ran O(n) on every body pass (several per push). Added a view-local `SectionCache<Item>` memo (a plain class in `@State`, populated in `body` without invalidating the view) that builds ordered items + sections once per (libraryRevision, sort/filter variant). Applied to **all three** big lists — Songs, Albums, Artists — for even scaling.
+
+Correctness gate: the memoized song list holds `Track` value copies, so a favourite toggle (which doesn't bump `libraryRevision`) wouldn't refresh the star. Fixed at the source — `TrackRowView` reads live `model.isFavorite(id)` for the star. Cache-state changes already bump `libraryRevision`, so their glyph refreshes via the rebuild.
+
+Adversary round 3 (ran clean, 30 tool-uses): confirmed the settling gate, glass gating, songs-cache equivalence + revision keying, and promote-dir targeting. One LOW — the launch sweep missed the sibling `*.part` download temp (same disk-leak class). Fixed: sweep both `*.part` and `*.promote`. Also corrected the earlier "inflates the usage readout" wording — the live readout sums by hash filename, so orphans are a pure disk leak, not a readout error.
+
+Files: `Features/Library/DetailViews.swift`, `Components/MediaCells.swift`, `Services/LibraryService.swift`. Device build green + installed. On-device perf confirmation pending.
