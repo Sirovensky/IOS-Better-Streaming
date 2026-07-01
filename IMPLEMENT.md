@@ -82,3 +82,13 @@ Correctness gate: the memoized song list holds `Track` value copies, so a favour
 Adversary round 3 (ran clean, 30 tool-uses): confirmed the settling gate, glass gating, songs-cache equivalence + revision keying, and promote-dir targeting. One LOW — the launch sweep missed the sibling `*.part` download temp (same disk-leak class). Fixed: sweep both `*.part` and `*.promote`. Also corrected the earlier "inflates the usage readout" wording — the live readout sums by hash filename, so orphans are a pure disk leak, not a readout error.
 
 Files: `Features/Library/DetailViews.swift`, `Components/MediaCells.swift`, `Services/LibraryService.swift`. Device build green + installed. On-device perf confirmation pending.
+
+### [2026-06-30 21:10] Adversary round-4 fixes
+
+Round 4 (ran clean, 43 tool-uses) verified the memo has no stale-data path, no SwiftUI "modifying state during update" warning, and no empty-first-frame. One actionable defect (MED): the `.part` sweep only covered SMB — WebDAV/SFTP/FTP stream to their own `<uuid>.download` temp (WebDAVRemoteClient:148, SFTP:123, FTP:123) and rename to `.part` only at the end, so the stranded file for those three is `.download`, unswept. Extended the launch sweep to `*.part` + `*.download` + `*.promote` across both cacheDir and artworkDir.
+
+Reverted the live-favourite row lookup: the adversary confirmed `toggleFavorite`/`toggleAlbumFavorite` → `reconcileAutoCache` → `libraryRevision &+= 1` (unconditional, AppModel:1647), so the memo already rebuilds on a favourite toggle and the star refreshes from the fresh copy. The per-row live lookup was redundant observation.
+
+Pre-existing (NOT from these commits, reported to user for a decision): the "Year" album sort is a no-op because `Album.year` is always nil (no scan-time year parsing; `Track` has no year field). Either wire year from file tags (a scanner feature) or remove the sort option.
+
+Files: `Services/LibraryService.swift`, `Components/MediaCells.swift`. Device build + install pending.

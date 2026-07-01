@@ -1,5 +1,13 @@
 # Changelog
 
+## [2026-06-30 21:10]
+Adversary round-4 fixes on the list-memo commit.
+
+- The `.part` sweep only caught SMB downloads. WebDAV / SFTP / FTP stream to their own `<uuid>.download` temp and rename to `.part` only at the end, so the stranded file for those three was `.download`, which nothing swept. The launch sweep now removes `*.part`, `*.download`, and `*.promote` from both the media and artwork caches.
+  - `Services/LibraryService.swift`
+- Reverted the live-favourite row lookup added in the previous entry: a favourite toggle bumps `libraryRevision` (via `reconcileAutoCache`), so the memoized list already rebuilds and the star refreshes from the fresh copy — the per-row live lookup was redundant observation.
+  - `Components/MediaCells.swift`
+
 ## [2026-06-30 20:55]
 Follow-up on the Songs-list perf report ("still 1-2s, worse on bigger libraries") and the adversary's `.part` residual.
 

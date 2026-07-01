@@ -157,15 +157,17 @@ actor LibraryService {
         if let stale = try? fm.contentsOfDirectory(at: streamCacheDir, includingPropertiesForKeys: nil) {
             for url in stale { try? fm.removeItem(at: url) }
         }
-        // A crash mid-write can strand a temp in the persistent media cache: a
-        // "<uuid>.part" (an interrupted download, see fetchAndCache) or a
-        // "<uuid>.<ext>.promote" (an interrupted stream→cache promotion). Both are
-        // written in-process, so nothing is actively writing them at launch, and real
-        // cached files are "<hash>.<ext>" — sweep them to reclaim the leaked disk.
-        if let entries = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
+        // A crash mid-write can strand a temp in a persistent cache dir: "<uuid>.part"
+        // (the SMB download destination), "<uuid>.download" (the WebDAV/SFTP/FTP stream
+        // temp), or "<uuid>.<ext>.promote" (a stream→cache promotion). All are written
+        // in-process — nothing is writing them at launch — and real files are
+        // "<hash>.<ext>", so sweep those suffixes from both the media and artwork caches
+        // to reclaim the leaked disk.
+        for dir in [cacheDir, artworkDir] {
+            guard let entries = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { continue }
             for url in entries {
                 let name = url.lastPathComponent
-                if name.hasSuffix(".part") || name.hasSuffix(".promote") {
+                if name.hasSuffix(".part") || name.hasSuffix(".download") || name.hasSuffix(".promote") {
                     try? fm.removeItem(at: url)
                 }
             }

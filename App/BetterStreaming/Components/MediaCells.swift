@@ -59,10 +59,7 @@ struct TrackRowView: View {
 
                 Spacer(minLength: 8)
 
-                // Live favourite lookup (not the row's cached copy) so the star updates
-                // the instant it's toggled, even when the parent list is memoized and
-                // doesn't re-derive on a favourite change.
-                if model.isFavorite(track.id) {
+                if track.isFavorite {
                     Image(systemName: "star.fill")
                         .font(.caption2)
                         .foregroundStyle(DesignTokens.brandPrimary)
