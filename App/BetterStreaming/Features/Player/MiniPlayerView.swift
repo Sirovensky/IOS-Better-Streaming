@@ -219,8 +219,14 @@ struct MorphingPlayer: View {
             // interactive wobble); the real glass resolves the instant the drag settles.
             if dragging {
                 Color.clear.background(.ultraThinMaterial, in: shape)
+                    .allowsHitTesting(false)
             } else {
-                Color.clear.glassSurface(shape, tint: tint, amount: tintAmount)
+                Color.clear.glassSurface(shape, tint: tint, amount: tintAmount, interactive: presented)
+                    // Decorative surface: only intercept touches when it IS the full
+                    // screen. Otherwise (bar / mid-collapse) it must pass touches through,
+                    // else the large morph frame blocks the list behind for the whole
+                    // settle — the "can't scroll for ~1s after collapsing" bug.
+                    .allowsHitTesting(presented)
             }
 
             // (3) Content: full Now Playing (cropped from the bottom up, fades in) +
@@ -268,7 +274,7 @@ struct MorphingPlayer: View {
                     // refracted backdrop never contains the player itself. Buttons inside
                     // the row still win their taps (drag needs real movement).
                     .onTapGesture {
-                        guard engine.lastErrorMessage == nil else { return }
+                        guard engine.lastErrorMessage == nil, !model.isPlayerMorphSettling else { return }
                         withAnimation(PlayerMorph.settle) { presented = true }
                     }
                     .gesture(expandDrag(height: H))
@@ -304,11 +310,11 @@ struct MorphingPlayer: View {
     private func expandDrag(height: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 10)
             .onChanged { value in
-                guard engine.lastErrorMessage == nil, value.translation.height < 0 else { return }
+                guard engine.lastErrorMessage == nil, !model.isPlayerMorphSettling, value.translation.height < 0 else { return }
                 dragFraction = min(max(-value.translation.height / max(height, 1), 0), 1)
             }
             .onEnded { value in
-                guard engine.lastErrorMessage == nil else { return }
+                guard engine.lastErrorMessage == nil, !model.isPlayerMorphSettling else { return }
                 let f = min(max(-value.translation.height / max(height, 1), 0), 1)
                 let flungUp = value.predictedEndTranslation.height < -220
                 let open = f > 0.25 || flungUp   // open if dragged past a quarter (or flung)
@@ -339,9 +345,14 @@ extension View {
     /// touch-responsive liquid wobble; `amount` is a light optional album tint
     /// (currently 0). Takes any `Shape`. Thin-material fallback below iOS 26.
     @ViewBuilder
-    func glassSurface<S: Shape>(_ shape: S, tint: Color, amount: Double) -> some View {
+    func glassSurface<S: Shape>(_ shape: S, tint: Color, amount: Double, interactive: Bool = true) -> some View {
         if #available(iOS 26.0, *) {
-            self.glassEffect(.regular.tint(tint.opacity(amount)).interactive(), in: shape)
+            // `.interactive()` hit-tests its whole area and re-composites per frame; keep it
+            // only while the player is the settled full screen. During the morph/bar it would
+            // cover the screen and starve touches to the app behind while the settle spring
+            // runs (the ~0.5-1s "can't scroll right after collapsing" hitch).
+            let glass = Glass.regular.tint(tint.opacity(amount))
+            self.glassEffect(interactive ? glass.interactive() : glass, in: shape)
         } else {
             self.background(.ultraThinMaterial, in: shape)
                 .overlay(shape.fill(tint.opacity(amount * 0.5)))
@@ -638,17 +649,23 @@ struct NowPlayingView: View {
                 let f = 1 - (max(value.translation.height, 0) / max(containerHeight, 1))
                 let flungDown = value.predictedEndTranslation.height > 280
                 let stayOpen = f > 0.72 && !flungDown
+                model.isPlayerMorphSettling = true
                 withAnimation(PlayerMorph.settle) {
                     presented.wrappedValue = stayOpen
                     dragFraction.wrappedValue = nil
+                } completion: {
+                    model.isPlayerMorphSettling = false
                 }
             }
     }
 
     private func collapse() {
+        model.isPlayerMorphSettling = true
         withAnimation(PlayerMorph.settle) {
             presented.wrappedValue = false
             dragFraction.wrappedValue = nil
+        } completion: {
+            model.isPlayerMorphSettling = false
         }
     }
 

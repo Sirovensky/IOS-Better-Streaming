@@ -90,7 +90,10 @@ struct RootTabView: View {
             // gesture-holding surface is torn down and .onEnded never fires — reset
             // so the next track can't mount the player at a stale partial fraction.
             .onChange(of: model.engine.currentTrack == nil) { _, gone in
-                if gone { dragFraction = nil; model.isNowPlayingPresented = false }
+                // The settle's completion callback can't fire if the player is torn down
+                // mid-collapse, so clear the settling flag here too — else the next
+                // track's mini-bar would mount with its expand gesture permanently dead.
+                if gone { dragFraction = nil; model.isNowPlayingPresented = false; model.isPlayerMorphSettling = false }
             }
             // (Frosted glass samples the live backdrop itself — no snapshot capture or
             // refraction fade needed anymore.)

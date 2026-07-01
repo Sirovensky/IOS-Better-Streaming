@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-06-30 20:30]
+Two player/cache fixes from device testing plus the adversary's last residual.
+
+- Full-to-mini collapse felt frozen for up to a second: the interactive glass surface stayed hit-testable through the settle spring and swallowed touches meant for the list. It's only interactive/hit-testable while the player is actually presented now, so the list responds the instant the collapse begins.
+  - `Features/Player/MiniPlayerView.swift`
+- During an unfinished collapse, an upward swipe over empty space could re-open the player, because the mini-bar's expand gesture was live over the still-animating (large) frame. A morph-settling flag now gates the expand tap/drag: they're dead until the collapse finishes.
+  - `AppModel.swift` (`isPlayerMorphSettling`), `Features/Player/MiniPlayerView.swift`
+- A crash between the cache promote copy and its atomic rename could strand a `*.promote` temp in the media cache, inflating the storage readout. Launch now sweeps those (real cached files never carry the suffix).
+  - `Services/LibraryService.swift`
+
 ## [2026-06-30 19:45]
 Device-test feedback round plus two regressions the adversary review caught. Build green on the simulator; tests pass.
 

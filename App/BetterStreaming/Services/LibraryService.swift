@@ -157,6 +157,15 @@ actor LibraryService {
         if let stale = try? fm.contentsOfDirectory(at: streamCacheDir, includingPropertiesForKeys: nil) {
             for url in stale { try? fm.removeItem(at: url) }
         }
+        // A crash between the promote copy and its atomic rename can strand a
+        // "<uuid>.<ext>.promote" temp in the persistent media cache. Real cached
+        // files never carry that suffix, so sweep them so they don't inflate the
+        // usage readout or leak disk across launches.
+        if let entries = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
+            for url in entries where url.lastPathComponent.hasSuffix(".promote") {
+                try? fm.removeItem(at: url)
+            }
+        }
     }
 
     /// One-time relocation of a whole cache directory from its old location to the

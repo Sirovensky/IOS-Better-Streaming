@@ -56,3 +56,19 @@
 **Deferred (second wave):** hi-res sample-rate switching, gapless for streamed sources, QR scanning. Plus the still-open slow-swipe-down stuck-mini-player bug from 2026-06-29.
 
 **Build/install:** sim builds via `xcodebuild … -destination 'platform=iOS Simulator,id=F6BF298F…'`; device build + install via `DEVELOPMENT_TEAM=4HFQ952344 CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates` → `devicectl device install app --device 45FD6187…`. Installed to the iPhone 17 Pro on 2026-06-30.
+
+---
+
+## [2026-06-30 20:30] Player-morph + Songs-list perf (device feedback)
+
+**Discussed/decided:** Two device-testing reports plus the adversary's last residual.
+
+1. **Full→mini collapse lag** (user: "0.5-1s delay before I can do anything"): the interactive glass surface stayed hit-testable through the settle spring and swallowed list touches. Gated interactivity/hit-testing on `presented` so the list responds the instant the collapse starts. (Committed earlier in this branch; carried here.)
+2. **Mid-collapse swipe re-opens** (user: "if the animation didn't end 100%, I can swipe up away from the animation and it still opens"): the mini-bar's expand gesture was live over the still-animating (large) frame during the settle. Added `AppModel.isPlayerMorphSettling`, set around the collapse settle via `withAnimation(_:completion:)`, and gated the mini-bar tap + expand drag on it. Expand is dead until the collapse finishes.
+   - `App/BetterStreaming/AppModel.swift`, `App/BetterStreaming/Features/Player/MiniPlayerView.swift`
+3. **`.promote` orphan** (adversary round 2 LOW): a crash between the cache promote copy and its atomic rename could strand `<uuid>.<ext>.promote` in the media cache, inflating the storage readout. Launch now sweeps `*.promote` from the media cache dir (real cached files never carry the suffix).
+   - `App/BetterStreaming/Services/LibraryService.swift`
+4. **Songs list opens in 2-3s at ~3k tracks** (user report): `AllSongsView.songs` re-ran a locale-aware `localizedStandardCompare` sort of every audio track on each SwiftUI body pass (many passes per navigation push). Albums/artists/stats were already `libraryRevision`-cached; Songs was the one derived list that wasn't. Added `AppModel.songsSortedByTitle` (same revision-keyed cache), and the view reads it for the default Title sort, applying the genre filter after the sort (order-preserving). Non-default sorts unchanged.
+   - `App/BetterStreaming/AppModel.swift`, `App/BetterStreaming/Features/Library/DetailViews.swift`
+
+**Status:** complete. Device build succeeded and installed to the iPhone 17 Pro. On-device confirmation of the perf win pending user test.

@@ -440,18 +440,20 @@ struct AllSongsView: View {
     @State private var genres: [String] = []
 
     private var songs: [Track] {
-        var base = model.audioTracks
-        if let genreFilter {
-            base = base.filter { MetadataGrouping.canonicalGenre($0.genre) == genreFilter }
-        }
+        // Title is the default and re-derives on every body pass, so it reads the
+        // model's revision-cached sort instead of re-sorting thousands of tracks here.
+        // Genre filtering is order-preserving, so it's applied after the sort.
+        let base: [Track]
         switch sort {
         case .title:
-            return base.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+            base = model.songsSortedByTitle
         case .recentlyAdded:
-            return base.sorted { ($0.modifiedAtEpoch ?? 0) > ($1.modifiedAtEpoch ?? 0) }
+            base = model.audioTracks.sorted { ($0.modifiedAtEpoch ?? 0) > ($1.modifiedAtEpoch ?? 0) }
         case .mostPlayed:
-            return base.sorted { model.autoCache.stat(for: $0.id).playCount > model.autoCache.stat(for: $1.id).playCount }
+            base = model.audioTracks.sorted { model.autoCache.stat(for: $0.id).playCount > model.autoCache.stat(for: $1.id).playCount }
         }
+        guard let genreFilter else { return base }
+        return base.filter { MetadataGrouping.canonicalGenre($0.genre) == genreFilter }
     }
 
     var body: some View {

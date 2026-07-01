@@ -63,6 +63,10 @@ final class AppModel {
 
     private(set) var hasCompletedOnboarding: Bool
     var isNowPlayingPresented = false
+    /// True while a player morph (expand/collapse) settle animation is in flight.
+    /// The mini-bar's expand tap/drag are gated on this so an upward swipe during a
+    /// still-animating collapse can't re-open the player from empty space.
+    var isPlayerMorphSettling = false
     /// When non-nil, the metadata editor sheet is presented for this track/album.
     var metadataEditTarget: MetadataEditTarget?
 
@@ -80,6 +84,8 @@ final class AppModel {
     private(set) var libraryRevision = 0
     @ObservationIgnored private var _albumsCacheRev = -1
     @ObservationIgnored private var _albumsCache: [Album] = []
+    @ObservationIgnored private var _songsSortedRev = -1
+    @ObservationIgnored private var _songsSortedCache: [Track] = []
     @ObservationIgnored private var _needsAttentionCacheRev = -1
     @ObservationIgnored private var _needsAttentionCache: [Track] = []
     @ObservationIgnored private var _statsCacheRev = -1
@@ -596,6 +602,19 @@ final class AppModel {
         let rev = libraryRevision   // registers observation; recompute once per change
         if _albumsCacheRev != rev { _albumsCache = computeAlbums(); _albumsCacheRev = rev }
         return _albumsCache
+    }
+
+    /// Audio tracks sorted by title, cached per library revision. The Songs list is the
+    /// default library view and re-derives on every SwiftUI body pass; a locale-aware
+    /// sort of a few-thousand-track library is far too slow to redo each time (it was
+    /// the 2-3s stall when opening Songs), so it's cached like `albums`/`libraryStats`.
+    var songsSortedByTitle: [Track] {
+        let rev = libraryRevision   // registers observation; recompute once per change
+        if _songsSortedRev != rev {
+            _songsSortedCache = audioTracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+            _songsSortedRev = rev
+        }
+        return _songsSortedCache
     }
 
     private func computeAlbums() -> [Album] {
