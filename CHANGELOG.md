@@ -1,5 +1,9 @@
 # Changelog
 
+## [2026-06-30 21:20]
+- Completed the launch cache sweep: it now also removes `*.art` (the remote folder-cover download temp), the last stranded-temp class. Full set swept from both media and artwork caches: `.part`, `.download`, `.art`, `.promote`.
+  - `Services/LibraryService.swift`
+
 ## [2026-06-30 21:10]
 Adversary round-4 fixes on the list-memo commit.
 
