@@ -36,7 +36,7 @@ public actor FTPRemoteClient: RemoteFileSystemClient {
         try await withControlConnection(path: directory) { control in
             let path = resolvedPath(directory)
             let endpoint = try await control.enterPassiveMode()
-            let data = FTPDataConnection(host: endpoint.host, port: endpoint.port)
+            let data = try FTPDataConnection(host: endpoint.host, port: endpoint.port)
             defer { data.cancel() }   // NWConnection leaks its socket/FD unless cancelled
             try await data.connect()
             let reply = try await control.send("LIST \(Self.commandPath(path))")
@@ -97,7 +97,7 @@ public actor FTPRemoteClient: RemoteFileSystemClient {
             }
 
             let endpoint = try await control.enterPassiveMode()
-            let data = FTPDataConnection(host: endpoint.host, port: endpoint.port)
+            let data = try FTPDataConnection(host: endpoint.host, port: endpoint.port)
             defer { data.cancel() }   // also aborts the partial RETR on the throw paths
             try await data.connect()
             let reply = try await control.send("RETR \(Self.commandPath(resolved))")
@@ -111,8 +111,12 @@ public actor FTPRemoteClient: RemoteFileSystemClient {
     public func download(_ path: RemotePath, to localURL: URL, progress: ProgressSink?) async throws {
         try await withControlConnection(path: path) { control in
             let resolved = resolvedPath(path)
+            // Ask SIZE on THIS control connection before RETR. A nested stat() spun
+            // up a second control connection, which per-IP-capped servers reject —
+            // nil total then silently disabled the short-download corruption guard.
+            let total = await Self.size(of: resolved, control: control)
             let endpoint = try await control.enterPassiveMode()
-            let data = FTPDataConnection(host: endpoint.host, port: endpoint.port)
+            let data = try FTPDataConnection(host: endpoint.host, port: endpoint.port)
             defer { data.cancel() }   // NWConnection leaks its socket/FD unless cancelled
             try await data.connect()
             let reply = try await control.send("RETR \(Self.commandPath(resolved))")
@@ -126,7 +130,6 @@ public actor FTPRemoteClient: RemoteFileSystemClient {
                 throw RemoteFileSystemError.invalidResponse
             }
             do {
-                let total = try? await stat(path).size
                 let completed = try await data.writeAll(to: handle, totalBytes: total, progress: progress)
                 try handle.close()
                 let final = try await control.readReply()
@@ -156,7 +159,14 @@ private extension FTPRemoteClient {
         path: RemotePath,
         _ body: (FTPControlConnection) async throws -> T
     ) async throws -> T {
-        let control = FTPControlConnection(host: host, port: port)
+        let control: FTPControlConnection
+        do {
+            // A user-entered port outside 1...65535 used to trap in the NWEndpoint
+            // initialiser (hard crash). Surface it as a typed error instead.
+            control = try FTPControlConnection(host: host, port: port)
+        } catch {
+            throw Self.map(error, path: path)
+        }
         do {
             try await control.connect()
             try await login(control)
@@ -195,7 +205,7 @@ private extension FTPRemoteClient {
         guard let parent = path.parentPath else { return nil }
         let name = path.lastPathComponent
         let endpoint = try await control.enterPassiveMode()
-        let data = FTPDataConnection(host: endpoint.host, port: endpoint.port)
+        let data = try FTPDataConnection(host: endpoint.host, port: endpoint.port)
         defer { data.cancel() }   // NWConnection leaks its socket/FD unless cancelled
         try await data.connect()
         let reply = try await control.send("LIST \(Self.commandPath(resolvedPath(parent)))")
@@ -229,6 +239,15 @@ private extension FTPRemoteClient {
         path.replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\n", with: "")
     }
 
+    /// Best-effort SIZE on an already-open control connection. `nil` when the
+    /// server doesn't answer 213 (the caller then skips the short-read guard).
+    static func size(of resolvedPath: String, control: FTPControlConnection) async -> Int64? {
+        guard let reply = try? await control.send("SIZE \(commandPath(resolvedPath))"), reply.code == 213 else {
+            return nil
+        }
+        return Int64(reply.message.last?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+    }
+
     static func expectPreliminary(_ reply: FTPReply, path: RemotePath) throws {
         guard (100..<200).contains(reply.code) else {
             throw error(from: reply, path: path)
@@ -242,22 +261,7 @@ private extension FTPRemoteClient {
     }
 
     static func error(from reply: FTPReply, path: RemotePath) -> Error {
-        switch reply.code {
-        case 421:
-            return RemoteFileSystemError.serverDisconnected
-        case 425, 426:
-            return RemoteFileSystemError.serverDisconnected
-        case 430, 530:
-            return RemoteFileSystemError.authenticationExpired
-        case 450, 550:
-            return RemoteFileSystemError.notFound(path)
-        case 451, 452, 500, 501, 502, 504:
-            return RemoteFileSystemError.invalidResponse
-        case 530...599:
-            return RemoteFileSystemError.permissionDenied(path)
-        default:
-            return RemoteFileSystemError.invalidResponse
-        }
+        FTPReplyMapper.error(code: reply.code, path: path)
     }
 
     static func map(_ error: Error, path: RemotePath) -> Error {
@@ -270,6 +274,19 @@ private extension FTPRemoteClient {
             }
         }
         return RemoteFileSystemError.invalidResponse
+    }
+}
+
+enum FTPPort {
+    /// A validated `NWEndpoint.Port`. Rejects anything outside 1...65535 instead
+    /// of trapping in `UInt16(_:)` / the force-unwrapped `NWEndpoint.Port` init.
+    static func make(_ port: Int) throws -> NWEndpoint.Port {
+        guard (1...65_535).contains(port),
+              let raw = UInt16(exactly: port),
+              let value = NWEndpoint.Port(rawValue: raw) else {
+            throw RemoteFileSystemError.invalidResponse
+        }
+        return value
     }
 }
 
@@ -303,10 +320,10 @@ private final class FTPControlConnection: @unchecked Sendable {
     private let connection: NWConnection
     private var buffer = Data()
 
-    init(host: String, port: Int) {
+    init(host: String, port: Int) throws {
         self.host = host
         self.port = port
-        self.connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: UInt16(port))!, using: .tcp)
+        self.connection = NWConnection(host: NWEndpoint.Host(host), port: try FTPPort.make(port), using: .tcp)
     }
 
     func connect() async throws {
@@ -408,7 +425,24 @@ private final class FTPControlConnection: @unchecked Sendable {
     }
 
     private static func parseEPSV(_ reply: FTPReply, fallbackHost: String) -> FTPPassiveEndpoint? {
-        let text = reply.message.joined(separator: " ")
+        guard let port = FTPPassiveParser.epsvPort(reply.message.joined(separator: " ")) else { return nil }
+        return FTPPassiveEndpoint(host: fallbackHost, port: port)
+    }
+
+    private static func parsePASV(_ reply: FTPReply, fallbackHost: String) -> FTPPassiveEndpoint? {
+        guard let port = FTPPassiveParser.pasvPort(reply.message.joined(separator: " ")) else { return nil }
+        // Ignore the IP advertised in the 227 reply: servers behind NAT report a
+        // private address that the client can't route to. Reuse the control
+        // connection's host (what curl/lftp do); only take the port from PASV.
+        return FTPPassiveEndpoint(host: fallbackHost, port: port)
+    }
+}
+
+/// Pure parsers for the passive-mode replies, split out so they're unit-testable
+/// without a live control connection.
+enum FTPPassiveParser {
+    /// Port from an EPSV `229` reply, e.g. `Entering Extended Passive Mode (|||6446|)`.
+    static func epsvPort(_ text: String) -> Int? {
         guard let open = text.firstIndex(of: "("),
               let close = text[open...].firstIndex(of: ")") else {
             return nil
@@ -420,11 +454,11 @@ private final class FTPControlConnection: @unchecked Sendable {
               (1...65_535).contains(port) else {
             return nil
         }
-        return FTPPassiveEndpoint(host: fallbackHost, port: port)
+        return port
     }
 
-    private static func parsePASV(_ reply: FTPReply, fallbackHost: String) -> FTPPassiveEndpoint? {
-        let text = reply.message.joined(separator: " ")
+    /// Port from a PASV `227` reply, e.g. `Entering Passive Mode (192,168,0,2,25,38)`.
+    static func pasvPort(_ text: String) -> Int? {
         guard let open = text.firstIndex(of: "("),
               let close = text[open...].firstIndex(of: ")") else {
             return nil
@@ -435,10 +469,29 @@ private final class FTPControlConnection: @unchecked Sendable {
         guard numbers.count == 6 else { return nil }
         let port = numbers[4] * 256 + numbers[5]
         guard (1...65_535).contains(port) else { return nil }
-        // Ignore the IP advertised in the 227 reply: servers behind NAT report a
-        // private address that the client can't route to. Reuse the control
-        // connection's host (what curl/lftp do); only take the port from PASV.
-        return FTPPassiveEndpoint(host: fallbackHost, port: port)
+        return port
+    }
+}
+
+/// Maps FTP reply codes to typed errors. Extracted for unit testing.
+enum FTPReplyMapper {
+    static func error(code: Int, path: RemotePath) -> RemoteFileSystemError {
+        switch code {
+        case 421:
+            return .serverDisconnected
+        case 425, 426:
+            return .serverDisconnected
+        case 430, 530:
+            return .authenticationExpired
+        case 450, 550:
+            return .notFound(path)
+        case 451, 452, 500, 501, 502, 504:
+            return .invalidResponse
+        case 530...599:
+            return .permissionDenied(path)
+        default:
+            return .invalidResponse
+        }
     }
 }
 
@@ -446,8 +499,8 @@ private final class FTPDataConnection: @unchecked Sendable {
     private let queue = DispatchQueue(label: "BetterStreaming.FTP.data")
     private let connection: NWConnection
 
-    init(host: String, port: Int) {
-        self.connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: UInt16(port))!, using: .tcp)
+    init(host: String, port: Int) throws {
+        self.connection = NWConnection(host: NWEndpoint.Host(host), port: try FTPPort.make(port), using: .tcp)
     }
 
     func connect() async throws {
@@ -577,18 +630,46 @@ public enum FTPListParser {
 }
 
 enum FTPDateParser {
-    static func parseMDTM(_ value: String) -> Date? {
+    // DateFormatter is expensive to allocate and not thread-safe. Cache one per
+    // format and serialise access with a lock, instead of allocating a fresh
+    // formatter on every one of a 10k-entry listing's lines.
+    private static let lock = NSLock()
+
+    private static let mdtmFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyyMMddHHmmss"
-        return formatter.date(from: value)
-    }
+        return formatter
+    }()
 
-    static func parseListDate(month: String, day: String, timeOrYear: String) -> Date? {
+    private static let listFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "MMM d yyyy HH:mm"
+        return formatter
+    }()
+
+    private static let dosFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "MM-dd-yy hh:mma"
+        return formatter
+    }()
+
+    private static func date(_ formatter: DateFormatter, from string: String) -> Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        return formatter.date(from: string)
+    }
+
+    static func parseMDTM(_ value: String) -> Date? {
+        date(mdtmFormatter, from: value)
+    }
+
+    static func parseListDate(month: String, day: String, timeOrYear: String) -> Date? {
         let year: String
         let time: String
         if timeOrYear.contains(":") {
@@ -598,8 +679,7 @@ enum FTPDateParser {
             year = timeOrYear
             time = "00:00"
         }
-        formatter.dateFormat = "MMM d yyyy HH:mm"
-        guard let parsed = formatter.date(from: "\(month) \(day) \(year) \(time)") else { return nil }
+        guard let parsed = date(listFormatter, from: "\(month) \(day) \(year) \(time)") else { return nil }
         // `ls` omits the year for recent files. If we assumed the current year but
         // the date lands in the future (a Dec file listed in Jan), it's last year.
         if timeOrYear.contains(":"), parsed.timeIntervalSinceNow > 86_400 {
@@ -608,11 +688,7 @@ enum FTPDateParser {
         return parsed
     }
 
-    static func parseDOSDate(date: String, time: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "MM-dd-yy hh:mma"
-        return formatter.date(from: "\(date) \(time)")
+    static func parseDOSDate(date dateString: String, time: String) -> Date? {
+        date(dosFormatter, from: "\(dateString) \(time)")
     }
 }

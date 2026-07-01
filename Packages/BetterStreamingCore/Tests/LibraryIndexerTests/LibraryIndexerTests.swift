@@ -115,6 +115,37 @@ import TestSupport
     #expect(report.finalCheckpoint.mediaItemsFound == 2)
 }
 
+@Test func scannerResumeRescansInFlightDirectoryDroppedFromPending() async throws {
+    // A checkpoint taken mid-directory records `currentPath` but had already
+    // popped it off `pendingDirectories` and hadn't marked it visited. Resuming
+    // must re-scan it (and its subtree) rather than silently losing it.
+    let root = RemotePath(displayPath: "")
+    let albumA = RemotePath(displayPath: "A")
+    let albumB = RemotePath(displayPath: "B")
+    let request = scanRequest(rootPath: root)
+    let checkpoint = LibraryScanCheckpoint(
+        scanID: ScanID(rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!),
+        request: request,
+        pendingDirectories: [albumB],
+        visitedDirectories: [root],
+        foldersVisited: 1,
+        filesVisited: 0,
+        mediaItemsFound: 0,
+        currentPath: albumA   // in flight when interrupted; not visited, not pending
+    )
+    let fileSystem = try FakeRemoteFileSystem(rootChildren: [
+        .directory("A", children: [.file("a.mp3")]),
+        .directory("B", children: [.file("b.mp3")])
+    ])
+    let scanner = RemoteLibraryScanner(fileSystem: fileSystem)
+
+    let report = try await scanner.scan(request, resumingFrom: checkpoint)
+
+    #expect(Set(report.folders.map(\.path.displayPath)) == ["A", "B"])
+    #expect(Set(report.mediaFiles.map(\.name)) == ["a.mp3", "b.mp3"])
+    #expect(report.finalCheckpoint.foldersVisited == 3)
+}
+
 @Test func scannerEmitsCancellationCheckpointWhenRemoteCancels() async throws {
     let album = RemotePath(displayPath: "Album")
     let fileSystem = try FakeRemoteFileSystem(rootChildren: [

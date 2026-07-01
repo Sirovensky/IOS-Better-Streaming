@@ -316,11 +316,31 @@ public actor MediaStore {
     public func deleteMetadataOverride(identityKey: String) async throws {
         try migrateIfNeededLocked()
         try await database().write { db in
-            try db.execute(
-                sql: "DELETE FROM metadata_overrides WHERE identity_key = ?",
-                arguments: [identityKey]
-            )
+            try MediaStorePersistence.deleteMetadataOverride(identityKey: identityKey, in: db)
         }
+    }
+
+    /// Rewrite metadata-override keys after an identity re-key (old → new). Runs in
+    /// one transaction; a new key that already carries an override is replaced (the
+    /// migrated edit wins). No-op for identical keys or missing sources.
+    public func remapMetadataOverrides(_ remap: [String: String]) async throws {
+        let pairs = remap.filter { $0.key != $0.value }
+        guard !pairs.isEmpty else { return }
+        try migrateIfNeededLocked()
+        try await database().write { db in
+            for (old, new) in pairs {
+                guard try Int.fetchOne(db, sql: "SELECT 1 FROM metadata_overrides WHERE identity_key = ?", arguments: [old]) != nil else { continue }
+                try db.execute(sql: "DELETE FROM metadata_overrides WHERE identity_key = ?", arguments: [new])
+                try db.execute(sql: "UPDATE metadata_overrides SET identity_key = ? WHERE identity_key = ?", arguments: [new, old])
+            }
+        }
+    }
+
+    /// The path-stable prefix (source + share + normalizedPath) of a stable key, or
+    /// nil for a malformed key. Public so the app can compute a conservative
+    /// identity re-key map from track ids without duplicating the parser.
+    public nonisolated static func pathStablePrefix(ofStableKey key: String) -> String? {
+        MediaStorePersistence.pathStablePrefix(ofStableKey: key)
     }
 
     public func metadataOverride(identityKey: String) async throws -> MetadataOverride? {
@@ -351,7 +371,13 @@ public actor MediaStore {
             // delete only the source's items whose identity_key is gone. The old
             // delete-all-then-reinsert reassigned every PK and cascade-wiped valid
             // cache_entries on every rescan.
-            let persisted = try items.map { try MediaStorePersistence.upsertMediaItem($0, in: db) }
+            let overrides = try MediaStorePersistence.overrideIndex(in: db)
+            let persisted = try items.map {
+                try MediaStorePersistence.upsertMediaItem(
+                    MediaStorePersistence.preservingOverriddenBaseText($0, overrides: overrides, in: db),
+                    in: db
+                )
+            }
             let keep = Set(items.map { $0.identity.stableKey })
             try MediaStorePersistence.deleteMediaItems(sourceID: sourceID, keeping: keep, in: db)
             return persisted
@@ -1081,6 +1107,41 @@ private enum MediaStorePersistence {
     static func nonBlank(_ value: String?) -> String? {
         guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return value
+    }
+
+    /// Delete a track's override. Removes the exact key AND any override whose
+    /// path-stable prefix matches — after identity drift the live override is stored
+    /// under an OLD key that still prefix-resolves for the new key (see
+    /// `OverrideIndex`), so a "revert to file tags" via the new key must clear it too
+    /// or it resurrects next launch.
+    static func deleteMetadataOverride(identityKey: String, in db: Database) throws {
+        try db.execute(sql: "DELETE FROM metadata_overrides WHERE identity_key = ?", arguments: [identityKey])
+        guard let prefix = pathStablePrefix(ofStableKey: identityKey) else { return }
+        let keys = try String.fetchAll(db, sql: "SELECT identity_key FROM metadata_overrides")
+        for key in keys where pathStablePrefix(ofStableKey: key) == prefix {
+            try db.execute(sql: "DELETE FROM metadata_overrides WHERE identity_key = ?", arguments: [key])
+        }
+    }
+
+    /// When an incoming item's identity carries a metadata override AND a base row
+    /// already exists, keep that base row's file-tag text columns instead of the
+    /// item's. A reused in-memory track carries overlay-APPLIED text, and stamping
+    /// that into the base row would make "revert to file tags" restore the edit.
+    /// A brand-new (re-keyed) file has no existing row, so its file-scanned text
+    /// passes through unchanged.
+    static func preservingOverriddenBaseText(_ item: MediaItem, overrides: OverrideIndex, in db: Database) throws -> MediaItem {
+        guard overrides.resolve(forStableKey: item.identity.stableKey) != nil else { return item }
+        guard let row = try Row.fetchOne(
+            db,
+            sql: "SELECT title, artist, album, genre FROM media_items WHERE identity_key = ?",
+            arguments: [item.identity.stableKey]
+        ) else { return item }
+        var copy = item
+        copy.title = row["title"]
+        copy.artist = row["artist"]
+        copy.album = row["album"]
+        copy.genre = row["genre"]
+        return copy
     }
 
     static func upsertMetadataOverride(_ override: MetadataOverride, in db: Database) throws {

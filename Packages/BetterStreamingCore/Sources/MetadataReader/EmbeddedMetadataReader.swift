@@ -106,7 +106,105 @@ public enum EmbeddedMetadataReader {
     }
 }
 
+public extension EmbeddedMetadataReader {
+    /// Locate the FLAC PICTURE metadata block from the (small) block headers in a
+    /// probe, returning its absolute file byte range — even when the block data
+    /// extends past the probe. Lets the caller ranged-read just the cover image
+    /// for hi-res embedded art that doesn't fit a small header probe.
+    static func artworkByteRange(probe: [UInt8], fileExtension: String) -> Range<Int>? {
+        switch fileExtension.lowercased() {
+        case "flac": return flacPictureBlockRange(probe)
+        default: return nil
+        }
+    }
+
+    /// Public wrapper so callers can parse a separately-fetched FLAC PICTURE block.
+    static func parseFLACPicture(_ bytes: [UInt8]) -> EmbeddedArtwork? {
+        parseFLACPictureBlock(bytes)
+    }
+
+    /// Detect an MP4/M4A whose `moov` (tag) atom sits at the END of the file
+    /// (non-faststart, extremely common) and compute the file byte range that
+    /// must be fetched to read it. Given the small head probe and the total file
+    /// length, this walks the top-level atom sizes:
+    ///
+    /// - Returns `nil` when the head already contains a complete `moov` (parse the
+    ///   head as usual) or when the input is not an MP4 container.
+    /// - Otherwise returns the tail range `[offset, fileLength)` beginning at the
+    ///   first atom boundary the head probe could not cover — the region that
+    ///   holds the trailing `moov`. Fetch those bytes and feed them to
+    ///   ``parse(head:tail:fileExtension:)`` (or ``parseMP4Tail(_:)``).
+    ///
+    /// The caller (LibraryService) issues the ranged read; this stays pure/testable
+    /// so the metadata module never performs I/O.
+    static func mp4MetadataTailRange(head: [UInt8], fileLength: Int64) -> Range<Int64>? {
+        guard fileLength > 0, isMP4Head(head) else { return nil }
+        let headCount = Int64(head.count)
+        var offset: Int64 = 0
+
+        while offset + 8 <= headCount {
+            let o = Int(offset)
+            guard let size32 = readUInt32BE(head, o) else { break }
+            let type = fourCC(head, o + 4)
+            let atomSize: Int64
+            if size32 == 1 {
+                guard offset + 16 <= headCount,
+                      let size64 = readUInt64BE(head, o + 8),
+                      size64 >= 16 else { break }
+                atomSize = size64
+            } else if size32 == 0 {
+                atomSize = fileLength - offset   // last atom, extends to EOF
+            } else {
+                atomSize = Int64(size32)
+            }
+            guard atomSize >= 8, offset + atomSize <= fileLength else { break }
+            let atomEnd = offset + atomSize
+
+            if type == "moov" {
+                // A front moov larger than the probe has a KNOWN end — return the
+                // exact range, or callers' size cap rejects a bogus to-EOF span.
+                return atomEnd <= headCount ? nil : offset..<atomEnd
+            }
+
+            offset = atomEnd
+            if offset > headCount { break }   // walked past the probe; a trailing moov is beyond it
+        }
+
+        // No moov within the probe. If unscanned bytes remain, the tail holds it.
+        guard offset >= 0, offset < fileLength else { return nil }
+        return offset..<fileLength
+    }
+
+    /// Parse a separately-fetched MP4 tail (the bytes at the range from
+    /// ``mp4MetadataTailRange(head:fileLength:)``), which begins at the trailing
+    /// `moov` atom boundary.
+    static func parseMP4Tail(_ bytes: [UInt8]) -> EmbeddedMediaMetadata? {
+        parseMP4(bytes)
+    }
+
+    /// Parse head bytes, then merge in anything found in a separately-fetched tail
+    /// (for MP4/M4A files whose `moov` is at the end of the file). The head is
+    /// parsed with the normal codec dispatch; the tail is parsed as MP4 atoms and
+    /// only fills fields the head left empty.
+    static func parse(head: Data, tail: Data, fileExtension: String) -> EmbeddedMediaMetadata {
+        var metadata = parse(head, fileExtension: fileExtension)
+        guard !tail.isEmpty else { return metadata }
+        metadata.mergeMissing(from: parseMP4Tail([UInt8](tail)))
+        return metadata
+    }
+}
+
 private extension EmbeddedMetadataReader {
+    static func isMP4Head(_ bytes: [UInt8]) -> Bool {
+        guard bytes.count >= 8, let size = readUInt32BE(bytes, 0), size >= 8 else { return false }
+        switch fourCC(bytes, 4) {
+        case "ftyp", "moov", "mdat", "free", "skip", "wide", "pnot", "uuid":
+            return true
+        default:
+            return false
+        }
+    }
+
     static func parseID3(_ allBytes: [UInt8]) -> EmbeddedMediaMetadata? {
         // The tag isn't always at offset 0 — AIFF/AAC carry ID3 inside a chunk,
         // so locate the "ID3" marker (with a valid version byte) anywhere early.
@@ -136,6 +234,7 @@ private extension EmbeddedMetadataReader {
             let frameID: String
             let frameSize: Int
             let contentStart: Int
+            var formatFlags: UInt8 = 0
 
             if major == 2 {
                 guard offset + 6 <= end else { break }
@@ -150,6 +249,7 @@ private extension EmbeddedMetadataReader {
                 } else {
                     frameSize = readUInt32BE(body, offset + 4) ?? 0
                 }
+                formatFlags = body[offset + 9]   // per-frame format flags (v2.3/2.4)
                 contentStart = offset + 10
             }
 
@@ -159,9 +259,15 @@ private extension EmbeddedMetadataReader {
                 break
             }
 
-            let content = Array(body[contentStart..<(contentStart + frameSize)])
-            applyID3Frame(id: frameID, content: content, to: &result)
-            offset = contentStart + frameSize
+            let nextOffset = contentStart + frameSize
+            if let content = frameContent(
+                Array(body[contentStart..<nextOffset]),
+                major: major,
+                formatFlags: formatFlags
+            ) {
+                applyID3Frame(id: frameID, content: content, to: &result)
+            }
+            offset = nextOffset
         }
 
         return result.isEmpty ? nil : result
@@ -199,6 +305,27 @@ private extension EmbeddedMetadataReader {
             }
         }
         return out
+    }
+
+    /// Apply the per-frame format flags (ID3v2.3/2.4) to a raw frame body,
+    /// returning the decoded content — or `nil` when the frame must be dropped.
+    /// Compressed/encrypted frames are dropped (we can't decode them, and leaving
+    /// them would parse as mojibake). Otherwise strip the group byte and the
+    /// data-length-indicator that sit ahead of the real payload, and reverse
+    /// frame-level unsynchronisation (v2.4 only) so text/APIC bytes are intact.
+    static func frameContent(_ raw: [UInt8], major: UInt8, formatFlags: UInt8) -> [UInt8]? {
+        guard major >= 3 else { return raw }
+        var content = raw
+        if major == 4 {
+            if (formatFlags & 0x08) != 0 || (formatFlags & 0x04) != 0 { return nil }  // compressed / encrypted
+            if (formatFlags & 0x40) != 0, !content.isEmpty { content.removeFirst() }   // group identity byte
+            if (formatFlags & 0x01) != 0, content.count >= 4 { content.removeFirst(4) } // data-length indicator
+            if (formatFlags & 0x02) != 0 { content = deunsynchronise(content) }         // frame-level unsync
+        } else {
+            if (formatFlags & 0x80) != 0 || (formatFlags & 0x40) != 0 { return nil }    // compressed / encrypted
+            if (formatFlags & 0x20) != 0, !content.isEmpty { content.removeFirst() }    // group identity byte
+        }
+        return content
     }
 
     /// Bytes to skip for an extended header. v2.3: 4-byte plain size that does NOT
@@ -335,22 +462,6 @@ private extension EmbeddedMetadataReader {
         }
 
         return result.isEmpty ? nil : result
-    }
-
-    /// Locate the FLAC PICTURE metadata block from the (small) block headers in a
-    /// probe, returning its absolute file byte range — even when the block data
-    /// extends past the probe. Lets the caller ranged-read just the cover image
-    /// for hi-res embedded art that doesn't fit a small header probe.
-    public static func artworkByteRange(probe: [UInt8], fileExtension: String) -> Range<Int>? {
-        switch fileExtension.lowercased() {
-        case "flac": return flacPictureBlockRange(probe)
-        default: return nil
-        }
-    }
-
-    /// Public wrapper so callers can parse a separately-fetched FLAC PICTURE block.
-    public static func parseFLACPicture(_ bytes: [UInt8]) -> EmbeddedArtwork? {
-        parseFLACPictureBlock(bytes)
     }
 
     static func flacPictureBlockRange(_ bytes: [UInt8]) -> Range<Int>? {

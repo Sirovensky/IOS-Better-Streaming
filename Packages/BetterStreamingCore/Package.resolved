@@ -1,5 +1,5 @@
 {
-  "originHash" : "b5d49ab93e9c4ceb6b71d2154eeabdabaea20e0d8d78b47b7d4baa63eb6a1445",
+  "originHash" : "7273de0e4355aa359885244635034c0e510e68c4ec0614344263c1df4e5cf615",
   "pins" : [
     {
       "identity" : "bigint",
@@ -87,8 +87,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Wellz26/swift-nio-ssh.git",
       "state" : {
-        "revision" : "a05e6bbe6b141ee68da3030e00275504c0595d4d",
-        "version" : "0.3.6"
+        "revision" : "a05e6bbe6b141ee68da3030e00275504c0595d4d"
       }
     },
     {

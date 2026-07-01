@@ -151,7 +151,9 @@ public struct SourceValidator: Sendable {
         switch draft.protocolKind {
         case .smb:
             issues.append(contentsOf: validateSMBEndpoint(draft.endpoint))
-        case .webDAV, .ftp, .sftp, .nfs, .dlna:
+        case .webDAV, .ftp, .sftp:
+            issues.append(contentsOf: validateHostPortEndpoint(draft.endpoint))
+        case .nfs, .dlna:
             issues.append(.unsupportedProtocol(draft.protocolKind))
         }
 
@@ -179,6 +181,20 @@ public struct SourceValidator: Sendable {
             issues.append(.missingShare)
         } else if shareName.contains("/") || shareName.contains("\\") {
             issues.append(.shareContainsPathSeparator)
+        }
+        return issues
+    }
+
+    /// WebDAV/FTP/SFTP: require a host and a valid port. Unlike SMB there is no
+    /// mandatory share — WebDAV uses a URL path and FTP/SFTP a base path, both
+    /// optional — so only host + port are checked.
+    private func validateHostPortEndpoint(_ endpoint: SourceEndpoint) -> [SourceValidationIssue] {
+        var issues: [SourceValidationIssue] = []
+        if endpoint.hostDisplayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            issues.append(.missingHost)
+        }
+        if let port = endpoint.port, !(1...65_535).contains(port) {
+            issues.append(.invalidPort)
         }
         return issues
     }

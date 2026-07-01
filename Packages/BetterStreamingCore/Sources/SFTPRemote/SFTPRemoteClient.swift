@@ -21,6 +21,8 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
     private let password: String
     private var sshClient: SSHClient?
     private var sftpClient: SFTPClient?
+    private var connectTask: Task<SSHClient, Error>?
+    private var sftpOpenTask: Task<SFTPClient, Error>?
 
     public init(
         host: String,
@@ -143,6 +145,12 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
                     }
                 }
                 try handle.close()
+                // Short-read guard (FTP has the same): a server that returns an
+                // early empty read looks like EOF and would move a truncated file
+                // into place as if complete. Reject it.
+                if let totalBytes, totalBytes > 0, completed < totalBytes {
+                    throw RemoteFileSystemError.serverDisconnected
+                }
                 if FileManager.default.fileExists(atPath: localURL.path) {
                     try FileManager.default.removeItem(at: localURL)
                 }
@@ -164,6 +172,10 @@ extension SFTPRemoteClient {
     /// the protocol's default no-op left the session open on app background /
     /// source removal. Reconnects lazily on the next operation.
     public func disconnect() async {
+        connectTask?.cancel()
+        connectTask = nil
+        sftpOpenTask?.cancel()
+        sftpOpenTask = nil
         if let sshClient { try? await sshClient.close() }
         sshClient = nil
         sftpClient = nil
@@ -178,32 +190,81 @@ extension SFTPRemoteClient {
             self.sshClient = nil
             self.sftpClient = nil
         }
+        // Memoised like the SSH connect below: two concurrent first ops would
+        // otherwise both open an SFTP channel and orphan the loser's.
+        if let sftpOpenTask {
+            if let sftp = try? await sftpOpenTask.value, sftp.isActive {
+                return sftp
+            }
+        }
         let ssh = try await activeSSHClient()
-        let sftp = try await ssh.openSFTP()
-        self.sftpClient = sftp
-        return sftp
+        let task = Task<SFTPClient, Error> {
+            try await ssh.openSFTP()
+        }
+        sftpOpenTask = task
+        do {
+            let sftp = try await task.value
+            if sftpOpenTask == task {
+                sftpClient = sftp
+                sftpOpenTask = nil
+            } else {
+                // disconnect() raced us — don't resurrect a torn-down channel.
+                try? await sftp.close()
+            }
+            return sftp
+        } catch {
+            if sftpOpenTask == task { sftpOpenTask = nil }
+            throw error
+        }
     }
 
     private func activeSSHClient() async throws -> SSHClient {
         if let sshClient, sshClient.isConnected {
             return sshClient
         }
+        // Memoise the in-flight connect so concurrent operations (actor reentrancy
+        // across the connect await) share ONE SSH session. Without this, both
+        // callers saw nil, both connected, and the loser's session leaked open.
+        if let connectTask {
+            if let client = try? await connectTask.value, client.isConnected {
+                return client
+            }
+        }
+
         let username = self.username
         let password = self.password
+        let resolvedPort = port == 0 ? 22 : port
         let settings = SSHClientSettings(
             host: host,
-            port: port == 0 ? 22 : port,
+            port: resolvedPort,
             authenticationMethod: {
                 .passwordBased(username: username, password: password)
             },
             // Trust-on-first-use: record the host key on first connect and reject
             // a changed key thereafter, instead of blindly accepting any key
             // (which allowed a man-in-the-middle to capture credentials).
-            hostKeyValidator: .custom(TOFUHostKeyValidator(host: host, port: port == 0 ? 22 : port))
+            hostKeyValidator: .custom(TOFUHostKeyValidator(host: host, port: resolvedPort))
         )
-        let client = try await SSHClient.connect(to: settings)
-        self.sshClient = client
-        return client
+        let task = Task<SSHClient, Error> {
+            try await SSHClient.connect(to: settings)
+        }
+        connectTask = task
+        do {
+            let client = try await task.value
+            if connectTask == task {
+                sshClient = client
+                connectTask = nil
+            } else {
+                // disconnect() ran while we were connecting and Citadel ignored
+                // the cancellation — close the orphan instead of resurrecting it.
+                try? await client.close()
+                throw RemoteFileSystemError.serverDisconnected
+            }
+            return client
+        } catch {
+            if connectTask == task { connectTask = nil }   // clear so the next op retries
+            throw error
+        }
     }
 
     private func resolvedPath(_ path: RemotePath) -> String {
@@ -259,59 +320,108 @@ enum SFTPAttributeMapper {
 /// the previous accept-anything behaviour that exposed SFTP credentials to MITM.
 final class TOFUHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
     private let endpoint: String
-    private let storeURL: URL
+    private let storeURL: URL?
     private static let lock = NSLock()
+    // Serialise (and get OFF the NIO event loop) the known-hosts file IO. Doing
+    // synchronous disk IO under a lock directly on the event loop stalled the
+    // whole SSH channel.
+    private static let ioQueue = DispatchQueue(label: "BetterStreaming.SFTP.knownHosts")
 
     init(host: String, port: Int) {
         self.endpoint = "\(host):\(port)"
-        let support = (try? FileManager.default.url(
+        self.storeURL = Self.defaultStoreURL()
+    }
+
+    /// Test seam. Pass a scratch store path, or `nil` to simulate Application
+    /// Support being unavailable.
+    init(endpoint: String, storeURL: URL?) {
+        self.endpoint = endpoint
+        self.storeURL = storeURL
+    }
+
+    static func defaultStoreURL() -> URL? {
+        // Fail closed: no temporary-directory fallback. The OS purges tmp, which
+        // would make every reconnect a "first use" and silently reopen the MITM
+        // window the TOFU check exists to close.
+        guard let support = try? FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
-        )) ?? FileManager.default.temporaryDirectory
-        self.storeURL = support.appendingPathComponent("ssh_known_hosts.json")
+        ) else {
+            return nil
+        }
+        return support.appendingPathComponent("ssh_known_hosts.json")
     }
 
     func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
-        var buffer = ByteBufferAllocator().buffer(capacity: 256)
-        _ = hostKey.write(to: &buffer)
-        let bytes = buffer.getBytes(at: 0, length: buffer.readableBytes) ?? []
-        let fingerprint = Data(bytes).base64EncodedString()
-
-        Self.lock.lock()
-        defer { Self.lock.unlock() }
-        var known = loadKnownHosts()
-        if let existing = known[endpoint] {
-            if existing == fingerprint {
+        let fingerprint = Self.fingerprint(of: hostKey)
+        let endpoint = self.endpoint
+        let storeURL = self.storeURL
+        Self.ioQueue.async {
+            switch Self.decide(endpoint: endpoint, fingerprint: fingerprint, storeURL: storeURL) {
+            case .success:
                 validationCompletePromise.succeed(())
-            } else {
-                validationCompletePromise.fail(SFTPHostKeyError.changed(endpoint))
+            case .failure(let error):
+                validationCompletePromise.fail(error)
             }
-        } else {
-            known[endpoint] = fingerprint   // trust on first use
-            saveKnownHosts(known)
-            validationCompletePromise.succeed(())
         }
     }
 
-    private func loadKnownHosts() -> [String: String] {
-        guard let data = try? Data(contentsOf: storeURL),
+    static func fingerprint(of hostKey: NIOSSHPublicKey) -> String {
+        var buffer = ByteBufferAllocator().buffer(capacity: 256)
+        _ = hostKey.write(to: &buffer)
+        let bytes = buffer.getBytes(at: 0, length: buffer.readableBytes) ?? []
+        return Data(bytes).base64EncodedString()
+    }
+
+    /// Pure TOFU decision — first-use records the key and accepts; a changed key
+    /// is rejected; a missing/unwritable store fails closed. Unit-testable with a
+    /// scratch known-hosts path.
+    static func decide(endpoint: String, fingerprint: String, storeURL: URL?) -> Result<Void, Error> {
+        guard let storeURL else {
+            return .failure(SFTPHostKeyError.storeUnavailable)
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        var known = loadKnownHosts(storeURL)
+        if let existing = known[endpoint] {
+            return existing == fingerprint ? .success(()) : .failure(SFTPHostKeyError.changed(endpoint))
+        }
+        known[endpoint] = fingerprint   // trust on first use
+        guard saveKnownHosts(known, to: storeURL) else {
+            // Can't persist the trusted key → can't enforce TOFU next time, so
+            // fail closed rather than trust a key we won't remember.
+            return .failure(SFTPHostKeyError.storeUnavailable)
+        }
+        return .success(())
+    }
+
+    static func loadKnownHosts(_ url: URL) -> [String: String] {
+        guard let data = try? Data(contentsOf: url),
               let dict = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
         return dict
     }
 
-    private func saveKnownHosts(_ dict: [String: String]) {
-        if let data = try? JSONEncoder().encode(dict) {
-            try? data.write(to: storeURL, options: .atomic)
+    @discardableResult
+    static func saveKnownHosts(_ dict: [String: String], to url: URL) -> Bool {
+        guard let data = try? JSONEncoder().encode(dict) else { return false }
+        do {
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
         }
     }
 }
 
 enum SFTPHostKeyError: LocalizedError {
     case changed(String)
+    case storeUnavailable
 
     var errorDescription: String? {
         switch self {
         case .changed(let endpoint):
             return "The SSH host key for \(endpoint) has changed. This may indicate a man-in-the-middle attack, or the server was reinstalled. The saved key must be cleared to reconnect."
+        case .storeUnavailable:
+            return "The known-hosts store is unavailable, so the SSH host key can't be verified. The connection was refused to avoid a man-in-the-middle risk."
         }
     }
 }

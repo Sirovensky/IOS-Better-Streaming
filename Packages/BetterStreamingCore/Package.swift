@@ -22,8 +22,7 @@ let package = Package(
                 "SFTPRemote",
                 "BetterStreamingSources",
                 "MediaStore",
-                "LibraryIndexer",
-                "Diagnostics"
+                "LibraryIndexer"
             ]
         ),
         .library(name: "BetterStreamingDomain", targets: ["BetterStreamingDomain"]),
@@ -37,7 +36,6 @@ let package = Package(
         .library(name: "BetterStreamingSources", targets: ["BetterStreamingSources"]),
         .library(name: "MediaStore", targets: ["MediaStore"]),
         .library(name: "LibraryIndexer", targets: ["LibraryIndexer"]),
-        .library(name: "Diagnostics", targets: ["Diagnostics"]),
         .library(name: "TestSupport", targets: ["TestSupport"]),
         .executable(name: "LiveSMBProbe", targets: ["LiveSMBProbe"])
     ],
@@ -50,7 +48,9 @@ let package = Package(
         .package(url: "https://github.com/orlandos-nl/Citadel.git", from: "0.12.1"),
         // Mirrors Citadel's own swift-nio-ssh requirement so SFTPRemote can
         // import NIOSSH (host-key validation) without changing resolution.
-        .package(url: "https://github.com/Wellz26/swift-nio-ssh.git", "0.3.4" ..< "0.4.0")
+        // Fork of apple/swift-nio-ssh — pinned to the exact audited revision so a
+        // force-push on the fork can't silently swap the code we ship.
+        .package(url: "https://github.com/Wellz26/swift-nio-ssh.git", revision: "a05e6bbe6b141ee68da3030e00275504c0595d4d")
     ],
     targets: [
         .target(name: "BetterStreamingDomain"),
@@ -125,10 +125,6 @@ let package = Package(
             ]
         ),
         .target(
-            name: "Diagnostics",
-            dependencies: ["BetterStreamingDomain", "AppFoundation"]
-        ),
-        .target(
             name: "TestSupport",
             dependencies: [
                 "BetterStreamingDomain",
@@ -182,8 +178,8 @@ let package = Package(
             dependencies: ["LibraryIndexer", "TestSupport"]
         ),
         .testTarget(
-            name: "DiagnosticsTests",
-            dependencies: ["Diagnostics"]
+            name: "BetterStreamingSourcesTests",
+            dependencies: ["BetterStreamingSources"]
         )
     ]
 )

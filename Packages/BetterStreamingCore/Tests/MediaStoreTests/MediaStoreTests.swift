@@ -390,6 +390,80 @@ import MediaStore
     #expect(overlaid?.artist == "Real Artist") // non-blank override applied
 }
 
+/// Regression (P0): a rescan whose incoming rows carry overlay-APPLIED text (the
+/// in-memory reuse path re-persists edited values) must NOT poison the file-tag
+/// base row — otherwise "revert to file tags" restores the edit, not the tags.
+@Test func replaceDoesNotStampOverlayAppliedTextIntoBaseRow() async throws {
+    let store = MediaStore(configuration: .inMemory())
+    let sourceID = SourceID()
+    let shareID = ShareID()
+    let id = identity(sourceID: sourceID, shareID: shareID, path: "Music/Track.mp3", size: 10)
+
+    let scanned = MediaItem(
+        identity: id, mediaKind: .audio, fileName: "Track.mp3",
+        title: "File Title", artist: "File Artist", album: "File Album", genre: "Rock"
+    )
+    try await store.replaceMediaItems([scanned], for: sourceID)
+    try await store.upsertMetadataOverride(
+        MetadataOverride(identityKey: id.stableKey, title: "Edited Title", artist: "Edited Artist", updatedAt: testDate(0))
+    )
+
+    // A rescan re-persists the OVERLAY-APPLIED in-memory copy (the poisoning input).
+    let applied = MediaItem(
+        identity: id, mediaKind: .audio, fileName: "Track.mp3",
+        title: "Edited Title", artist: "Edited Artist", album: "File Album", genre: "Rock"
+    )
+    try await store.replaceMediaItems([applied], for: sourceID)
+
+    #expect(try await store.mediaItem(identityKey: id.stableKey)?.title == "Edited Title")
+
+    // Reverting must yield the ORIGINAL file tags, not the edit.
+    try await store.deleteMetadataOverride(identityKey: id.stableKey)
+    let reverted = try await store.mediaItem(identityKey: id.stableKey)
+    #expect(reverted?.title == "File Title")
+    #expect(reverted?.artist == "File Artist")
+}
+
+/// Regression: after identity drift the override lives under an OLD key that still
+/// path-prefix-resolves for the NEW key. Deleting the override via the new key must
+/// clear it too, or the edit resurrects next launch.
+@Test func deleteOverrideByNewKeyClearsDriftedOldKeyRow() async throws {
+    let store = MediaStore(configuration: .inMemory())
+    let sourceID = SourceID()
+    let shareID = ShareID()
+    let old = identity(sourceID: sourceID, shareID: shareID, path: "Music/Track.mp3", size: 10)
+    let new = identity(sourceID: sourceID, shareID: shareID, path: "Music/Track.mp3", size: 20, modifiedAt: testDate(99))
+
+    let scanned = MediaItem(identity: new, mediaKind: .audio, fileName: "Track.mp3", title: "File Title")
+    try await store.replaceMediaItems([scanned], for: sourceID)
+    // Override stored under the OLD key resolves for the new key via the fallback.
+    try await store.upsertMetadataOverride(
+        MetadataOverride(identityKey: old.stableKey, title: "Edited", updatedAt: testDate(0))
+    )
+    #expect(try await store.mediaItem(identityKey: new.stableKey)?.title == "Edited")
+
+    try await store.deleteMetadataOverride(identityKey: new.stableKey)
+    #expect(try await store.mediaItem(identityKey: new.stableKey)?.title == "File Title")
+    #expect(try await store.listMetadataOverrides().isEmpty)
+}
+
+/// The id-remap pass rewrites override keys old → new.
+@Test func remapMetadataOverridesRewritesKeys() async throws {
+    let store = MediaStore(configuration: .inMemory())
+    let sourceID = SourceID()
+    let shareID = ShareID()
+    let old = identity(sourceID: sourceID, shareID: shareID, path: "Music/Track.mp3", size: 10)
+    let new = identity(sourceID: sourceID, shareID: shareID, path: "Music/Track.mp3", size: 20, modifiedAt: testDate(99))
+
+    try await store.upsertMetadataOverride(
+        MetadataOverride(identityKey: old.stableKey, title: "Edited", updatedAt: testDate(0))
+    )
+    try await store.remapMetadataOverrides([old.stableKey: new.stableKey])
+
+    #expect(try await store.metadataOverride(identityKey: new.stableKey)?.title == "Edited")
+    #expect(try await store.metadataOverride(identityKey: old.stableKey) == nil)
+}
+
 private func identity(
     sourceID: SourceID,
     shareID: ShareID,

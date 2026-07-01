@@ -499,25 +499,3 @@ public struct MediaSummary: Identifiable, Hashable, Sendable {
         self.cacheState = cacheState
     }
 }
-
-public struct FolderSummary: Identifiable, Hashable, Sendable {
-    public let id: FolderID
-    public var title: String
-    public var path: RemotePath
-    public var scanState: ScanState
-    public var playableCount: Int
-
-    public init(
-        id: FolderID = FolderID(),
-        title: String,
-        path: RemotePath,
-        scanState: ScanState = .unscanned,
-        playableCount: Int = 0
-    ) {
-        self.id = id
-        self.title = title
-        self.path = path
-        self.scanState = scanState
-        self.playableCount = playableCount
-    }
-}

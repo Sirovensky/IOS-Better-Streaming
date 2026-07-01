@@ -295,6 +295,16 @@ public struct RemoteLibraryScanner: Sendable {
         var pendingDirectories = checkpoint?.pendingDirectories ?? [request.rootPath]
         var visitedDirectories = checkpoint?.visitedDirectories ?? []
         var visitedNormalizedPaths = Set(visitedDirectories.map(\.normalizedPath))
+
+        // A checkpoint taken mid-directory records that directory as `currentPath`
+        // but drops it from `pendingDirectories` (it had been popped) without
+        // marking it visited — so resuming would lose its entire subtree. Re-seed
+        // it when it is neither visited nor already pending.
+        if let currentPath = checkpoint?.currentPath,
+           !visitedNormalizedPaths.contains(currentPath.normalizedPath),
+           !pendingDirectories.contains(where: { $0.normalizedPath == currentPath.normalizedPath }) {
+            pendingDirectories.append(currentPath)
+        }
         var foldersVisited = checkpoint?.foldersVisited ?? 0
         var filesVisited = checkpoint?.filesVisited ?? 0
         var mediaItemsFound = checkpoint?.mediaItemsFound ?? 0
