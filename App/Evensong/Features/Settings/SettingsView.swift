@@ -49,7 +49,7 @@ struct SettingsView: View {
                     settingsLabel("Automatic downloads", "Quietly cache your most-played songs",
                                   icon: "bolt.badge.automatic")
                 }
-                .tint(DesignTokens.brandPrimary)
+                .tint(DesignTokens.controlAccent)
                 .padding(12)
 
                 rowDivider
@@ -64,7 +64,7 @@ struct SettingsView: View {
                         }
                     }
                     .labelsHidden()
-                    .tint(DesignTokens.brandPrimary)
+                    .tint(DesignTokens.controlAccent)
                 }
                 .padding(12)
 
@@ -73,7 +73,7 @@ struct SettingsView: View {
                 Toggle(isOn: $autoCache.wifiOnly) {
                     settingsLabel("Wi-Fi only", "Don’t auto-cache on cellular", icon: "wifi")
                 }
-                .tint(DesignTokens.brandPrimary)
+                .tint(DesignTokens.controlAccent)
                 .padding(12)
 
                 rowDivider
@@ -81,7 +81,7 @@ struct SettingsView: View {
                 Toggle(isOn: $autoCache.protectFavorites) {
                     settingsLabel("Always keep favourites", "Favourites are never auto-evicted", icon: "star")
                 }
-                .tint(DesignTokens.brandPrimary)
+                .tint(DesignTokens.controlAccent)
                 .padding(12)
             }
             .surfaceCard(fill: DesignTokens.surfaceCard)
@@ -115,7 +115,7 @@ struct SettingsView: View {
                 Toggle(isOn: $enhancements.gaplessEnabled) {
                     settingsLabel("Gapless playback", "No silence between downloaded tracks", icon: "arrow.right.to.line")
                 }
-                .tint(DesignTokens.brandPrimary)
+                .tint(DesignTokens.controlAccent)
                 .padding(12)
 
                 rowDivider
@@ -123,7 +123,7 @@ struct SettingsView: View {
                 Toggle(isOn: $enhancements.replayGainEnabled) {
                     settingsLabel("ReplayGain", "Even out loudness between tracks", icon: "speaker.wave.2")
                 }
-                .tint(DesignTokens.brandPrimary)
+                .tint(DesignTokens.controlAccent)
                 .padding(12)
 
                 if enhancements.replayGainEnabled {
@@ -131,7 +131,7 @@ struct SettingsView: View {
                     Toggle(isOn: $enhancements.replayGainAlbumMode) {
                         settingsLabel("Album gain", "Keep each album's track-to-track loudness", icon: "square.stack")
                     }
-                    .tint(DesignTokens.brandPrimary)
+                    .tint(DesignTokens.controlAccent)
                     .padding(12)
                 }
 
@@ -145,7 +145,7 @@ struct SettingsView: View {
                             .font(.caption.monospacedDigit()).foregroundStyle(DesignTokens.textSecondary)
                     }
                     Slider(value: $enhancements.crossfadeSeconds, in: 0...12, step: 1)
-                        .tint(DesignTokens.brandPrimary)
+                        .tint(DesignTokens.controlAccent)
                 }
                 .padding(12)
 
@@ -155,7 +155,7 @@ struct SettingsView: View {
                 Toggle(isOn: $enhancements.eqEnabled) {
                     settingsLabel("Equalizer", "5-band graphic EQ", icon: "slider.vertical.3")
                 }
-                .tint(DesignTokens.brandPrimary)
+                .tint(DesignTokens.controlAccent)
                 .padding(12)
 
                 if enhancements.eqEnabled {
@@ -168,7 +168,7 @@ struct SettingsView: View {
                                 .font(.caption.monospacedDigit()).foregroundStyle(DesignTokens.textSecondary)
                         }
                         Slider(value: $enhancements.preampDB, in: -12...12, step: 1)
-                            .tint(DesignTokens.brandPrimary)
+                            .tint(DesignTokens.controlAccent)
 
                         ForEach(Array(AudioEnhancements.eqFrequencies.enumerated()), id: \.offset) { index, freq in
                             HStack(spacing: 12) {
@@ -177,7 +177,7 @@ struct SettingsView: View {
                                     .foregroundStyle(DesignTokens.textSecondary)
                                     .frame(width: 44, alignment: .leading)
                                 Slider(value: $enhancements.eqBandsDB[index], in: -12...12, step: 1)
-                                    .tint(DesignTokens.brandPrimary)
+                                    .tint(DesignTokens.controlAccent)
                             }
                         }
                     }
@@ -222,7 +222,7 @@ struct SettingsView: View {
                                   "Fetch missing covers from MusicBrainz / Cover Art Archive",
                                   icon: "photo.on.rectangle.angled")
                 }
-                .tint(DesignTokens.brandPrimary)
+                .tint(DesignTokens.controlAccent)
                 .padding(12)
 
                 rowDivider
@@ -253,7 +253,7 @@ struct SettingsView: View {
                     Toggle(isOn: artistSourceBinding(source)) {
                         settingsLabel(source.title, source.detail, icon: "person.crop.circle")
                     }
-                    .tint(DesignTokens.brandPrimary)
+                    .tint(DesignTokens.controlAccent)
                     .padding(12)
                 }
             }
@@ -312,7 +312,7 @@ struct SettingsView: View {
                                   "Pull conductor, orchestra, soloists, and composer from MusicBrainz when you open a classical album",
                                   icon: "music.quarternote.3")
                 }
-                .tint(DesignTokens.brandPrimary)
+                .tint(DesignTokens.controlAccent)
                 .padding(12)
             }
             .surfaceCard(fill: DesignTokens.surfaceCard)

@@ -24,6 +24,9 @@ enum DesignTokens {
     static let brandPrimary = adaptiveColor(dark: 0xFDEED0, light: 0xA66D1F)
     static let brandPrimaryStrong = adaptiveColor(dark: 0xFFF7E0, light: 0xC2410C)
     static let onBrandPrimary = adaptiveColor(dark: 0x2B1400, light: 0xFFFFFF)
+    /// Toggles/sliders: deep warm gold. The cream brandPrimary as a control tint
+    /// made an ON switch a solid cream pill — the white thumb vanished into it.
+    static let controlAccent = adaptiveColor(dark: 0xC9963F, light: 0xA66D1F)
 
     static let connectionTeal = adaptiveColor(dark: 0x4DB8C9, light: 0x0E7A8A)
     static let favoriteWine = adaptiveColor(dark: 0xC5566D, light: 0x8E2D40)

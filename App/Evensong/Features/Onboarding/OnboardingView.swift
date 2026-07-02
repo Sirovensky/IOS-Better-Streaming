@@ -205,7 +205,7 @@ struct OnboardingView: View {
                     Text("Auto-cache my most-played music").font(.subheadline.weight(.semibold))
                         .foregroundStyle(DesignTokens.textPrimary)
                 }
-                .tint(DesignTokens.brandPrimary)
+                .tint(DesignTokens.controlAccent)
                 .padding(12)
                 Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
                 HStack {
@@ -216,14 +216,14 @@ struct OnboardingView: View {
                             Text(AutoCacheController.byteLabel($0)).tag($0)
                         }
                     }
-                    .labelsHidden().tint(DesignTokens.brandPrimary)
+                    .labelsHidden().tint(DesignTokens.controlAccent)
                 }
                 .padding(12)
                 Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
                 Toggle(isOn: $autoCache.wifiOnly) {
                     Text("Wi-Fi only").font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
                 }
-                .tint(DesignTokens.brandPrimary)
+                .tint(DesignTokens.controlAccent)
                 .padding(12)
             }
             .surfaceCard(fill: DesignTokens.surfaceCard)
