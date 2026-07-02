@@ -1,0 +1,722 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		13B34607291546645E61AD48 /* MediaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0E1A0FF67E33E8B4C6000FC /* MediaModels.swift */; };
+		1455DED9C9DEE2B3BAF9AAD5 /* AudioEnhancements.swift in Sources */ = {isa = PBXBuildFile; fileRef = B14162548296265A2B96DF59 /* AudioEnhancements.swift */; };
+		1BD212A2E05D0FA4E815BB05 /* RemoteStreamingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9992C8D60ACC28CD2BFCC8A /* RemoteStreamingService.swift */; };
+		1BF05E78F4F665C37EC74F09 /* CarPlaySceneController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B82BF94096EA8EE40C1F09CF /* CarPlaySceneController.swift */; };
+		1E08BD2CCF1C7121C8903933 /* MediaCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBCF70CD9DC3CE5F321E2D3A /* MediaCells.swift */; };
+		1E7E7A1DED2787CB9C0E6B17 /* EvensongApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BF369D95C21CC50651C29C6 /* EvensongApp.swift */; };
+		22988395DCDDC01D623D1DD6 /* OfflineLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8C8A0EAFD54D0F603E57BAB /* OfflineLibraryView.swift */; };
+		25D6E2AD16EF42B7BF091C43 /* EvensongCore in Frameworks */ = {isa = PBXBuildFile; productRef = FF3F80731FC30B70311FEAEA /* EvensongCore */; };
+		2A224C1585F9C6098E89B52B /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E6E085E3CF90DAE7AF890BA /* OnboardingView.swift */; };
+		3139BC7E804558D3504BC6EE /* DetailViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 537691EB90D24D19C88C7EBE /* DetailViews.swift */; };
+		42AF9A3C9AFC3ADB527626E2 /* ClassicalMetadataClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6107CE49063F2671137BB665 /* ClassicalMetadataClient.swift */; };
+		4365ACD391FE0946BB22F326 /* OnlineArtworkClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B96A8A59BF27AE7AD1E21D41 /* OnlineArtworkClient.swift */; };
+		563DEBCB5D31238CCEE3947C /* LiquidGlass.metal in Sources */ = {isa = PBXBuildFile; fileRef = BA5713CA8920FB706095615F /* LiquidGlass.metal */; };
+		6B651153FAFB3E55CA26D3A6 /* Lyrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E44AA0186F57264D3B6672A9 /* Lyrics.swift */; };
+		70708C1A0A65DC1801E9895B /* RemoteFolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE589E058CB8D600AEBC6E97 /* RemoteFolderPicker.swift */; };
+		70912F38FABA3487CFDAB08A /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 259FF58ADD3F92DBB93AD648 /* AppModel.swift */; };
+		713DF588EA935921D95DCECD /* RadioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E24F6EDB77D68E641EAFBD5 /* RadioView.swift */; };
+		7DCAF11C8FBD9992B4A7CF3F /* SourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C89A13C86108107AD2C9C29 /* SourcesView.swift */; };
+		80834785401093BEE1D721E7 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CCE051467D8AD9E518EE69E /* KeychainStore.swift */; };
+		8C4A9C620C3D653A2FD99158 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = CD9CEB13A611AAE62FD16D0C /* PrivacyInfo.xcprivacy */; };
+		8DE5BBEA6D6E575885A52755 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9B43C5075D62B665FE4E6CFB /* Assets.xcassets */; };
+		9B52C7F2C5126CE9BE87CC27 /* AutoCacheController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F437A5313D8431271F55484B /* AutoCacheController.swift */; };
+		A3C12DBD88961793ED456971 /* DataLayerFixesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88E5CAB368AAD2E236332EF4 /* DataLayerFixesTests.swift */; };
+		A75EDECCFDFCBDC11C6EB82D /* MiniPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48B23E66C9F488C25D42813C /* MiniPlayerView.swift */; };
+		AD97289E025343DB9C0C5666 /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BD6569DFA116B5F3DBC780F /* SearchView.swift */; };
+		B2D0A7EA71FBAD415E1677AC /* AudioEQTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64E9CAB48235CA9FC0C098C9 /* AudioEQTap.swift */; };
+		B473B81C919DCBD6055F7BC6 /* AutoCacheControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5CF8DAF8D162EC93A02364F /* AutoCacheControllerTests.swift */; };
+		B4D0079EB78337E8B2125E9E /* RootTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75637BBC2A4740EB25889076 /* RootTabView.swift */; };
+		BF07CF56BEE83FF437D8EA7E /* SourceSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90E25BEAC1414E6B4E0DCD19 /* SourceSetupView.swift */; };
+		C264FEFEC285F67DD56FF88F /* DesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DC47CD771A42FC3A2665255 /* DesignTokens.swift */; };
+		C2A0E642BC5D273A9F51B91D /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 004CB6D21FB34412137CD677 /* LibraryView.swift */; };
+		C7C8474617345F4FBC75743B /* PlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BDBA328B952ACA58D14AAAB /* PlaybackEngine.swift */; };
+		D1107D24D21B6D54C7574D3D /* ClassicalMetadataTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E45C71B264EBE982032A555F /* ClassicalMetadataTests.swift */; };
+		D22389AA972FB41A3AB519E7 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1300E994D42D822F0E73837F /* HomeView.swift */; };
+		D6CED0B4D905D6C629C53637 /* LibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19A7210D2A0B01220238A3AC /* LibraryService.swift */; };
+		E49463B872EFAB413F49DF57 /* Artwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE03D7B2218FF6758F5D324B /* Artwork.swift */; };
+		EFA3E2847D5A71047D5DCB55 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21D607CC7267533168E6B8D8 /* SettingsView.swift */; };
+		F846AFEB043EF05DEDB33D03 /* ArtistSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45080F3B4FF747809BFB4987 /* ArtistSearchTests.swift */; };
+		FB4D8771675CC1CDC60FC8B8 /* AppLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = D03EC102B6B8A15FA71364FD /* AppLog.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		DDF31F860FF67B5774208A59 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1F6CEF7728CDC99A1622478F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = EA76FF5A2FAA322DA1FD9828;
+			remoteInfo = Evensong;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		004CB6D21FB34412137CD677 /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
+		0085123ACDC23C6A3E528989 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		0E24F6EDB77D68E641EAFBD5 /* RadioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RadioView.swift; sourceTree = "<group>"; };
+		0FC8E66BF888780587B024CC /* EvensongTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = EvensongTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1300E994D42D822F0E73837F /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		19A7210D2A0B01220238A3AC /* LibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryService.swift; sourceTree = "<group>"; };
+		1BD6569DFA116B5F3DBC780F /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
+		21D607CC7267533168E6B8D8 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		259FF58ADD3F92DBB93AD648 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		2BDBA328B952ACA58D14AAAB /* PlaybackEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackEngine.swift; sourceTree = "<group>"; };
+		2CCE051467D8AD9E518EE69E /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		3C89A13C86108107AD2C9C29 /* SourcesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourcesView.swift; sourceTree = "<group>"; };
+		3E6E085E3CF90DAE7AF890BA /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		45080F3B4FF747809BFB4987 /* ArtistSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtistSearchTests.swift; sourceTree = "<group>"; };
+		48B23E66C9F488C25D42813C /* MiniPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerView.swift; sourceTree = "<group>"; };
+		4DC47CD771A42FC3A2665255 /* DesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
+		537691EB90D24D19C88C7EBE /* DetailViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailViews.swift; sourceTree = "<group>"; };
+		5C5923F3202E4C248F278DA8 /* Evensong.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Evensong.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6107CE49063F2671137BB665 /* ClassicalMetadataClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassicalMetadataClient.swift; sourceTree = "<group>"; };
+		64E9CAB48235CA9FC0C098C9 /* AudioEQTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEQTap.swift; sourceTree = "<group>"; };
+		75637BBC2A4740EB25889076 /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
+		88E5CAB368AAD2E236332EF4 /* DataLayerFixesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataLayerFixesTests.swift; sourceTree = "<group>"; };
+		8BF369D95C21CC50651C29C6 /* EvensongApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvensongApp.swift; sourceTree = "<group>"; };
+		90E25BEAC1414E6B4E0DCD19 /* SourceSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceSetupView.swift; sourceTree = "<group>"; };
+		9B43C5075D62B665FE4E6CFB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A5CF8DAF8D162EC93A02364F /* AutoCacheControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoCacheControllerTests.swift; sourceTree = "<group>"; };
+		B14162548296265A2B96DF59 /* AudioEnhancements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEnhancements.swift; sourceTree = "<group>"; };
+		B82BF94096EA8EE40C1F09CF /* CarPlaySceneController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarPlaySceneController.swift; sourceTree = "<group>"; };
+		B96A8A59BF27AE7AD1E21D41 /* OnlineArtworkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineArtworkClient.swift; sourceTree = "<group>"; };
+		B9992C8D60ACC28CD2BFCC8A /* RemoteStreamingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStreamingService.swift; sourceTree = "<group>"; };
+		BA5713CA8920FB706095615F /* LiquidGlass.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = LiquidGlass.metal; sourceTree = "<group>"; };
+		CD9CEB13A611AAE62FD16D0C /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		CE589E058CB8D600AEBC6E97 /* RemoteFolderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFolderPicker.swift; sourceTree = "<group>"; };
+		D03EC102B6B8A15FA71364FD /* AppLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLog.swift; sourceTree = "<group>"; };
+		DDD2948541D167B79F2A7CF6 /* EvensongCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = EvensongCore; path = Packages/EvensongCore; sourceTree = SOURCE_ROOT; };
+		DE03D7B2218FF6758F5D324B /* Artwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Artwork.swift; sourceTree = "<group>"; };
+		E0E1A0FF67E33E8B4C6000FC /* MediaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaModels.swift; sourceTree = "<group>"; };
+		E44AA0186F57264D3B6672A9 /* Lyrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Lyrics.swift; sourceTree = "<group>"; };
+		E45C71B264EBE982032A555F /* ClassicalMetadataTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassicalMetadataTests.swift; sourceTree = "<group>"; };
+		E8C8A0EAFD54D0F603E57BAB /* OfflineLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLibraryView.swift; sourceTree = "<group>"; };
+		F437A5313D8431271F55484B /* AutoCacheController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoCacheController.swift; sourceTree = "<group>"; };
+		FBCF70CD9DC3CE5F321E2D3A /* MediaCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCells.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FB66B989420036B3B8A2E1B0 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				25D6E2AD16EF42B7BF091C43 /* EvensongCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0F12B296E44D7490B6D50ECD /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				9B43C5075D62B665FE4E6CFB /* Assets.xcassets */,
+				CD9CEB13A611AAE62FD16D0C /* PrivacyInfo.xcprivacy */,
+			);
+			name = Resources;
+			path = App/Evensong/Resources;
+			sourceTree = "<group>";
+		};
+		105430FDAF48E5800693E368 /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				E0E1A0FF67E33E8B4C6000FC /* MediaModels.swift */,
+			);
+			path = Model;
+			sourceTree = "<group>";
+		};
+		31F4BDCF3B01B40371D44D18 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				5C5923F3202E4C248F278DA8 /* Evensong.app */,
+				0FC8E66BF888780587B024CC /* EvensongTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		49CB0641359188C615AD89FC /* Search */ = {
+			isa = PBXGroup;
+			children = (
+				1BD6569DFA116B5F3DBC780F /* SearchView.swift */,
+			);
+			path = Search;
+			sourceTree = "<group>";
+		};
+		5A80570B2E6225FC9F930AF3 /* Player */ = {
+			isa = PBXGroup;
+			children = (
+				BA5713CA8920FB706095615F /* LiquidGlass.metal */,
+				48B23E66C9F488C25D42813C /* MiniPlayerView.swift */,
+			);
+			path = Player;
+			sourceTree = "<group>";
+		};
+		67E4F1728D05134D73B4AD1B /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				BA833187CCDFCF6F5A87ABDC /* Home */,
+				77CECDA7B4C5DED30ED1FF78 /* Library */,
+				78E78F3BE58E0E773674DB13 /* Onboarding */,
+				5A80570B2E6225FC9F930AF3 /* Player */,
+				96FF88DB9CB1168AF144B6DA /* Radio */,
+				49CB0641359188C615AD89FC /* Search */,
+				FA47E5D42ACCE5719A74EFFD /* Settings */,
+				6A1C00A140337680ACAC26F9 /* Sources */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		6A1C00A140337680ACAC26F9 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				CE589E058CB8D600AEBC6E97 /* RemoteFolderPicker.swift */,
+				90E25BEAC1414E6B4E0DCD19 /* SourceSetupView.swift */,
+				3C89A13C86108107AD2C9C29 /* SourcesView.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		740C44A810A5FCFA1E1A4440 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				FBCF70CD9DC3CE5F321E2D3A /* MediaCells.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		77CECDA7B4C5DED30ED1FF78 /* Library */ = {
+			isa = PBXGroup;
+			children = (
+				537691EB90D24D19C88C7EBE /* DetailViews.swift */,
+				004CB6D21FB34412137CD677 /* LibraryView.swift */,
+				E8C8A0EAFD54D0F603E57BAB /* OfflineLibraryView.swift */,
+			);
+			path = Library;
+			sourceTree = "<group>";
+		};
+		78E78F3BE58E0E773674DB13 /* Onboarding */ = {
+			isa = PBXGroup;
+			children = (
+				3E6E085E3CF90DAE7AF890BA /* OnboardingView.swift */,
+			);
+			path = Onboarding;
+			sourceTree = "<group>";
+		};
+		9097B1E4635E4A391CE77174 = {
+			isa = PBXGroup;
+			children = (
+				DB352D63AC823C49CCB3B607 /* Evensong */,
+				DAA11399B642855FE89347A3 /* EvensongTests */,
+				F973BA058A9C7F0D24760469 /* Packages */,
+				0F12B296E44D7490B6D50ECD /* Resources */,
+				31F4BDCF3B01B40371D44D18 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		96FF88DB9CB1168AF144B6DA /* Radio */ = {
+			isa = PBXGroup;
+			children = (
+				0E24F6EDB77D68E641EAFBD5 /* RadioView.swift */,
+			);
+			path = Radio;
+			sourceTree = "<group>";
+		};
+		BA833187CCDFCF6F5A87ABDC /* Home */ = {
+			isa = PBXGroup;
+			children = (
+				1300E994D42D822F0E73837F /* HomeView.swift */,
+			);
+			path = Home;
+			sourceTree = "<group>";
+		};
+		D1194F0B8A04583A528F377B /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				DE03D7B2218FF6758F5D324B /* Artwork.swift */,
+				B14162548296265A2B96DF59 /* AudioEnhancements.swift */,
+				64E9CAB48235CA9FC0C098C9 /* AudioEQTap.swift */,
+				F437A5313D8431271F55484B /* AutoCacheController.swift */,
+				B82BF94096EA8EE40C1F09CF /* CarPlaySceneController.swift */,
+				6107CE49063F2671137BB665 /* ClassicalMetadataClient.swift */,
+				2CCE051467D8AD9E518EE69E /* KeychainStore.swift */,
+				19A7210D2A0B01220238A3AC /* LibraryService.swift */,
+				E44AA0186F57264D3B6672A9 /* Lyrics.swift */,
+				B96A8A59BF27AE7AD1E21D41 /* OnlineArtworkClient.swift */,
+				2BDBA328B952ACA58D14AAAB /* PlaybackEngine.swift */,
+				B9992C8D60ACC28CD2BFCC8A /* RemoteStreamingService.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		DAA11399B642855FE89347A3 /* EvensongTests */ = {
+			isa = PBXGroup;
+			children = (
+				45080F3B4FF747809BFB4987 /* ArtistSearchTests.swift */,
+				A5CF8DAF8D162EC93A02364F /* AutoCacheControllerTests.swift */,
+				E45C71B264EBE982032A555F /* ClassicalMetadataTests.swift */,
+				88E5CAB368AAD2E236332EF4 /* DataLayerFixesTests.swift */,
+			);
+			name = EvensongTests;
+			path = App/EvensongTests;
+			sourceTree = "<group>";
+		};
+		DB352D63AC823C49CCB3B607 /* Evensong */ = {
+			isa = PBXGroup;
+			children = (
+				D03EC102B6B8A15FA71364FD /* AppLog.swift */,
+				259FF58ADD3F92DBB93AD648 /* AppModel.swift */,
+				4DC47CD771A42FC3A2665255 /* DesignTokens.swift */,
+				8BF369D95C21CC50651C29C6 /* EvensongApp.swift */,
+				0085123ACDC23C6A3E528989 /* Info.plist */,
+				740C44A810A5FCFA1E1A4440 /* Components */,
+				67E4F1728D05134D73B4AD1B /* Features */,
+				105430FDAF48E5800693E368 /* Model */,
+				FE441814DCB05BFE617EAE7D /* Navigation */,
+				D1194F0B8A04583A528F377B /* Services */,
+			);
+			name = Evensong;
+			path = App/Evensong;
+			sourceTree = "<group>";
+		};
+		F973BA058A9C7F0D24760469 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				DDD2948541D167B79F2A7CF6 /* EvensongCore */,
+			);
+			path = Packages;
+			sourceTree = "<group>";
+		};
+		FA47E5D42ACCE5719A74EFFD /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				21D607CC7267533168E6B8D8 /* SettingsView.swift */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		FE441814DCB05BFE617EAE7D /* Navigation */ = {
+			isa = PBXGroup;
+			children = (
+				75637BBC2A4740EB25889076 /* RootTabView.swift */,
+			);
+			path = Navigation;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		5C56E4F859984BC58A8B0011 /* EvensongTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 012F83653777C47389AE66FB /* Build configuration list for PBXNativeTarget "EvensongTests" */;
+			buildPhases = (
+				8E00A64088AB5984DF2E9F6F /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0AF28895FFD7CA904FD7A118 /* PBXTargetDependency */,
+			);
+			name = EvensongTests;
+			packageProductDependencies = (
+			);
+			productName = EvensongTests;
+			productReference = 0FC8E66BF888780587B024CC /* EvensongTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		EA76FF5A2FAA322DA1FD9828 /* Evensong */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9E74896C9FA5ADA3E03269F0 /* Build configuration list for PBXNativeTarget "Evensong" */;
+			buildPhases = (
+				D6D631A1FFF3D48DA98F7686 /* Sources */,
+				C35FC79BF00F97BC0C7A317E /* Resources */,
+				FB66B989420036B3B8A2E1B0 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Evensong;
+			packageProductDependencies = (
+				FF3F80731FC30B70311FEAEA /* EvensongCore */,
+			);
+			productName = Evensong;
+			productReference = 5C5923F3202E4C248F278DA8 /* Evensong.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1F6CEF7728CDC99A1622478F /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					5C56E4F859984BC58A8B0011 = {
+						DevelopmentTeam = 4HFQ952344;
+						ProvisioningStyle = Automatic;
+					};
+					EA76FF5A2FAA322DA1FD9828 = {
+						DevelopmentTeam = 4HFQ952344;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = B15FFE17455CD820D63C364C /* Build configuration list for PBXProject "Evensong" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 9097B1E4635E4A391CE77174;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				F6BD424943CC9AA177079615 /* XCLocalSwiftPackageReference "Packages/EvensongCore" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 31F4BDCF3B01B40371D44D18 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				EA76FF5A2FAA322DA1FD9828 /* Evensong */,
+				5C56E4F859984BC58A8B0011 /* EvensongTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C35FC79BF00F97BC0C7A317E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8DE5BBEA6D6E575885A52755 /* Assets.xcassets in Resources */,
+				8C4A9C620C3D653A2FD99158 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8E00A64088AB5984DF2E9F6F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F846AFEB043EF05DEDB33D03 /* ArtistSearchTests.swift in Sources */,
+				B473B81C919DCBD6055F7BC6 /* AutoCacheControllerTests.swift in Sources */,
+				D1107D24D21B6D54C7574D3D /* ClassicalMetadataTests.swift in Sources */,
+				A3C12DBD88961793ED456971 /* DataLayerFixesTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D6D631A1FFF3D48DA98F7686 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FB4D8771675CC1CDC60FC8B8 /* AppLog.swift in Sources */,
+				70912F38FABA3487CFDAB08A /* AppModel.swift in Sources */,
+				E49463B872EFAB413F49DF57 /* Artwork.swift in Sources */,
+				B2D0A7EA71FBAD415E1677AC /* AudioEQTap.swift in Sources */,
+				1455DED9C9DEE2B3BAF9AAD5 /* AudioEnhancements.swift in Sources */,
+				9B52C7F2C5126CE9BE87CC27 /* AutoCacheController.swift in Sources */,
+				1BF05E78F4F665C37EC74F09 /* CarPlaySceneController.swift in Sources */,
+				42AF9A3C9AFC3ADB527626E2 /* ClassicalMetadataClient.swift in Sources */,
+				C264FEFEC285F67DD56FF88F /* DesignTokens.swift in Sources */,
+				3139BC7E804558D3504BC6EE /* DetailViews.swift in Sources */,
+				1E7E7A1DED2787CB9C0E6B17 /* EvensongApp.swift in Sources */,
+				D22389AA972FB41A3AB519E7 /* HomeView.swift in Sources */,
+				80834785401093BEE1D721E7 /* KeychainStore.swift in Sources */,
+				D6CED0B4D905D6C629C53637 /* LibraryService.swift in Sources */,
+				C2A0E642BC5D273A9F51B91D /* LibraryView.swift in Sources */,
+				563DEBCB5D31238CCEE3947C /* LiquidGlass.metal in Sources */,
+				6B651153FAFB3E55CA26D3A6 /* Lyrics.swift in Sources */,
+				1E08BD2CCF1C7121C8903933 /* MediaCells.swift in Sources */,
+				13B34607291546645E61AD48 /* MediaModels.swift in Sources */,
+				A75EDECCFDFCBDC11C6EB82D /* MiniPlayerView.swift in Sources */,
+				22988395DCDDC01D623D1DD6 /* OfflineLibraryView.swift in Sources */,
+				2A224C1585F9C6098E89B52B /* OnboardingView.swift in Sources */,
+				4365ACD391FE0946BB22F326 /* OnlineArtworkClient.swift in Sources */,
+				C7C8474617345F4FBC75743B /* PlaybackEngine.swift in Sources */,
+				713DF588EA935921D95DCECD /* RadioView.swift in Sources */,
+				70708C1A0A65DC1801E9895B /* RemoteFolderPicker.swift in Sources */,
+				1BD212A2E05D0FA4E815BB05 /* RemoteStreamingService.swift in Sources */,
+				B4D0079EB78337E8B2125E9E /* RootTabView.swift in Sources */,
+				AD97289E025343DB9C0C5666 /* SearchView.swift in Sources */,
+				EFA3E2847D5A71047D5DCB55 /* SettingsView.swift in Sources */,
+				BF07CF56BEE83FF437D8EA7E /* SourceSetupView.swift in Sources */,
+				7DCAF11C8FBD9992B4A7CF3F /* SourcesView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0AF28895FFD7CA904FD7A118 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = EA76FF5A2FAA322DA1FD9828 /* Evensong */;
+			targetProxy = DDF31F860FF67B5774208A59 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		3C5570FC8B0165B3611467B5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 4HFQ952344;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		A4F83B7382475CE5272883AB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.evensong.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Evensong.app/Evensong";
+			};
+			name = Debug;
+		};
+		C4B36DC56EF41574230B1F5B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = App/Evensong/Info.plist;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.evensong.app;
+				PRODUCT_NAME = Evensong;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CBE75405DA95F58171DABF78 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = App/Evensong/Info.plist;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.evensong.app;
+				PRODUCT_NAME = Evensong;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		DBDBEBF798862E6EDE1E8E0B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.evensong.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Evensong.app/Evensong";
+			};
+			name = Release;
+		};
+		F2B6CBB22183BB4B05616903 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 4HFQ952344;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		012F83653777C47389AE66FB /* Build configuration list for PBXNativeTarget "EvensongTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A4F83B7382475CE5272883AB /* Debug */,
+				DBDBEBF798862E6EDE1E8E0B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9E74896C9FA5ADA3E03269F0 /* Build configuration list for PBXNativeTarget "Evensong" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C4B36DC56EF41574230B1F5B /* Debug */,
+				CBE75405DA95F58171DABF78 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B15FFE17455CD820D63C364C /* Build configuration list for PBXProject "Evensong" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3C5570FC8B0165B3611467B5 /* Debug */,
+				F2B6CBB22183BB4B05616903 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		F6BD424943CC9AA177079615 /* XCLocalSwiftPackageReference "Packages/EvensongCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/EvensongCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		FF3F80731FC30B70311FEAEA /* EvensongCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = EvensongCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 1F6CEF7728CDC99A1622478F /* Project object */;
+}
