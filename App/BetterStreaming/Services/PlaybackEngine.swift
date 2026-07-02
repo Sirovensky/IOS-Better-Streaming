@@ -171,18 +171,28 @@ final class PlaybackEngine {
     private var isSeeking = false
     private var pendingSeekSeconds: Double?
     /// After a seek lands, playback is held (the player keeps filling its buffer
-    /// while paused) until ~`prerollSeconds` is actually buffered ahead, then it
+    /// while paused) until the adaptive preroll target is buffered ahead, then it
     /// resumes — so rapid scrubs don't resume on AVPlayer's thin "minimize
     /// stalling" buffer (<2s). Cancelled by a new seek / pause / item change.
     private var prerollTask: Task<Void, Never>?
     private var isPrerolling = false
     /// Seconds of audio to buffer ahead before resuming after a seek.
-    // 8s: 5s still let a hi-res FLAC starve right after the hold released —
-    // the user heard play → rebuffer → play. One slightly longer hold beats two.
-    private static let prerollSeconds: Double = 8
+    // Adaptive preroll: the hold target scales with the measured fill rate
+    // (seconds of audio buffered per wall-clock second). A link filling 6x
+    // realtime releases at ~4s (snappy); one barely above realtime holds up to
+    // 20s — one slightly longer hold beats play→starve→rebuffer. The EWMA seeds
+    // the next track's target so a session on one NAS converges immediately.
+    private static let prerollMinSeconds: Double = 4
+    private static let prerollMaxSeconds: Double = 20
+    private var prerollFillRateEWMA: Double = 3.0
+    private static func prerollTarget(forFillRate rate: Double) -> Double {
+        min(max(24.0 / max(rate, 0.5), prerollMinSeconds), prerollMaxSeconds)
+    }
     /// Cap the pre-roll wait so a slow/dead stream still resumes (the stall
     /// watchdog then covers a genuine wedge) instead of spinning forever.
-    private static let prerollMaxWaitNanos: UInt64 = 8_000_000_000
+    // Cap must exceed the largest adaptive target (20s) or slow links would
+    // always hit the cap before the cushion.
+    private static let prerollMaxWaitNanos: UInt64 = 22_000_000_000
     private static let prerollPollNanos: UInt64 = 150_000_000
     /// Fires when the player sits in the buffering state too long without progress
     /// and auto-rebuilds the item. Cancelled/replaced on every state change.
@@ -557,14 +567,15 @@ final class PlaybackEngine {
         }
     }
 
-    /// Hold playback after a seek until ~`prerollSeconds` is buffered ahead (or the
+    /// Hold playback after a seek/stream-start until the adaptive target is buffered ahead (or the
     /// item is fully buffered / near the end / the wait cap elapses), then resume.
     /// AVPlayer keeps filling `loadedTimeRanges` toward `preferredForwardBufferDuration`
     /// even while paused, so this just defers `play()` until there's a real cushion.
     private func beginPreroll(generation: Int) {
         prerollTask?.cancel()
-        // Already enough buffered (e.g. scrubbing within the loaded region): resume now.
-        if bufferedAheadSeconds >= Self.prerollSeconds {
+        // Already enough buffered for the link speed we've seen (e.g. scrubbing
+        // within the loaded region): resume now.
+        if bufferedAheadSeconds >= Self.prerollTarget(forFillRate: prerollFillRateEWMA) {
             isPrerolling = false
             isBuffering = false
             player.play()
@@ -575,18 +586,37 @@ final class PlaybackEngine {
         player.pause()   // hold; AVPlayer still prefetches into its buffer while paused
         prerollTask = Task { [weak self] in
             var waited: UInt64 = 0
+            let startAhead = self?.bufferedAheadSeconds ?? 0
+            var lastAhead = startAhead
+            // Seed the target from the session's remembered fill rate, then refine
+            // from what THIS stream actually delivers.
+            var target = Self.prerollTarget(forFillRate: self?.prerollFillRateEWMA ?? 3.0)
             while waited < Self.prerollMaxWaitNanos {
                 try? await Task.sleep(nanoseconds: Self.prerollPollNanos)
                 waited += Self.prerollPollNanos
                 guard !Task.isCancelled, let self else { return }
                 guard generation == self.resolveGeneration, self.isPrerolling else { return }
                 let ahead = self.bufferedAheadSeconds
+                lastAhead = ahead
+                // Live fill rate over the hold so far; needs ~0.75s of samples to mean anything.
+                let elapsedWall = Double(waited) / 1_000_000_000
+                if elapsedWall >= 0.75, ahead > startAhead {
+                    let rate = (ahead - startAhead) / elapsedWall
+                    target = Self.prerollTarget(forFillRate: rate)
+                }
                 let full = self.player.currentItem?.isPlaybackBufferFull ?? false
-                let nearEnd = self.duration > 0 && self.elapsed + Self.prerollSeconds >= self.duration
-                if ahead >= Self.prerollSeconds || full || nearEnd { break }
+                let nearEnd = self.duration > 0 && self.elapsed + target >= self.duration
+                if ahead >= target || full || nearEnd { break }
             }
             guard !Task.isCancelled, let self else { return }
             guard generation == self.resolveGeneration, self.isPrerolling, self.isPlaying else { return }
+            // Fold this hold's measured rate into the session estimate for the
+            // next track's seed (only when we saw real fill).
+            let elapsedWall = Double(waited) / 1_000_000_000
+            if elapsedWall >= 0.75, lastAhead > startAhead {
+                let rate = (lastAhead - startAhead) / elapsedWall
+                self.prerollFillRateEWMA = self.prerollFillRateEWMA * 0.5 + rate * 0.5
+            }
             self.isPrerolling = false
             self.prerollTask = nil
             self.player.play()
