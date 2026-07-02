@@ -21,6 +21,60 @@ actor ClassicalMetadataClient {
     /// run to avoid refetching the same work across an album.
     private var workComposerCache: [String: String] = [:]
 
+    /// Album-level enrichment: ONE release search + ONE release lookup carry every
+    /// track's relations — two rate-limited calls instead of ~3 per track, and it
+    /// matches albums whose per-track titles are filename compounds the recording
+    /// search can't find ("Act 1 - Brindisi (Toast) - 'Libiamo…'"), which is most
+    /// opera/box rips. Returns credits keyed by 0-based track position across all
+    /// discs plus the release's total track count, so the caller can refuse a
+    /// positional mapping when its local album is incomplete.
+    func albumCredits(albumTitle: String, artist: String, trackCount: Int) async -> (byPosition: [Int: ClassicalCredits], releaseTrackCount: Int) {
+        let title = albumTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return ([:], 0) }
+        guard let releaseID = await searchReleaseID(album: title, artist: artist, trackCount: trackCount),
+              let release = await lookupRelease(releaseID) else { return ([:], 0) }
+
+        let mapped = Self.credits(fromRelease: release)
+        var result: [Int: ClassicalCredits] = [:]
+        for (position, entry) in mapped.byPosition {
+            var credits = entry.credits
+            if credits.composer == nil, let workID = entry.workID {
+                credits.composer = await composerName(workID: workID)
+            }
+            if let composer = credits.composer, let match = await openOpusComposer(matching: composer) {
+                credits.composer = match.completeName
+                credits.period = match.epoch
+            }
+            if !credits.isEmpty { result[position] = credits }
+        }
+        return (result, mapped.trackCount)
+    }
+
+    /// Pure mapping from a release lookup (media → tracks → recording relations)
+    /// to per-position credits. `work-level-rels` inlines each work's own
+    /// relations, so the composer usually rides along without a per-work lookup;
+    /// when it doesn't, the work id is returned for the caller to resolve.
+    nonisolated static func credits(fromRelease release: MBRelease) -> (byPosition: [Int: (credits: ClassicalCredits, workID: String?)], trackCount: Int) {
+        var byPosition: [Int: (credits: ClassicalCredits, workID: String?)] = [:]
+        var position = 0
+        for medium in release.media ?? [] {
+            for track in medium.tracks ?? [] {
+                defer { position += 1 }
+                let relations = track.recording?.relations ?? []
+                var (credits, workID) = credits(fromRecordingRelations: relations)
+                if credits.composer == nil {
+                    credits.composer = relations
+                        .first { $0.targetType == "work" }?.work?.relations?
+                        .first { $0.type == "composer" }?.artist?.name
+                }
+                if !credits.isEmpty || workID != nil {
+                    byPosition[position] = (credits, workID)
+                }
+            }
+        }
+        return (byPosition, position)
+    }
+
     /// Resolve credits for one track, or nil if MusicBrainz has no usable match.
     func credits(title: String, artist: String, album: String) async -> ClassicalCredits? {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -88,6 +142,34 @@ actor ClassicalMetadataClient {
         guard let url = components?.url, let data = await getMusicBrainz(url),
               let result = try? JSONDecoder().decode(MBRecordingSearch.self, from: data) else { return nil }
         return result.recordings.first?.id
+    }
+
+    private func searchReleaseID(album: String, artist: String, trackCount: Int) async -> String? {
+        var query = "release:\"\(Self.luceneSafe(album))\""
+        let artist = Self.luceneSafe(artist)
+        if !artist.isEmpty, artist.lowercased() != "unknown artist", artist.lowercased() != "various artists" {
+            query += " AND artist:\"\(artist)\""
+        }
+        var components = URLComponents(string: "https://musicbrainz.org/ws/2/release/")
+        components?.queryItems = [
+            URLQueryItem(name: "query", value: query),
+            URLQueryItem(name: "fmt", value: "json"),
+            URLQueryItem(name: "limit", value: "5")
+        ]
+        guard let url = components?.url, let data = await getMusicBrainz(url),
+              let result = try? JSONDecoder().decode(MBReleaseSearch.self, from: data) else { return nil }
+        // Same title often exists as single-disc and deluxe releases — prefer the
+        // candidate whose track count is closest to ours.
+        if let exact = result.releases.first(where: { abs(($0.trackCount ?? -99) - trackCount) <= 2 }) {
+            return exact.id
+        }
+        return result.releases.first?.id
+    }
+
+    private func lookupRelease(_ id: String) async -> MBRelease? {
+        guard let url = URL(string: "https://musicbrainz.org/ws/2/release/\(id)?inc=recordings+recording-level-rels+artist-rels+work-rels+work-level-rels&fmt=json"),
+              let data = await getMusicBrainz(url) else { return nil }
+        return try? JSONDecoder().decode(MBRelease.self, from: data)
     }
 
     private func lookupRecording(_ id: String) async -> MBRecording? {
@@ -160,6 +242,19 @@ actor ClassicalMetadataClient {
 struct MBRecordingSearch: Decodable { let recordings: [MBRecordingRef] }
 struct MBRecordingRef: Decodable { let id: String }
 
+struct MBReleaseSearch: Decodable { let releases: [MBReleaseRef] }
+struct MBReleaseRef: Decodable {
+    let id: String
+    let trackCount: Int?
+    enum CodingKeys: String, CodingKey {
+        case id
+        case trackCount = "track-count"
+    }
+}
+struct MBRelease: Decodable { let media: [MBMedium]? }
+struct MBMedium: Decodable { let tracks: [MBTrack]? }
+struct MBTrack: Decodable { let recording: MBRecording? }
+
 struct MBRecording: Decodable { let relations: [MBRelation]? }
 struct MBWork: Decodable { let relations: [MBRelation]? }
 
@@ -174,7 +269,9 @@ struct MBRelation: Decodable {
     }
 }
 struct MBArtistRef: Decodable { let id: String; let name: String; let type: String? }
-struct MBWorkRef: Decodable { let id: String; let title: String }
+/// `relations` is populated by release lookups with `work-level-rels` (the work's
+/// own relationships ride inline — that's where the composer lives).
+struct MBWorkRef: Decodable { let id: String; let title: String; let relations: [MBRelation]? }
 
 struct OpenOpusComposerSearch: Decodable { let composers: [OpenOpusComposer]? }
 struct OpenOpusComposer: Decodable {

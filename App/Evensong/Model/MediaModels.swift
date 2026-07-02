@@ -224,8 +224,22 @@ enum MetadataGrouping {
             .lowercased()
     }
 
+    /// True when a subfolder is a disc marker, not an album. The old rule only
+    /// matched bare "CD1"/"Disc 2"; real rips name disc folders "<Album> CD1",
+    /// "Disc 1 - Act I", "Vol. 2", or just "1" — every unmatched variant minted a
+    /// separate album (the album key IS the folder), fragmenting box sets.
     private static func isDiscFolder(_ name: String) -> Bool {
-        name.range(of: #"^(cd|disc|disk)\s*\d+$"#, options: [.regularExpression, .caseInsensitive]) != nil
+        let n = name.lowercased().trimmingCharacters(in: .whitespaces)
+        // Leads with a disc word + number (roman ok), any descriptor after:
+        // "cd1", "disc 2", "vol. 3", "part 2", "disc 1 - act i", "cd ii".
+        let discWordLead = #"^(cd|disc|disk|volume|vol|part|pt)[\s._\-#]*(\d{1,3}|[ivxlc]{1,6})([\s._\-].*)?$"#
+        // Ends with a disc marker: "jenůfa cd1", "the wall disc 2".
+        let discWordTail = #"^.*[\s._\-](cd|disc|disk)[\s._\-]*\d{1,3}$"#
+        // A bare small number: ".../Album/1/", ".../Album/02/".
+        let bareNumber = #"^\d{1,2}$"#
+        return n.range(of: discWordLead, options: .regularExpression) != nil
+            || n.range(of: discWordTail, options: .regularExpression) != nil
+            || n.range(of: bareNumber, options: .regularExpression) != nil
     }
 
     /// The album folder for a file path, dropping the file name and collapsing a

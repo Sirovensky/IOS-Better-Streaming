@@ -7,6 +7,51 @@ import XCTest
 /// shapes (verified against live MB/OpenOpus responses).
 final class ClassicalMetadataTests: XCTestCase {
 
+    func testReleaseLookupMapsPerPositionCreditsWithInlineComposer() throws {
+        // A 2-disc release: track relations arrive per recording; the work's own
+        // relations (composer) ride inline via work-level-rels. Positions must be
+        // global across discs and the total must count every track.
+        let json = Data("""
+        { "media": [
+            { "tracks": [
+                { "recording": { "relations": [
+                    {"type":"conductor","target-type":"artist","artist":{"id":"a1","name":"Simon Rattle","type":"Person"}},
+                    {"type":"performance","target-type":"work","work":{"id":"w1","title":"Jenůfa: Act I","relations":[
+                        {"type":"composer","target-type":"artist","artist":{"id":"c1","name":"Leoš Janáček","type":"Person"}}
+                    ]}}
+                ]}},
+                { "recording": { "relations": [] } }
+            ]},
+            { "tracks": [
+                { "recording": { "relations": [
+                    {"type":"performing orchestra","target-type":"artist","artist":{"id":"o1","name":"London Symphony Orchestra","type":"Orchestra"}},
+                    {"type":"vocal","target-type":"artist","artist":{"id":"a2","name":"Karita Mattila","type":"Person"}}
+                ]}}
+            ]}
+        ]}
+        """.utf8)
+        let release = try JSONDecoder().decode(MBRelease.self, from: json)
+        let (byPosition, total) = ClassicalMetadataClient.credits(fromRelease: release)
+        XCTAssertEqual(total, 3)
+        XCTAssertEqual(byPosition[0]?.credits.conductor, "Simon Rattle")
+        XCTAssertEqual(byPosition[0]?.credits.composer, "Leoš Janáček", "composer must come inline from work-level-rels")
+        XCTAssertNil(byPosition[1], "relation-less track carries no credits")
+        XCTAssertEqual(byPosition[2]?.credits.soloists, ["Karita Mattila"], "positions are global across discs")
+        XCTAssertEqual(byPosition[2]?.credits.orchestra, "London Symphony Orchestra")
+    }
+
+    func testReleaseSearchPrefersMatchingTrackCount() throws {
+        let json = Data("""
+        { "releases": [
+            {"id":"deluxe","track-count":40},
+            {"id":"standard","track-count":25}
+        ]}
+        """.utf8)
+        let result = try JSONDecoder().decode(MBReleaseSearch.self, from: json)
+        XCTAssertEqual(result.releases.map(\.id), ["deluxe", "standard"])
+        XCTAssertEqual(result.releases[1].trackCount, 25)
+    }
+
     func testRecordingSearchDecodesFirstID() throws {
         let json = Data("""
         { "recordings": [ {"id":"48ec0d0a-a998-4902-ac92-5b2e98392bc0","title":"Symphony no. 5","score":100} ] }

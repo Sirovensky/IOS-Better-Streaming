@@ -883,19 +883,39 @@ final class AppModel {
     func enrichClassicalCredits(albumID: String) {
         guard !offlineMode else { return }   // enrichment is a MusicBrainz/OpenOpus round trip
         guard UserDefaults.standard.bool(forKey: LibraryService.classicalCreditsKey) else { return }
-        let pending = tracks(forAlbum: albumID).filter {
+        let albumTracks = tracks(forAlbum: albumID)
+        let pending = albumTracks.filter {
             classicalCreditsByTrack[$0.id] == nil && !attemptedClassicalIDs.contains($0.id)
         }
         guard !pending.isEmpty else { return }
         pending.forEach { attemptedClassicalIDs.insert($0.id) }
+        let albumTitle = albumTracks.first?.album ?? ""
+        let albumArtist = MetadataGrouping.albumDisplayArtist(from: albumTracks.map(\.artist))
         Task { [weak self] in
             guard let self else { return }
             var didFind = false
-            for track in pending {
-                if let credits = await ClassicalMetadataClient.shared.credits(
-                    title: track.title, artist: track.artist, album: track.album) {
-                    self.classicalCreditsByTrack[track.id] = credits
-                    didFind = true
+            // Release-first: one search + one lookup fetch the whole album's
+            // credits, and — unlike the per-track recording search — it matches
+            // rips whose track titles are filename compounds ("Act 1 - Brindisi
+            // (Toast) - 'Libiamo…'"). Positional mapping is only trusted when the
+            // local album has the release's exact track count; a partial rip
+            // would otherwise shift every credit onto the wrong track.
+            let (byPosition, releaseCount) = await ClassicalMetadataClient.shared.albumCredits(
+                albumTitle: albumTitle, artist: albumArtist, trackCount: albumTracks.count)
+            if !byPosition.isEmpty, releaseCount == albumTracks.count {
+                for (offset, track) in albumTracks.enumerated() {
+                    if self.classicalCreditsByTrack[track.id] == nil, let credits = byPosition[offset] {
+                        self.classicalCreditsByTrack[track.id] = credits
+                        didFind = true
+                    }
+                }
+            } else {
+                for track in pending {
+                    if let credits = await ClassicalMetadataClient.shared.credits(
+                        title: track.title, artist: track.artist, album: track.album) {
+                        self.classicalCreditsByTrack[track.id] = credits
+                        didFind = true
+                    }
                 }
             }
             if didFind { await self.library.saveClassicalCredits(self.classicalCreditsByTrack) }

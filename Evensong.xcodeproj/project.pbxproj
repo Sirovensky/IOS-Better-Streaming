@@ -24,6 +24,7 @@
 		70708C1A0A65DC1801E9895B /* RemoteFolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE589E058CB8D600AEBC6E97 /* RemoteFolderPicker.swift */; };
 		70912F38FABA3487CFDAB08A /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 259FF58ADD3F92DBB93AD648 /* AppModel.swift */; };
 		713DF588EA935921D95DCECD /* RadioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E24F6EDB77D68E641EAFBD5 /* RadioView.swift */; };
+		753CB8B64CBBA09A2902DB6A /* MetadataGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54AFF01733A8C36E069ECF59 /* MetadataGroupingTests.swift */; };
 		7DCAF11C8FBD9992B4A7CF3F /* SourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C89A13C86108107AD2C9C29 /* SourcesView.swift */; };
 		80834785401093BEE1D721E7 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CCE051467D8AD9E518EE69E /* KeychainStore.swift */; };
 		8C4A9C620C3D653A2FD99158 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = CD9CEB13A611AAE62FD16D0C /* PrivacyInfo.xcprivacy */; };
@@ -76,6 +77,7 @@
 		48B23E66C9F488C25D42813C /* MiniPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerView.swift; sourceTree = "<group>"; };
 		4DC47CD771A42FC3A2665255 /* DesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
 		537691EB90D24D19C88C7EBE /* DetailViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailViews.swift; sourceTree = "<group>"; };
+		54AFF01733A8C36E069ECF59 /* MetadataGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataGroupingTests.swift; sourceTree = "<group>"; };
 		5C5923F3202E4C248F278DA8 /* Evensong.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Evensong.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6107CE49063F2671137BB665 /* ClassicalMetadataClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassicalMetadataClient.swift; sourceTree = "<group>"; };
 		64E9CAB48235CA9FC0C098C9 /* AudioEQTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEQTap.swift; sourceTree = "<group>"; };
@@ -263,6 +265,7 @@
 				A5CF8DAF8D162EC93A02364F /* AutoCacheControllerTests.swift */,
 				E45C71B264EBE982032A555F /* ClassicalMetadataTests.swift */,
 				88E5CAB368AAD2E236332EF4 /* DataLayerFixesTests.swift */,
+				54AFF01733A8C36E069ECF59 /* MetadataGroupingTests.swift */,
 			);
 			name = EvensongTests;
 			path = App/EvensongTests;
@@ -414,6 +417,7 @@
 				B473B81C919DCBD6055F7BC6 /* AutoCacheControllerTests.swift in Sources */,
 				D1107D24D21B6D54C7574D3D /* ClassicalMetadataTests.swift in Sources */,
 				A3C12DBD88961793ED456971 /* DataLayerFixesTests.swift in Sources */,
+				753CB8B64CBBA09A2902DB6A /* MetadataGroupingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
