@@ -177,7 +177,9 @@ final class PlaybackEngine {
     private var prerollTask: Task<Void, Never>?
     private var isPrerolling = false
     /// Seconds of audio to buffer ahead before resuming after a seek.
-    private static let prerollSeconds: Double = 5
+    // 8s: 5s still let a hi-res FLAC starve right after the hold released —
+    // the user heard play → rebuffer → play. One slightly longer hold beats two.
+    private static let prerollSeconds: Double = 8
     /// Cap the pre-roll wait so a slow/dead stream still resumes (the stall
     /// watchdog then covers a genuine wedge) instead of spinning forever.
     private static let prerollMaxWaitNanos: UInt64 = 8_000_000_000
@@ -817,7 +819,9 @@ final class PlaybackEngine {
     /// scrub into an un-cached region otherwise plays the tiny default buffer,
     /// starves, and lets the clock run past the audio (→ "plays a moment, lags,
     /// then resumes skipping the gap"). ≈0.5 MB for MP3, ~1–2 MB for FLAC at 10s.
-    private static let preferredForwardBufferSeconds: TimeInterval = 10
+    // 20s ahead (~2-8 MB depending on codec): 10s left hi-res FLAC skating on
+    // the edge between refills on a busy NAS link.
+    private static let preferredForwardBufferSeconds: TimeInterval = 20
 
     /// Apply opt-in audio enhancements to a freshly-built item. EQ (and its
     /// preamp) goes through an `MTAudioProcessingTap` audio mix; ReplayGain (and
@@ -1093,8 +1097,17 @@ final class PlaybackEngine {
         currentPlayerItem = item
         if autoPlay {
             configureAudioSessionIfNeeded()
-            player.play()
             isPlaying = true
+            // Streamed items start through the preroll gate: play() at readyToPlay
+            // rides AVPlayer's thin first buffer (~3s), which starves and forces a
+            // second, longer rebuffer. Holding until a real cushion exists starts
+            // a beat later but plays through clean. Local/cached files play now.
+            let isStreamed = (item.asset as? AVURLAsset)?.url.scheme == "betterstream"
+            if isStreamed {
+                beginPreroll(generation: generation)
+            } else {
+                player.play()
+            }
             #if DEBUG
             let route = AVAudioSession.sharedInstance().currentRoute.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
             AppLog.playback.debug("BETTERSTREAMING_PLAY player_play route=\(route, privacy: .public) volume=\(AVAudioSession.sharedInstance().outputVolume)")

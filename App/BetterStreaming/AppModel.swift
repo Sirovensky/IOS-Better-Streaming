@@ -246,18 +246,35 @@ final class AppModel {
             UserDefaults.standard.removeObject(forKey: Self.playbackSnapshotKey)
             return
         }
-        let snapshot = PlaybackSnapshot(
-            queueIDs: queue.map(\.id),
-            index: engine.currentIndex,
-            elapsed: engine.elapsed,
-            shuffle: engine.shuffleEnabled,
-            repeatMode: engine.repeatMode.rawValue,
-            unshuffledIDs: engine.unshuffledQueue.map(\.id)
-        )
-        if let data = try? JSONEncoder().encode(snapshot) {
-            UserDefaults.standard.set(data, forKey: Self.playbackSnapshotKey)
+        // Mapping + JSON-encoding the ids happens OFF the main thread: a whole-
+        // library queue is ~20k long stableKey strings (several MB of JSON), and
+        // doing that at tap time froze scrolling for ~0.5s on every track start.
+        // The array captures are O(1) COW copies; the serial queue keeps writes
+        // ordered so an older snapshot can't overwrite a newer one.
+        let liveQueue = queue
+        let unshuffled = engine.unshuffledQueue
+        let index = engine.currentIndex
+        let elapsed = engine.elapsed
+        let shuffle = engine.shuffleEnabled
+        let repeatRaw = engine.repeatMode.rawValue
+        Self.snapshotWriteQueue.async {
+            let snapshot = PlaybackSnapshot(
+                queueIDs: liveQueue.map(\.id),
+                index: index,
+                elapsed: elapsed,
+                shuffle: shuffle,
+                repeatMode: repeatRaw,
+                unshuffledIDs: unshuffled.map(\.id)
+            )
+            if let data = try? JSONEncoder().encode(snapshot) {
+                UserDefaults.standard.set(data, forKey: Self.playbackSnapshotKey)
+            }
         }
     }
+
+    /// Serial so snapshot writes stay ordered; utility QoS — it's crash insurance,
+    /// not user-visible work.
+    private static let snapshotWriteQueue = DispatchQueue(label: "BetterStreaming.playbackSnapshot", qos: .utility)
 
     /// Restore the last session's queue + position into the engine, PAUSED and
     /// without resolving any audio (the first play/seek loads it). No-op if
