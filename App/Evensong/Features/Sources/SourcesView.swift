@@ -114,7 +114,13 @@ struct SourcesView: View {
 
     private func metric(_ value: String, _ label: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(value).font(.subheadline.weight(.semibold).monospacedDigit()).foregroundStyle(DesignTokens.textPrimary)
+            // Rolls digits as a live scan ticks the counts up — the numbers ARE
+            // the progress indicator while a scan runs.
+            Text(value)
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .foregroundStyle(DesignTokens.textPrimary)
+                .contentTransition(.numericText())
+                .animation(.snappy(duration: 0.3), value: value)
             Text(label).font(.caption2).foregroundStyle(DesignTokens.textTertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

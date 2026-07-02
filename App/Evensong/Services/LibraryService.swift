@@ -370,9 +370,17 @@ actor LibraryService {
 
     // MARK: Scan
 
+    /// Live scan telemetry streamed to the caller so the Sources card's songs /
+    /// folders / size metrics can tick up in real time while the walk runs.
+    struct ScanTick: Sendable {
+        var files: Int
+        var folders: Int
+        var bytes: Int64
+    }
+
     /// Recursively scan a source into tracks (path-first). Returns the full
     /// merged library so the caller can replace its state.
-    func scan(sourceID: String, progress: (@Sendable (Int) -> Void)? = nil) async throws -> [Track] {
+    func scan(sourceID: String, progress: (@Sendable (ScanTick) -> Void)? = nil) async throws -> [Track] {
         await loadLibraryFromDiskIfNeeded()
         guard let cfg = configs.first(where: { $0.id == sourceID }) else { return allTracks }
         scanInProgress = true
@@ -432,6 +440,7 @@ actor LibraryService {
         // the library from 20 GB to 10 GB.
         var listFailures = 0
         var filesSeen = 0
+        var bytesSeen: Int64 = 0
         // Newly-probed tracks since the last mid-scan checkpoint. Deep-folder
         // failures and cancellation already keep partial results, but an app
         // kill / crash / hard client throw used to lose the whole pass — a 10k
@@ -544,7 +553,10 @@ actor LibraryService {
                 guard let track else { continue }
                 scanned.append(track)
                 filesSeen += 1
-                if filesSeen % 20 == 0 { progress?(filesSeen) }
+                bytesSeen += track.sizeBytes ?? 0
+                if filesSeen % 20 == 0 {
+                    progress?(ScanTick(files: filesSeen, folders: visited.count, bytes: bytesSeen))
+                }
             }
 
             // Checkpoint: durably upsert freshly-probed tracks every ~500 (non-
@@ -562,7 +574,7 @@ actor LibraryService {
             }
         }
 
-        progress?(filesSeen)
+        progress?(ScanTick(files: filesSeen, folders: visited.count, bytes: bytesSeen))
 
         // Only a CLEAN walk (every folder listed) may prune: replacing with
         // `scanned` deletes any prior track not re-seen. On a partial walk, merge

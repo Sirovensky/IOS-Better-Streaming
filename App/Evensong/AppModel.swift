@@ -405,15 +405,16 @@ final class AppModel {
         rebuildSources()
         defer { isScanning = false }
         do {
-            let updated = try await library.scan(sourceID: sourceID) { [weak self] count in
+            let updated = try await library.scan(sourceID: sourceID) { [weak self] tick in
                 Task { @MainActor in
                     guard let self, self.isScanning else { return }
-                    let label = "Scanning… \(count) files"
+                    let label = "Scanning… \(tick.files) files"
                     self.sourceMessages[sourceID] = label
-                    // Rewrite only this source's row label — a full rebuildSources
+                    // Rewrite only this source's row — a full rebuildSources
                     // (O(N) folder regroup over the whole library) per 20-file tick
-                    // was the scan-progress hitch.
-                    self.updateSourceScanLabel(sourceID: sourceID, label)
+                    // was the scan-progress hitch. The tick carries live counts so
+                    // the card's songs/folders/size metrics climb as a visual treat.
+                    self.updateSourceScanLabel(sourceID: sourceID, label, tick: tick)
                 }
             }
             tracks = updated
@@ -643,9 +644,15 @@ final class AppModel {
     /// Cheap in-place label rewrite for one source's row during a scan — touches
     /// only `lastScanLabel`, avoiding a full `rebuildSources()` (which recomputes
     /// folder counts by running `albumFolderComponents` over the whole library).
-    private func updateSourceScanLabel(sourceID: String, _ label: String) {
+    private func updateSourceScanLabel(sourceID: String, _ label: String, tick: LibraryService.ScanTick? = nil) {
         guard let i = sources.firstIndex(where: { $0.id == sourceID }) else { return }
         sources[i].lastScanLabel = label
+        guard let tick else { return }
+        // Live odometer while scanning: the walk already knows these numbers, so
+        // patching the row is O(1) — no library-wide regroup per tick.
+        sources[i].trackCount = tick.files
+        sources[i].folderCount = tick.folders
+        sources[i].sizeLabel = tick.bytes > 0 ? AutoCacheController.byteLabel(tick.bytes) : "—"
     }
 
     private func rebuildIndex() {
