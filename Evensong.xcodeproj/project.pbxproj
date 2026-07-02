@@ -78,7 +78,7 @@
 		4DC47CD771A42FC3A2665255 /* DesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
 		537691EB90D24D19C88C7EBE /* DetailViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailViews.swift; sourceTree = "<group>"; };
 		54AFF01733A8C36E069ECF59 /* MetadataGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataGroupingTests.swift; sourceTree = "<group>"; };
-		5C5923F3202E4C248F278DA8 /* Evensong.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Evensong.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5C5923F3202E4C248F278DA8 /* Evensong.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Evensong.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6107CE49063F2671137BB665 /* ClassicalMetadataClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassicalMetadataClient.swift; sourceTree = "<group>"; };
 		64E9CAB48235CA9FC0C098C9 /* AudioEQTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEQTap.swift; sourceTree = "<group>"; };
 		75637BBC2A4740EB25889076 /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
@@ -92,7 +92,7 @@
 		B96A8A59BF27AE7AD1E21D41 /* OnlineArtworkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineArtworkClient.swift; sourceTree = "<group>"; };
 		B9992C8D60ACC28CD2BFCC8A /* RemoteStreamingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStreamingService.swift; sourceTree = "<group>"; };
 		BA5713CA8920FB706095615F /* LiquidGlass.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = LiquidGlass.metal; sourceTree = "<group>"; };
-		CD9CEB13A611AAE62FD16D0C /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		CD9CEB13A611AAE62FD16D0C /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		CE589E058CB8D600AEBC6E97 /* RemoteFolderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFolderPicker.swift; sourceTree = "<group>"; };
 		D03EC102B6B8A15FA71364FD /* AppLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLog.swift; sourceTree = "<group>"; };
 		DDD2948541D167B79F2A7CF6 /* EvensongCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = EvensongCore; path = Packages/EvensongCore; sourceTree = SOURCE_ROOT; };
@@ -368,7 +368,6 @@
 						ProvisioningStyle = Automatic;
 					};
 					EA76FF5A2FAA322DA1FD9828 = {
-						DevelopmentTeam = 4HFQ952344;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -563,6 +562,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 4HFQ952344;
 				INFOPLIST_FILE = App/Evensong/Info.plist;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -583,6 +583,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 4HFQ952344;
 				INFOPLIST_FILE = App/Evensong/Info.plist;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;

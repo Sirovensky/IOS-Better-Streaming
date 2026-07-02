@@ -432,6 +432,11 @@ actor LibraryService {
         // the library from 20 GB to 10 GB.
         var listFailures = 0
         var filesSeen = 0
+        // Newly-probed tracks since the last mid-scan checkpoint. Deep-folder
+        // failures and cancellation already keep partial results, but an app
+        // kill / crash / hard client throw used to lose the whole pass — a 10k
+        // first scan on flaky Wi-Fi could restart from zero repeatedly.
+        var newSinceCheckpoint: [Track] = []
         #if DEBUG
         AppLog.library.debug("BETTERSTREAMING_SCAN start source=\(sourceID, privacy: .public) root=\(cfg.rootPath) priorTracks=\(existing.count)")
         #endif
@@ -540,6 +545,20 @@ actor LibraryService {
                 scanned.append(track)
                 filesSeen += 1
                 if filesSeen % 20 == 0 { progress?(filesSeen) }
+            }
+
+            // Checkpoint: durably upsert freshly-probed tracks every ~500 (non-
+            // destructive, no prune — the end-of-scan replace stays the source of
+            // truth). After an interruption, the relaunch loads these rows and the
+            // next scan's reuse map skips re-probing them.
+            newSinceCheckpoint.append(contentsOf: probed.map(\.1))
+            if newSinceCheckpoint.count >= 500 {
+                let batch = newSinceCheckpoint
+                newSinceCheckpoint.removeAll()
+                _ = try? await mediaStore.upsertMediaItems(batch.map(mediaItem(from:)))
+                #if DEBUG
+                AppLog.library.debug("BETTERSTREAMING_SCAN checkpoint persisted=\(batch.count)")
+                #endif
             }
         }
 
