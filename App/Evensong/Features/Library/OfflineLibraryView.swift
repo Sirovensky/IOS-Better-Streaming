@@ -64,6 +64,7 @@ struct OfflineLibraryView: View {
             .padding(.bottom, 120)
         }
         .appScreenBackground()
+        .toggleStyle(EvensongToggleStyle())
         .navigationTitle("Offline")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {

@@ -891,6 +891,10 @@ final class AppModel {
         guard !offlineMode else { return }   // enrichment is a MusicBrainz/OpenOpus round trip
         guard UserDefaults.standard.bool(forKey: LibraryService.classicalCreditsKey) else { return }
         let albumTracks = tracks(forAlbum: albumID)
+        // Only albums whose genre folds into the Classical family get enriched —
+        // MusicBrainz work-relations exist for pop/rock covers too, which put a
+        // straight-faced "Classical credits" card on a metal Christmas album.
+        guard albumTracks.contains(where: { MetadataGrouping.canonicalGenre($0.genre) == "Classical" }) else { return }
         let pending = albumTracks.filter {
             classicalCreditsByTrack[$0.id] == nil && !attemptedClassicalIDs.contains($0.id)
         }

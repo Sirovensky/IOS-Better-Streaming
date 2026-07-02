@@ -163,7 +163,20 @@ actor ClassicalMetadataClient {
         if let exact = result.releases.first(where: { abs(($0.trackCount ?? -99) - trackCount) <= 2 }) {
             return exact.id
         }
-        return result.releases.first?.id
+        if let first = result.releases.first { return first.id }
+        // Classical rips often tag the COMPOSER as the artist; MB credits releases
+        // to performers, so the artist clause can zero out. Retry title-only, but
+        // then trust nothing except an exact-ish track-count match.
+        guard !artist.isEmpty else { return nil }
+        var titleOnly = URLComponents(string: "https://musicbrainz.org/ws/2/release/")
+        titleOnly?.queryItems = [
+            URLQueryItem(name: "query", value: "release:\"\(Self.luceneSafe(album))\""),
+            URLQueryItem(name: "fmt", value: "json"),
+            URLQueryItem(name: "limit", value: "8")
+        ]
+        guard let url2 = titleOnly?.url, let data2 = await getMusicBrainz(url2),
+              let result2 = try? JSONDecoder().decode(MBReleaseSearch.self, from: data2) else { return nil }
+        return result2.releases.first(where: { abs(($0.trackCount ?? -99) - trackCount) <= 1 })?.id
     }
 
     private func lookupRelease(_ id: String) async -> MBRelease? {

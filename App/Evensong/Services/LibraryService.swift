@@ -370,6 +370,10 @@ actor LibraryService {
 
     // MARK: Scan
 
+    private static let scanDirFilter = LibraryScanFilter()
+    /// Download-manager working dirs whose contents are duplicates-in-flight.
+    private static let skippedStagingDirNames: Set<String> = ["_slskd_staging"]
+
     /// Live scan telemetry streamed to the caller so the Sources card's songs /
     /// folders / size metrics can tick up in real time while the walk runs.
     struct ScanTick: Sendable {
@@ -495,6 +499,12 @@ actor LibraryService {
                 if Task.isCancelled { break }
                 switch entry.kind {
                 case .directory:
+                    // Junk/system dirs (#recycle, @eaDir, dot-dirs) and download
+                    // staging must not be indexed — a stray slskd incomplete/ file
+                    // showed up as a duplicate 1-song album. The package filter
+                    // existed but this walk never called it.
+                    guard Self.scanDirFilter.shouldDescendIntoDirectoryName(entry.name),
+                          !Self.skippedStagingDirNames.contains(entry.name.lowercased()) else { break }
                     if visited.count + pending.count < 50_000 { pending.append(entry.path) }
                 case .file:
                     guard let kind = classifier.classify(entry), scanned.count + dirFiles.count < 100_000 else { break }

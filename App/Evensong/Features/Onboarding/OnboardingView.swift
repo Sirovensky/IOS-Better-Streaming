@@ -47,6 +47,7 @@ struct OnboardingView: View {
                 footer
             }
         }
+        .toggleStyle(EvensongToggleStyle())
         .sheet(isPresented: $showFolderPicker) {
             RemoteFolderPicker(
                 proto: proto,
@@ -205,7 +206,7 @@ struct OnboardingView: View {
                     Text("Auto-cache my most-played music").font(.subheadline.weight(.semibold))
                         .foregroundStyle(DesignTokens.textPrimary)
                 }
-                .tint(DesignTokens.controlAccent)
+                .tint(DesignTokens.brandPrimary)
                 .padding(12)
                 Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
                 HStack {
@@ -216,14 +217,14 @@ struct OnboardingView: View {
                             Text(AutoCacheController.byteLabel($0)).tag($0)
                         }
                     }
-                    .labelsHidden().tint(DesignTokens.controlAccent)
+                    .labelsHidden().tint(DesignTokens.brandPrimary)
                 }
                 .padding(12)
                 Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
                 Toggle(isOn: $autoCache.wifiOnly) {
                     Text("Wi-Fi only").font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
                 }
-                .tint(DesignTokens.controlAccent)
+                .tint(DesignTokens.brandPrimary)
                 .padding(12)
             }
             .surfaceCard(fill: DesignTokens.surfaceCard)

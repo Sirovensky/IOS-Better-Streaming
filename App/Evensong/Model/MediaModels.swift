@@ -490,7 +490,13 @@ struct ClassicalCredits: Codable, Hashable, Sendable {
     /// or a work title alone — which pop recordings also carry — don't qualify, so a
     /// non-classical album isn't stored or shown with junk credits.
     var isEmpty: Bool {
-        composer == nil && conductor == nil && orchestra == nil
+        // Composer alone must NOT qualify: any pop cover's work-relation carries
+        // one (a metal "Let It Snow" rendered "Composer: Jule Styne"). Require
+        // performance evidence — a conductor or orchestra — or a composer WITH a
+        // credited soloist (solo recitals have no orchestra).
+        if conductor != nil || orchestra != nil { return false }
+        if composer != nil && !soloists.isEmpty { return false }
+        return true
     }
 
     /// Compact one-line summary for the player subtitle — the performers (conductor /
