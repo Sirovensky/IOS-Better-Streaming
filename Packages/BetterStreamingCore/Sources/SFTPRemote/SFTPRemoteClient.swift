@@ -24,6 +24,29 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
     private var connectTask: Task<SSHClient, Error>?
     private var sftpOpenTask: Task<SFTPClient, Error>?
 
+    /// Open read handles pooled by resolved path. Re-opening (OPEN + CLOSE) on
+    /// every 512 KB streaming chunk added two serialized round-trips per chunk;
+    /// reusing one handle collapses that to just the READs. Small LRU cap; entries
+    /// dropped on error and flushed on reconnect / disconnect. Mirrors SMB's pool.
+    private var openFiles: [String: SFTPFile] = [:]
+    private var openFileOrder: [String] = []
+    /// Memoised in-flight opens so two concurrent first-reads of the same path
+    /// don't both OPEN and orphan the loser's handle.
+    private var openFileTasks: [String: Task<SFTPFile, Error>] = [:]
+    private static let maxOpenFiles = 4
+
+    /// A single ranged read is split into up to this many concurrent chunk reads
+    /// of this size, stitched back in order. Citadel multiplexes requests on the
+    /// SSH channel, so overlapping READs pipeline instead of serializing — a large
+    /// range no longer waits on one 256 KB round-trip at a time.
+    private static let readChunkSize = 262_144
+    private static let readConcurrency = 4
+
+    /// Wall-clock ceiling for a single list / stat / chunk read. Citadel honours
+    /// no cancellation on a wedged receive; on a trip we drop the SSH client so the
+    /// next op reconnects lazily. Generous so a slow-but-alive link isn't cut.
+    private static let opTimeoutNanos: UInt64 = 30_000_000_000   // 30s
+
     public init(
         host: String,
         port: Int = 22,
@@ -41,7 +64,10 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
     public func list(_ directory: RemotePath) async throws -> [RemoteEntry] {
         do {
             let sftp = try await activeSFTPClient()
-            let listings = try await sftp.listDirectory(atPath: resolvedPath(directory))
+            let path = resolvedPath(directory)
+            let listings = try await RemoteTimeout.run(Self.opTimeoutNanos) {
+                try await sftp.listDirectory(atPath: path)
+            }
             return listings
                 .flatMap(\.components)
                 .compactMap { component -> RemoteEntry? in
@@ -58,14 +84,17 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
                 }
                 .sortedDeterministically()
         } catch {
-            throw Self.map(error, path: directory)
+            throw await mapAndMaybeTeardown(error, path: directory)
         }
     }
 
     public func stat(_ path: RemotePath) async throws -> RemoteMetadata {
         do {
             let sftp = try await activeSFTPClient()
-            let attributes = try await sftp.getAttributes(at: resolvedPath(path))
+            let resolved = resolvedPath(path)
+            let attributes = try await RemoteTimeout.run(Self.opTimeoutNanos) {
+                try await sftp.getAttributes(at: resolved)
+            }
             let kind = SFTPAttributeMapper.kind(fromPermissions: attributes.permissions)
             return RemoteMetadata(
                 path: path,
@@ -75,7 +104,7 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
                 supportsRangeRead: kind == .file
             )
         } catch {
-            throw Self.map(error, path: path)
+            throw await mapAndMaybeTeardown(error, path: path)
         }
     }
 
@@ -89,28 +118,11 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
             throw RemoteFileSystemError.unsupportedRange
         }
 
+        let resolved = resolvedPath(path)
         do {
-            let sftp = try await activeSFTPClient()
-            return try await sftp.withFile(filePath: resolvedPath(path), flags: .read) { file in
-                // A single SSH_FXP_READ may return fewer bytes than requested
-                // (servers cap per-read at ~64-256KB), so loop until the whole
-                // range is read or EOF — otherwise large ranges stream truncated,
-                // corrupt audio. Mirrors download()'s chunked read.
-                var data = Data(capacity: Int(length))
-                var offset = UInt64(range.lowerBound)
-                while data.count < Int(length) {
-                    let want = UInt32(min(Int(length) - data.count, 262_144))
-                    var buffer = try await file.read(from: offset, length: want)
-                    guard let bytes = buffer.readBytes(length: buffer.readableBytes), !bytes.isEmpty else {
-                        break   // EOF: return the partial prefix (HTTP range semantics)
-                    }
-                    data.append(contentsOf: bytes)
-                    offset += UInt64(bytes.count)
-                }
-                return data
-            }
+            return try await readRange(resolved: resolved, start: UInt64(range.lowerBound), length: Int(length))
         } catch {
-            throw Self.map(error, path: path)
+            throw await mapAndMaybeTeardown(error, path: path)
         }
     }
 
@@ -118,7 +130,7 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
         do {
             let metadata = try await stat(path)
             let totalBytes = metadata.size
-            let sftp = try await activeSFTPClient()
+            let resolved = resolvedPath(path)
             let directory = localURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
@@ -129,40 +141,43 @@ public actor SFTPRemoteClient: RemoteFileSystemClient {
             }
 
             do {
-                let completed = try await sftp.withFile(filePath: resolvedPath(path), flags: .read) { file in
-                    var offset: UInt64 = 0
-                    var written: Int64 = 0
-                    while true {
-                        var buffer = try await file.read(from: offset, length: 262_144)
-                        guard let bytes = buffer.readBytes(length: buffer.readableBytes), !bytes.isEmpty else {
-                            return written
-                        }
-                        try handle.write(contentsOf: Data(bytes))
-                        offset += UInt64(bytes.count)
-                        written += Int64(bytes.count)
-                        await progress?(TransferProgress(completedBytes: written, totalBytes: totalBytes))
-                        try Task.checkCancellation()
-                    }
+                let file = try await pooledFile(for: resolved)
+                var offset: UInt64 = 0
+                var written: Int64 = 0
+                // Read a 1 MB window per iteration (4×256 KB issued concurrently),
+                // write it, then advance — streams to disk without buffering the
+                // whole file, while still pipelining the reads.
+                let windowSize = Self.readChunkSize * Self.readConcurrency
+                while true {
+                    let data = try await concurrentRead(file: file, start: offset, length: windowSize)
+                    if data.isEmpty { break }
+                    try handle.write(contentsOf: data)
+                    offset += UInt64(data.count)
+                    written += Int64(data.count)
+                    await progress?(TransferProgress(completedBytes: written, totalBytes: totalBytes))
+                    try Task.checkCancellation()
+                    if data.count < windowSize { break }   // short window = EOF
                 }
                 try handle.close()
                 // Short-read guard (FTP has the same): a server that returns an
                 // early empty read looks like EOF and would move a truncated file
                 // into place as if complete. Reject it.
-                if let totalBytes, totalBytes > 0, completed < totalBytes {
+                if let totalBytes, totalBytes > 0, written < totalBytes {
                     throw RemoteFileSystemError.serverDisconnected
                 }
                 if FileManager.default.fileExists(atPath: localURL.path) {
                     try FileManager.default.removeItem(at: localURL)
                 }
                 try FileManager.default.moveItem(at: tempURL, to: localURL)
-                await progress?(TransferProgress(completedBytes: completed, totalBytes: totalBytes ?? completed))
+                await progress?(TransferProgress(completedBytes: written, totalBytes: totalBytes ?? written))
             } catch {
                 try? handle.close()
                 try? FileManager.default.removeItem(at: tempURL)
+                await dropFile(resolved)   // a failed chunk may have left a stale handle pooled
                 throw error
             }
         } catch {
-            throw Self.map(error, path: path)
+            throw await mapAndMaybeTeardown(error, path: path)
         }
     }
 }
@@ -176,9 +191,160 @@ extension SFTPRemoteClient {
         connectTask = nil
         sftpOpenTask?.cancel()
         sftpOpenTask = nil
+        // Closing the SSH client drops the channel, which frees every pooled file
+        // handle server-side — so just clear the pool without per-handle CLOSEs.
+        flushFilePool()
         if let sshClient { try? await sshClient.close() }
         sshClient = nil
         sftpClient = nil
+    }
+
+    /// Map a thrown error and, when it's a wall-clock timeout (a wedged receive),
+    /// tear the SSH client down so the next op reconnects on a fresh session.
+    private func mapAndMaybeTeardown(_ error: Error, path: RemotePath) async -> Error {
+        let mapped = Self.map(error, path: path)
+        if let rfs = mapped as? RemoteFileSystemError, rfs == .timeout {
+            await disconnect()
+        }
+        return mapped
+    }
+
+    /// Read `[start, start+length)` as up to `readConcurrency` overlapping chunk
+    /// reads on the pooled handle, retrying once on a fresh handle if the pooled
+    /// one turns out stale (idle-closed / reconnected). A timeout is NOT retried —
+    /// the caller tears the connection down for that.
+    private func readRange(resolved: String, start: UInt64, length: Int) async throws -> Data {
+        do {
+            let file = try await pooledFile(for: resolved)
+            return try await concurrentRead(file: file, start: start, length: length)
+        } catch let error as RemoteFileSystemError where error == .timeout {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            await dropFile(resolved)
+            let file = try await pooledFile(for: resolved)
+            return try await concurrentRead(file: file, start: start, length: length)
+        }
+    }
+
+    private func concurrentRead(file: SFTPFile, start: UInt64, length: Int) async throws -> Data {
+        guard length > 0 else { return Data() }
+        let chunkSize = Self.readChunkSize
+        let chunkCount = (length + chunkSize - 1) / chunkSize
+        var chunks = [Data?](repeating: nil, count: chunkCount)
+        try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+            var next = 0
+            let maxInFlight = min(Self.readConcurrency, chunkCount)
+            func schedule(_ index: Int) {
+                let chunkStart = start + UInt64(index * chunkSize)
+                let chunkLen = min(chunkSize, length - index * chunkSize)
+                group.addTask {
+                    let data = try await RemoteTimeout.run(Self.opTimeoutNanos) {
+                        try await Self.readFully(file: file, start: chunkStart, length: chunkLen)
+                    }
+                    return (index, data)
+                }
+            }
+            while next < maxInFlight { schedule(next); next += 1 }
+            while let (index, data) = try await group.next() {
+                chunks[index] = data
+                if next < chunkCount { schedule(next); next += 1 }
+            }
+        }
+        // Stitch in order, stopping at the first short/empty chunk (EOF) — anything
+        // past it is beyond the file, so the returned prefix is the valid range.
+        var result = Data(capacity: length)
+        for index in 0..<chunkCount {
+            guard let chunk = chunks[index], !chunk.isEmpty else { break }
+            result.append(chunk)
+            if chunk.count < min(chunkSize, length - index * chunkSize) { break }
+        }
+        return result
+    }
+
+    /// Fully read one chunk's sub-range, looping over the per-read cap the server
+    /// enforces (~64-256 KB) until the chunk is filled or EOF.
+    private static func readFully(file: SFTPFile, start: UInt64, length: Int) async throws -> Data {
+        var data = Data(capacity: length)
+        var offset = start
+        while data.count < length {
+            let want = UInt32(min(length - data.count, Int(UInt32.max)))
+            var buffer = try await file.read(from: offset, length: want)
+            guard let bytes = buffer.readBytes(length: buffer.readableBytes), !bytes.isEmpty else {
+                break   // EOF
+            }
+            data.append(contentsOf: bytes)
+            offset += UInt64(bytes.count)
+        }
+        return data
+    }
+
+    /// Return the pooled read handle for `resolved`, opening (and pooling) one on
+    /// first use. The in-flight open is memoised so concurrent first-reads share it.
+    private func pooledFile(for resolved: String) async throws -> SFTPFile {
+        if let existing = openFiles[resolved], existing.isActive {
+            touchFile(resolved)
+            return existing
+        }
+        if let task = openFileTasks[resolved] {
+            if let file = try? await task.value, file.isActive { return file }
+        }
+        let sftp = try await activeSFTPClient()
+        let task = Task<SFTPFile, Error> {
+            try await sftp.openFile(filePath: resolved, flags: .read)
+        }
+        openFileTasks[resolved] = task
+        do {
+            let file = try await task.value
+            guard openFileTasks[resolved] == task else {
+                // disconnect()/dropFile raced us — don't resurrect into a torn pool.
+                try? await file.close()
+                throw RemoteFileSystemError.serverDisconnected
+            }
+            openFileTasks[resolved] = nil
+            store(file, for: resolved)
+            return file
+        } catch {
+            if openFileTasks[resolved] == task { openFileTasks[resolved] = nil }
+            throw error
+        }
+    }
+
+    private func store(_ file: SFTPFile, for resolved: String) {
+        openFiles[resolved] = file
+        touchFile(resolved)
+        while openFileOrder.count > Self.maxOpenFiles {
+            let victim = openFileOrder.removeFirst()
+            if victim == resolved { openFileOrder.append(resolved); continue }
+            if let evicted = openFiles.removeValue(forKey: victim) {
+                Task { try? await evicted.close() }   // best-effort, off the hot path
+            }
+        }
+    }
+
+    private func touchFile(_ resolved: String) {
+        if let idx = openFileOrder.firstIndex(of: resolved) { openFileOrder.remove(at: idx) }
+        openFileOrder.append(resolved)
+    }
+
+    /// Drop (and close) the pooled handle for `resolved` so the next read re-opens.
+    private func dropFile(_ resolved: String) async {
+        openFileTasks[resolved]?.cancel()
+        openFileTasks[resolved] = nil
+        if let idx = openFileOrder.firstIndex(of: resolved) { openFileOrder.remove(at: idx) }
+        if let file = openFiles.removeValue(forKey: resolved) {
+            try? await file.close()
+        }
+    }
+
+    /// Drop all pooled handles WITHOUT per-handle CLOSEs (used when the channel is
+    /// already gone / being torn down, where a CLOSE would just fail).
+    private func flushFilePool() {
+        for task in openFileTasks.values { task.cancel() }
+        openFileTasks.removeAll()
+        openFiles.removeAll()
+        openFileOrder.removeAll()
     }
 
     private func activeSFTPClient() async throws -> SFTPClient {
@@ -189,6 +355,7 @@ extension SFTPRemoteClient {
             try? await sshClient.close()
             self.sshClient = nil
             self.sftpClient = nil
+            flushFilePool()   // pooled handles belonged to the dead channel
         }
         // Memoised like the SSH connect below: two concurrent first ops would
         // otherwise both open an SFTP channel and orphan the loser's.

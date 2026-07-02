@@ -313,6 +313,20 @@ public actor MediaStore {
         return override
     }
 
+    /// Upsert many overrides in ONE write transaction (bulk auto-fix), instead of a
+    /// separate `database().write` per override. Each row merges via the same
+    /// ON CONFLICT upsert as the single-key path, so the result is identical to N
+    /// sequential `upsertMetadataOverride` calls — just far fewer transactions.
+    public func upsertMetadataOverrides(_ overrides: [MetadataOverride]) async throws {
+        guard !overrides.isEmpty else { return }
+        try migrateIfNeededLocked()
+        try await database().write { db in
+            for override in overrides {
+                try MediaStorePersistence.upsertMetadataOverride(override, in: db)
+            }
+        }
+    }
+
     public func deleteMetadataOverride(identityKey: String) async throws {
         try migrateIfNeededLocked()
         try await database().write { db in
@@ -1632,10 +1646,22 @@ private enum MediaStorePersistence {
         }
     }
 
-    private static func encode<T: Encodable>(_ value: T) throws -> String {
+    // Shared, pre-configured coders reused across every row encode/decode — a fresh
+    // JSONEncoder/JSONDecoder per row was measurable overhead on a large library
+    // load. Both are safe for concurrent use once configured (they're never mutated).
+    private static let jsonEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
-        let data = try encoder.encode(value)
+        return encoder
+    }()
+    private static let jsonDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        return decoder
+    }()
+
+    private static func encode<T: Encodable>(_ value: T) throws -> String {
+        let data = try jsonEncoder.encode(value)
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -1645,9 +1671,7 @@ private enum MediaStorePersistence {
     }
 
     private static func decode<T: Decodable>(_ type: T.Type, from json: String) throws -> T {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .millisecondsSince1970
-        return try decoder.decode(T.self, from: Data(json.utf8))
+        try jsonDecoder.decode(T.self, from: Data(json.utf8))
     }
 
     private static func uuid(_ value: String, table: String, column: String) throws -> UUID {

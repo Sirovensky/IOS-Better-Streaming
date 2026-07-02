@@ -114,12 +114,24 @@ struct MiniPlayerContent: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
 
-                ProgressBar(value: engine.progressFraction)
-                    .frame(height: 2)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 6)
+                MiniProgressStrip()
             }
         }
+    }
+}
+
+/// The mini bar's 2pt progress line, split into its own view so that the per-tick
+/// `progressFraction` redraw is scoped HERE — the surrounding row (artwork, title,
+/// transport) no longer re-renders ~10× a second just to advance the strip. Same
+/// scoping the Scrubber documents for the full player.
+private struct MiniProgressStrip: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        ProgressBar(value: model.engine.progressFraction)
+            .frame(height: 2)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 6)
     }
 }
 
@@ -500,6 +512,7 @@ private struct PlayerNavCover: View {
 
 struct NowPlayingView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.displayScale) private var displayScale
     @State private var showQueue = false
     @State private var showLyrics = false
     @State private var favoriteTapCount = 0
@@ -541,7 +554,13 @@ struct NowPlayingView: View {
         GeometryReader { proxy in
             let artSize = min(proxy.size.width - 56, proxy.size.height * 0.42)
             ZStack {
-                backgroundGradient.ignoresSafeArea()
+                // One collapse gesture on the full-bleed background so every non-control
+                // dead zone (the gaps between artwork, transport, volume, bottom bar)
+                // dismisses too. Controls layered above still win their own touches.
+                backgroundGradient
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .gesture(collapseDrag)
 
                 VStack(spacing: 0) {
                     grabber
@@ -549,7 +568,7 @@ struct NowPlayingView: View {
                     if let track = engine.currentTrack {
                         Spacer(minLength: 8)
 
-                        ArtworkView(url: track.artworkURL, artworkKey: track.albumID, cornerRadius: 14, maxPixel: 800)
+                        ArtworkView(url: track.artworkURL, artworkKey: track.albumID, cornerRadius: 14, maxPixel: artSize * displayScale)
                             .frame(width: artSize, height: artSize)
                             .shadow(color: .black.opacity(0.4), radius: 24, y: 14)
                             .scaleEffect(engine.isPlaying ? 1.0 : 0.84)
@@ -888,9 +907,32 @@ struct NowPlayingQueueView: View {
         Array(engine.queue.enumerated()).filter { $0.offset > engine.currentIndex }
     }
 
+    /// Already-played entries (before the current track), most recent first, capped —
+    /// so a tapped row jumps back. Hidden while at the very start of the queue.
+    private var history: [(offset: Int, element: Track)] {
+        guard engine.currentIndex > 0 else { return [] }
+        let past = Array(engine.queue.enumerated()).filter { $0.offset < engine.currentIndex }
+        return Array(past.reversed().prefix(20))
+    }
+
     var body: some View {
         NavigationStack {
             List {
+                if !history.isEmpty {
+                    Section {
+                        ForEach(history, id: \.offset) { entry in
+                            Button {
+                                engine.jump(toQueueIndex: entry.offset)
+                            } label: {
+                                QueueRow(track: entry.element, isCurrent: false)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } header: {
+                        Text("History")
+                    }
+                }
+
                 if let track = engine.currentTrack {
                     Section {
                         QueueRow(track: track, isCurrent: true)
@@ -999,6 +1041,10 @@ private struct QueueRow: View {
 struct Scrubber: View {
     @Environment(AppModel.self) private var model
     @State private var dragFraction: Double?
+    // Variable-speed scrubbing: the finger's last x and whether the current attenuation
+    // factor is below 1 (finger pulled away from the bar for fine control).
+    @State private var lastDragX: CGFloat?
+    @State private var scrubAttenuated = false
 
     private var engine: PlaybackEngine { model.engine }
 
@@ -1046,10 +1092,26 @@ struct Scrubber: View {
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
-                            dragFraction = min(max(value.location.x / width, 0), 1)
+                            let barHeight: CGFloat = 24
+                            // Distance the finger has pulled OUTSIDE the bar vertically.
+                            let dy = max(0, max(-value.location.y, value.location.y - barHeight))
+                            // Finer control the further away: full speed near the bar,
+                            // half then a tenth as the finger lifts off it.
+                            let factor: CGFloat = dy <= 40 ? 1.0 : (dy <= 120 ? 0.5 : 0.1)
+                            if let last = lastDragX, let current = dragFraction {
+                                let delta = Double((value.location.x - last) * factor / width)
+                                dragFraction = min(max(current + delta, 0), 1)
+                            } else {
+                                // First touch seeks straight to the tap position (tap-to-seek).
+                                dragFraction = min(max(Double(value.location.x / width), 0), 1)
+                            }
+                            lastDragX = value.location.x
+                            scrubAttenuated = factor < 1.0
                         }
-                        .onEnded { value in
-                            let frac = min(max(value.location.x / width, 0), 1)
+                        .onEnded { _ in
+                            let frac = dragFraction ?? liveFraction
+                            lastDragX = nil
+                            scrubAttenuated = false
                             dragFraction = nil
                             engine.seek(toSeconds: frac * engine.duration)
                         }
@@ -1068,6 +1130,12 @@ struct Scrubber: View {
             HStack {
                 Text(elapsedLabel)
                 Spacer()
+                if scrubAttenuated {
+                    Text("Half-speed scrubbing")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.6))
+                    Spacer()
+                }
                 Text(remainingLabel)
             }
             .font(.caption.monospacedDigit())
@@ -1106,18 +1174,27 @@ struct LyricsSheet: View {
     let track: Track
     @State private var lines: [LyricsLine]?
     @State private var loading = true
+    /// Sorted (timestamp, line index) pairs precomputed once when lines load, so the
+    /// current line is a binary search per tick rather than a full linear scan re-run
+    /// per row per 0.1s.
+    @State private var stamps: [(time: TimeInterval, index: Int)] = []
+    /// True while the user is actively dragging the lyrics; suppresses the auto-scroll
+    /// so we don't yank the list back under their finger. Cleared ~3s after they stop.
+    @State private var userScrolling = false
+    @State private var resumeTask: Task<Void, Never>?
 
     private var engine: PlaybackEngine { model.engine }
-    private var synced: Bool { lines?.contains { $0.time != nil } ?? false }
 
-    /// Index of the current synced line for `engine.elapsed`.
-    private var currentIndex: Int? {
-        guard synced, let lines else { return nil }
-        var idx: Int?
-        for (i, line) in lines.enumerated() {
-            if let t = line.time, t <= engine.elapsed { idx = i } else if line.time != nil { break }
+    /// The current synced line index for `elapsed`, via binary search over `stamps`.
+    private func currentLine(at elapsed: TimeInterval) -> Int? {
+        guard !stamps.isEmpty else { return nil }
+        var lo = 0, hi = stamps.count - 1, ans: Int?
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if stamps[mid].time <= elapsed { ans = stamps[mid].index; lo = mid + 1 }
+            else { hi = mid - 1 }
         }
-        return idx
+        return ans
     }
 
     var body: some View {
@@ -1145,28 +1222,52 @@ struct LyricsSheet: View {
         // old track's timestamps (and show the wrong lyrics).
         .task(id: track.id) {
             loading = true
-            lines = await model.lyrics(for: track)
+            let loaded = await model.lyrics(for: track)
+            lines = loaded
+            stamps = (loaded ?? []).enumerated()
+                .compactMap { i, line in line.time.map { (time: $0, index: i) } }
+                .sorted { $0.time < $1.time }
             loading = false
         }
     }
 
     private func lyricsScroll(_ lines: [LyricsLine]) -> some View {
-        ScrollViewReader { proxy in
+        // Resolve the active line ONCE per body (reads the per-tick elapsed here), then
+        // every row compares against this local — no re-scan per row.
+        let current = currentLine(at: engine.elapsed)
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
                         Text(line.text.isEmpty ? "♪" : line.text)
-                            .font(.title3.weight(index == currentIndex ? .bold : .regular))
-                            .foregroundStyle(index == currentIndex ? DesignTokens.textPrimary : DesignTokens.textSecondary)
+                            .font(.title3.weight(index == current ? .bold : .regular))
+                            .foregroundStyle(index == current ? DesignTokens.textPrimary : DesignTokens.textSecondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            // Synced lines seek to their timestamp; plain lines do nothing.
+                            .onTapGesture {
+                                if let t = line.time { engine.seek(toSeconds: t) }
+                            }
                             .id(index)
                     }
                 }
                 .padding(DesignTokens.phonePadding)
                 .padding(.bottom, 80)
             }
-            .onChange(of: currentIndex) { _, new in
-                guard let new else { return }
+            // Any drag counts as the user taking over the scroll; hold auto-scroll off
+            // and re-arm it ~3s after they stop touching.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 4).onChanged { _ in
+                    userScrolling = true
+                    resumeTask?.cancel()
+                    resumeTask = Task {
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        if !Task.isCancelled { userScrolling = false }
+                    }
+                }
+            )
+            .onChange(of: current) { _, new in
+                guard let new, !userScrolling else { return }
                 withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(new, anchor: .center) }
             }
         }

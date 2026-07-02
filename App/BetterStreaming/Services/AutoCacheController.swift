@@ -143,7 +143,14 @@ final class AutoCacheController {
         persistTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard !Task.isCancelled, let self else { return }
-            self.persistStats()
+            // Snapshot the value-type stats on the main actor, then JSON-encode +
+            // write off it so a large dict doesn't hitch the UI on every few plays.
+            let statsSnapshot = self.stats
+            let eventsSnapshot = self.playEvents
+            // UserDefaults is documented thread-safe; the marker just carries the
+            // non-Sendable handle into the detached write.
+            nonisolated(unsafe) let defaults = self.defaults
+            await Task.detached { Self.writeStats(statsSnapshot, eventsSnapshot, to: defaults) }.value
         }
     }
 
@@ -255,7 +262,14 @@ final class AutoCacheController {
             return
         }
 
-        let plan = makePlan(library: library, now: now)
+        // Score on the actor, then run the pure plan off it so a large library's
+        // sort/scan doesn't hitch the UI.
+        let scores = scoreSnapshot(library: library, now: now)
+        let protect = protectFavorites
+        let budget = budgetBytes
+        let plan = await Task.detached {
+            Self.makePlan(library: library, scores: scores, protectFavorites: protect, budgetBytes: budget)
+        }.value
         // A rapid re-schedule cancels reconcileTask, which cancels this awaiting
         // call. Bail before the heavy fetch/evict (and again before clobbering the
         // summary) so a superseded run can't double-apply over the newer one.
@@ -269,13 +283,35 @@ final class AutoCacheController {
     /// Report actual on-disk usage after a plan applies (overrides the estimate).
     func setUsage(_ bytes: Int64) { autoCachedBytes = bytes }
 
+    /// Snapshot each track's score once so the plan (and the favourites sort,
+    /// which used to recompute a score per comparison) reuse the same values.
+    private func scoreSnapshot(library: [Track], now: Date) -> [String: Double] {
+        Dictionary(library.map { ($0.id, score(for: $0.id, now: now)) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// MainActor entry point (unit tests + callers): score on the actor, then plan.
+    func makePlan(library: [Track], now: Date = Date()) -> CachePlan {
+        Self.makePlan(
+            library: library,
+            scores: scoreSnapshot(library: library, now: now),
+            protectFavorites: protectFavorites,
+            budgetBytes: budgetBytes
+        )
+    }
+
     /// Pure planning function (unit-testable): pick the highest-scoring tracks
     /// that fit the budget, and evict everything currently auto-cached that
-    /// didn't make the cut.
-    func makePlan(library: [Track], now: Date = Date()) -> CachePlan {
+    /// didn't make the cut. `nonisolated` over snapshotted inputs so `reconcile`
+    /// can run it off the main actor.
+    nonisolated static func makePlan(
+        library: [Track],
+        scores: [String: Double],
+        protectFavorites: Bool,
+        budgetBytes: Int64
+    ) -> CachePlan {
         // Candidates worth caching: ones with any listening history.
         let scored = library
-            .map { ($0, score(for: $0.id, now: now)) }
+            .map { ($0, scores[$0.id] ?? 0) }
             .filter { $0.1 > 0 }
             .sorted { $0.1 > $1.1 }
 
@@ -298,7 +334,7 @@ final class AutoCacheController {
         if protectFavorites {
             let favorites = library
                 .filter { $0.isFavorite }
-                .sorted { score(for: $0.id, now: now) > score(for: $1.id, now: now) }
+                .sorted { (scores[$0.id] ?? 0) > (scores[$1.id] ?? 0) }
             for track in favorites {
                 if track.cacheState == .cached { _ = retain(track); continue }
                 let size = bytesEstimate(for: track)
@@ -326,7 +362,9 @@ final class AutoCacheController {
 
     /// Prefer scan-provided file size. Duration is only a fallback for sources
     /// that cannot report sizes yet.
-    func bytesEstimate(for track: Track) -> Int64 {
+    func bytesEstimate(for track: Track) -> Int64 { Self.bytesEstimate(for: track) }
+
+    nonisolated static func bytesEstimate(for track: Track) -> Int64 {
         if let size = track.sizeBytes, size > 0 { return size }
         if track.durationSeconds <= 0 { return 5_000_000 }
         let bytesPerSecond: Double = 256_000 / 8
@@ -335,11 +373,23 @@ final class AutoCacheController {
 
     // MARK: Persistence
 
+    /// Synchronous write — used by `flushStats` on background so an OS-kill while
+    /// suspended can't drop the last few plays.
     private func persistStats() {
+        Self.writeStats(stats, playEvents, to: defaults)
+    }
+
+    /// Encode + write the stats snapshot. `nonisolated` so `persistStatsSoon` can
+    /// run it off the main actor over snapshotted value types.
+    nonisolated private static func writeStats(
+        _ stats: [String: PlayStat],
+        _ events: [PlayEvent],
+        to defaults: UserDefaults
+    ) {
         if let data = try? JSONEncoder().encode(stats) {
             defaults.set(data, forKey: Keys.stats)
         }
-        if let data = try? JSONEncoder().encode(playEvents) {
+        if let data = try? JSONEncoder().encode(events) {
             defaults.set(data, forKey: Keys.playEvents)
         }
     }

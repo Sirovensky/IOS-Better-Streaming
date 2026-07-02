@@ -81,6 +81,56 @@ import Testing
     #expect(metadata.artwork?.data == Data(image))
 }
 
+/// A FLAC whose Vorbis comments + picture block fill every ID3-fillable field
+/// takes the `isComplete` fast path (the secondary ID3 scan is skipped). The
+/// result must still carry all fields — the skip is behaviour-preserving.
+@Test func flacWithCompleteTagsAndArtworkParsesEveryField() {
+    let comments = vorbisComments([
+        "TITLE": "Complete Title",
+        "ARTIST": "Complete Artist",
+        "ALBUM": "Complete Album",
+        "GENRE": "Ambient",
+        "TRACKNUMBER": "3",
+        "DISCNUMBER": "2"
+    ])
+    let image = jpegBytes()
+    let picture = flacPictureBlock(mimeType: "image/jpeg", image: image)
+    let data = Data(
+        Array("fLaC".utf8)
+            + metadataBlock(type: 4, payload: comments, isLast: false)
+            + metadataBlock(type: 6, payload: picture, isLast: true)
+    )
+
+    let metadata = EmbeddedMetadataReader.parse(data, fileExtension: "flac")
+
+    #expect(metadata.title == "Complete Title")
+    #expect(metadata.artist == "Complete Artist")
+    #expect(metadata.album == "Complete Album")
+    #expect(metadata.genre == "Ambient")
+    #expect(metadata.trackNumber == 3)
+    #expect(metadata.discNumber == 2)
+    #expect(metadata.artwork?.data == Data(image))
+}
+
+/// A FLAC missing some tags still runs the ID3 fallback (isComplete is false),
+/// so an appended ID3 tag fills the gaps.
+@Test func flacWithPartialTagsFallsBackToTrailingID3() {
+    let comments = vorbisComments(["TITLE": "Vorbis Title"])
+    let id3Frames = id3TextFrame("TPE1", "ID3 Artist") + id3TextFrame("TALB", "ID3 Album")
+    let id3 = Array("ID3".utf8) + [3, 0, 0] + syncSafe(id3Frames.count) + id3Frames
+    let data = Data(
+        Array("fLaC".utf8)
+            + metadataBlock(type: 4, payload: comments, isLast: true)
+            + id3
+    )
+
+    let metadata = EmbeddedMetadataReader.parse(data, fileExtension: "flac")
+
+    #expect(metadata.title == "Vorbis Title")   // primary parse wins
+    #expect(metadata.artist == "ID3 Artist")    // fallback fills the gap
+    #expect(metadata.album == "ID3 Album")
+}
+
 @Test func mp4CoverAtomIsParsed() {
     let image = jpegBytes()
     let ilst = atom("ilst", atom("covr", binaryDataAtom(image, type: 13)))

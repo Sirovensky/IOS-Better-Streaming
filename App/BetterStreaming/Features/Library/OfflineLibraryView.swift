@@ -128,6 +128,15 @@ struct OfflineLibraryView: View {
             HStack {
                 Text("Auto-cache storage").font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
                 Spacer()
+                if model.isBatchDownloading {
+                    Button { model.cancelBatchDownloads() } label: {
+                        Label("Stop", systemImage: "stop.circle")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(DesignTokens.brandPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Stop downloads")
+                }
                 Text("\(AutoCacheController.byteLabel(used)) / \(AutoCacheController.byteLabel(budget))")
                     .font(.caption.monospacedDigit()).foregroundStyle(DesignTokens.textSecondary)
             }

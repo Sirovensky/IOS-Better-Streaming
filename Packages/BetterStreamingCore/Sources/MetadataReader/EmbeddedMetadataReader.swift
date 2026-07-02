@@ -53,6 +53,20 @@ public struct EmbeddedMediaMetadata: Equatable, Sendable {
             && artwork == nil
     }
 
+    /// Every field the secondary ID3 fallback could contribute is already set, so
+    /// `mergeMissing(parseID3(...))` would be a no-op. `durationSeconds` is left out
+    /// on purpose: the ID3 parser never yields a duration, so a nil duration must
+    /// not force a redundant full-probe ID3 scan. Lets flac/m4a skip that pass.
+    var isComplete: Bool {
+        title != nil
+            && artist != nil
+            && album != nil
+            && genre != nil
+            && trackNumber != nil
+            && discNumber != nil
+            && artwork != nil
+    }
+
     mutating func mergeMissing(from other: EmbeddedMediaMetadata?) {
         guard let other else { return }
         title = title ?? other.title
@@ -89,10 +103,12 @@ public enum EmbeddedMetadataReader {
             metadata.mergeMissing(from: parseID3(bytes))
         case "flac":
             metadata.mergeMissing(from: parseFLAC(bytes))
-            metadata.mergeMissing(from: parseID3(bytes))
+            // The FLAC Vorbis comments carry everything for a well-tagged file; only
+            // fall back to an ID3 scan of the whole probe when a field is still nil.
+            if !metadata.isComplete { metadata.mergeMissing(from: parseID3(bytes)) }
         case "m4a", "mp4", "m4v", "mov":
             metadata.mergeMissing(from: parseMP4(bytes))
-            metadata.mergeMissing(from: parseID3(bytes))
+            if !metadata.isComplete { metadata.mergeMissing(from: parseID3(bytes)) }
         case "ogg", "opus":
             metadata.mergeMissing(from: parseOggVorbis(bytes))
         default:
@@ -261,7 +277,7 @@ private extension EmbeddedMetadataReader {
 
             let nextOffset = contentStart + frameSize
             if let content = frameContent(
-                Array(body[contentStart..<nextOffset]),
+                body[contentStart..<nextOffset],
                 major: major,
                 formatFlags: formatFlags
             ) {
@@ -313,9 +329,9 @@ private extension EmbeddedMetadataReader {
     /// them would parse as mojibake). Otherwise strip the group byte and the
     /// data-length-indicator that sit ahead of the real payload, and reverse
     /// frame-level unsynchronisation (v2.4 only) so text/APIC bytes are intact.
-    static func frameContent(_ raw: [UInt8], major: UInt8, formatFlags: UInt8) -> [UInt8]? {
-        guard major >= 3 else { return raw }
-        var content = raw
+    static func frameContent(_ raw: ArraySlice<UInt8>, major: UInt8, formatFlags: UInt8) -> [UInt8]? {
+        guard major >= 3 else { return Array(raw) }
+        var content = Array(raw)
         if major == 4 {
             if (formatFlags & 0x08) != 0 || (formatFlags & 0x04) != 0 { return nil }  // compressed / encrypted
             if (formatFlags & 0x40) != 0, !content.isEmpty { content.removeFirst() }   // group identity byte
@@ -867,13 +883,26 @@ private extension EmbeddedMetadataReader {
 
     static func startsWith(_ bytes: [UInt8], pattern: [UInt8], at offset: Int) -> Bool {
         guard offset >= 0, offset + pattern.count <= bytes.count else { return false }
-        return Array(bytes[offset..<(offset + pattern.count)]) == pattern
+        // Compare in place — the old `Array(bytes[...]) == pattern` allocated a
+        // fresh Array on every probed offset (once per byte in `firstIndex`).
+        var i = 0
+        while i < pattern.count {
+            if bytes[offset + i] != pattern[i] { return false }
+            i += 1
+        }
+        return true
     }
 
     static func firstIndex(of pattern: [UInt8], in bytes: [UInt8]) -> Int? {
-        guard !pattern.isEmpty, bytes.count >= pattern.count else { return nil }
-        for offset in 0...(bytes.count - pattern.count) where startsWith(bytes, pattern: pattern, at: offset) {
-            return offset
+        guard let first = pattern.first, bytes.count >= pattern.count else { return nil }
+        let last = bytes.count - pattern.count
+        var offset = 0
+        while offset <= last {
+            // First-byte fast reject skips the full compare on the common miss.
+            if bytes[offset] == first, startsWith(bytes, pattern: pattern, at: offset) {
+                return offset
+            }
+            offset += 1
         }
         return nil
     }

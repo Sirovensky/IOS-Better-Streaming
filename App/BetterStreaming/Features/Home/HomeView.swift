@@ -1,8 +1,24 @@
 import SwiftUI
 
+/// View-local memo for a revision-keyed track list. A plain class held in `@State`
+/// (like DetailViews' SectionCache): populating it inside `body` doesn't invalidate
+/// the view, so the O(n) map+filter+sort runs once per library revision, not once
+/// per body pass.
+private final class TrackRevisionMemo {
+    private var rev: Int?
+    private(set) var tracks: [Track] = []
+
+    func resolve(rev: Int, build: () -> [Track]) {
+        if self.rev == rev { return }
+        tracks = build()
+        self.rev = rev
+    }
+}
+
 struct HomeView: View {
     @Environment(AppModel.self) private var model
     @State private var path: [LibraryRoute] = []
+    @State private var heavyRotationCache = TrackRevisionMemo()
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -61,28 +77,43 @@ struct HomeView: View {
 
     // MARK: Empty state (no library yet)
 
+    @ViewBuilder
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 18) {
             Spacer(minLength: 40)
-            Image(systemName: "music.note.house")
-                .font(.system(size: 52))
-                .foregroundStyle(DesignTokens.brandPrimary)
-            Text(model.isBootstrapping || model.isLoadingSavedLibrary ? "Loading your library…" : (model.hasSources ? "Library is empty" : "Add your music"))
-                .font(.title2.weight(.bold))
-                .foregroundStyle(DesignTokens.textPrimary)
-            Text(model.isBootstrapping || model.isLoadingSavedLibrary
-                 ? "Opening your saved library on this device."
-                 : (model.hasSources
-                    ? "Use Sources to scan or refresh your server."
-                    : "Connect your NAS or server to start listening to your own library."))
-                .font(.subheadline)
-                .foregroundStyle(DesignTokens.textSecondary)
-            if !model.hasSources && !model.isBootstrapping {
-                NavigationLink(value: LibraryRoute.sources) {
-                    Label("Add a source", systemImage: "externaldrive.badge.plus").frame(maxWidth: .infinity)
+            if model.isScanning && !(model.isBootstrapping || model.isLoadingSavedLibrary) {
+                // The very first scan is running — show live progress instead of a stale
+                // "empty / use Sources" prompt the user can't act on yet.
+                HStack(spacing: 12) {
+                    ProgressView()
+                    Text("Scanning your library…")
+                        .font(.title2.weight(.bold))
+                        .foregroundStyle(DesignTokens.textPrimary)
                 }
-                .buttonStyle(PrimaryActionButtonStyle())
-                .padding(.top, 4)
+                Text(model.sources.first?.lastScanLabel ?? "Reading your music…")
+                    .font(.subheadline)
+                    .foregroundStyle(DesignTokens.textSecondary)
+            } else {
+                Image(systemName: "music.note.house")
+                    .font(.system(size: 52))
+                    .foregroundStyle(DesignTokens.brandPrimary)
+                Text(model.isBootstrapping || model.isLoadingSavedLibrary ? "Loading your library…" : (model.hasSources ? "Library is empty" : "Add your music"))
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(DesignTokens.textPrimary)
+                Text(model.isBootstrapping || model.isLoadingSavedLibrary
+                     ? "Opening your saved library on this device."
+                     : (model.hasSources
+                        ? "Use Sources to scan or refresh your server."
+                        : "Connect your NAS or server to start listening to your own library."))
+                    .font(.subheadline)
+                    .foregroundStyle(DesignTokens.textSecondary)
+                if !model.hasSources && !model.isBootstrapping {
+                    NavigationLink(value: LibraryRoute.sources) {
+                        Label("Add a source", systemImage: "externaldrive.badge.plus").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(PrimaryActionButtonStyle())
+                    .padding(.top, 4)
+                }
             }
             Spacer()
         }
@@ -175,7 +206,8 @@ struct HomeView: View {
 
     @ViewBuilder
     private var heavyRotationRail: some View {
-        let top = heavyRotation
+        let _ = heavyRotationCache.resolve(rev: model.libraryRevision, build: computeHeavyRotation)
+        let top = heavyRotationCache.tracks
         if !top.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 SectionHeader(title: "Heavy Rotation", detail: "The songs you keep coming back to",
@@ -202,7 +234,7 @@ struct HomeView: View {
         }
     }
 
-    private var heavyRotation: [Track] {
+    private func computeHeavyRotation() -> [Track] {
         guard !model.recentlyPlayed.isEmpty else { return [] }
         return model.audioTracks
             .map { ($0, model.autoCache.score(for: $0.id)) }
@@ -312,9 +344,11 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 12) {
             SectionHeader(title: "Your Library")
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-                statTile(value: "\(stats.songs)", label: "Songs", glyph: "music.note")
-                statTile(value: "\(stats.albums)", label: "Albums", glyph: "square.stack")
-                statTile(value: "\(stats.artists)", label: "Artists", glyph: "music.mic")
+                // Count tiles navigate into the matching library list; the derived-stat
+                // tiles below (duration / plays / listened) are read-only.
+                navStatTile(value: "\(stats.songs)", label: "Songs", glyph: "music.note", route: .allSongs)
+                navStatTile(value: "\(stats.albums)", label: "Albums", glyph: "square.stack", route: .allAlbums)
+                navStatTile(value: "\(stats.artists)", label: "Artists", glyph: "music.mic", route: .allArtists)
                 if stats.totalDurationSeconds > 0 {
                     statTile(value: Self.durationLabel(stats.totalDurationSeconds), label: "In your library", glyph: "clock")
                 }
@@ -325,13 +359,32 @@ struct HomeView: View {
                     statTile(value: Self.durationLabel(stats.listenedSeconds), label: "Listened", glyph: "headphones")
                 }
                 if stats.favorites > 0 {
-                    statTile(value: "\(stats.favorites)", label: "Favorites", glyph: "star.fill")
+                    navStatTile(value: "\(stats.favorites)", label: "Favorites", glyph: "star.fill", route: .favorites)
                 }
             }
         }
     }
 
+    /// A tappable count tile: opens the matching library list. The chevron + button
+    /// trait mark it apart from the read-only stat tiles.
+    private func navStatTile(value: String, label: String, glyph: String, route: LibraryRoute) -> some View {
+        Button { path.append(route) } label: {
+            statTileBody(value: value, label: label, glyph: glyph, showsChevron: true)
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(value) \(label)")
+        .accessibilityHint("Opens \(label)")
+        .accessibilityAddTraits(.isButton)
+    }
+
     private func statTile(value: String, label: String, glyph: String) -> some View {
+        statTileBody(value: value, label: label, glyph: glyph, showsChevron: false)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(value) \(label)")
+    }
+
+    private func statTileBody(value: String, label: String, glyph: String, showsChevron: Bool) -> some View {
         HStack(spacing: 12) {
             Image(systemName: glyph)
                 .font(.title3)
@@ -349,11 +402,14 @@ struct HomeView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(DesignTokens.textTertiary)
+            }
         }
         .padding(12)
         .surfaceCard(fill: DesignTokens.surfaceCard)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(value) \(label)")
     }
 
     /// "12 hr", "1.2k hr", "45 min" — friendly, compact.

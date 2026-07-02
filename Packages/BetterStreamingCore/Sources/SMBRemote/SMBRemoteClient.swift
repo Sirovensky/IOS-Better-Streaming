@@ -470,17 +470,20 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
     ) async throws -> T {
         let gate = ResumeGate()
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            let sleeper = Task {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                if gate.tryResume() { continuation.resume(throwing: RemoteFileSystemError.timeout) }
+            }
             Task {
                 do {
                     let value = try await op()
-                    if gate.tryResume() { continuation.resume(returning: value) }
+                    // Cancel the sleeper the instant we win the gate so it doesn't
+                    // linger (and hold its continuation capture) for the full
+                    // timeout after the op already returned.
+                    if gate.tryResume() { sleeper.cancel(); continuation.resume(returning: value) }
                 } catch {
-                    if gate.tryResume() { continuation.resume(throwing: error) }
+                    if gate.tryResume() { sleeper.cancel(); continuation.resume(throwing: error) }
                 }
-            }
-            Task {
-                try? await Task.sleep(nanoseconds: nanoseconds)
-                if gate.tryResume() { continuation.resume(throwing: RemoteFileSystemError.timeout) }
             }
         }
     }
@@ -565,21 +568,22 @@ public actor SMBRemoteClient: RemoteFileSystemClient {
     ) async throws -> any SMBRemoteTransport {
         let gate = ResumeGate()
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<any SMBRemoteTransport, Error>) in
+            let sleeper = Task {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                if gate.tryResume() { continuation.resume(throwing: RemoteFileSystemError.timeout) }
+            }
             Task {
                 do {
                     let transport = try await factory(config, auth)
                     if gate.tryResume() {
+                        sleeper.cancel()
                         continuation.resume(returning: transport)
                     } else {
                         transport.disconnect()   // timed out already — don't leak the late connection
                     }
                 } catch {
-                    if gate.tryResume() { continuation.resume(throwing: error) }
+                    if gate.tryResume() { sleeper.cancel(); continuation.resume(throwing: error) }
                 }
-            }
-            Task {
-                try? await Task.sleep(nanoseconds: nanoseconds)
-                if gate.tryResume() { continuation.resume(throwing: RemoteFileSystemError.timeout) }
             }
         }
     }

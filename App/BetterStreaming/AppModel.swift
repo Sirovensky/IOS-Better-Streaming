@@ -53,6 +53,9 @@ final class AppModel {
     private(set) var isBootstrapping = true
     private(set) var isLoadingSavedLibrary = false
     private(set) var isScanning = false
+    /// True while a batch download (Download All for an album/artist) is in flight,
+    /// so the UI can offer a Stop button wired to `cancelBatchDownloads()`.
+    private(set) var isBatchDownloading = false
 
     var offlineMode: Bool {
         didSet {
@@ -82,6 +85,14 @@ final class AppModel {
     /// result keyed on this, so they recompute at most once per change instead of on
     /// every SwiftUI render — the per-render O(N) regroup/stats hitched large libraries.
     private(set) var libraryRevision = 0
+    /// Content-only revision: bumped ONLY when track metadata or membership changes
+    /// (scan, edit, source add/remove — i.e. `rebuildIndex`), NOT on per-play cache/
+    /// favorite/stat churn. Caches whose result is pure over metadata (songs sort,
+    /// genre consensus, needs-attention, available genres) key on THIS so a track
+    /// start no longer re-runs a 10k-track localized sort. `libraryRevision` stays
+    /// the combined counter (bumped by either) so albums/stats and the views keyed
+    /// on it keep invalidating on cache/stat changes too.
+    private(set) var contentRevision = 0
     @ObservationIgnored private var _albumsCacheRev = -1
     @ObservationIgnored private var _albumsCache: [Album] = []
     @ObservationIgnored private var _songsSortedRev = -1
@@ -90,6 +101,23 @@ final class AppModel {
     @ObservationIgnored private var _needsAttentionCache: [Track] = []
     @ObservationIgnored private var _genreConsensusRev = -1
     @ObservationIgnored private var _genreConsensusCache: [String: String] = [:]
+    @ObservationIgnored private var _availableGenresRev = -1
+    @ObservationIgnored private var _availableGenresCache: [String] = []
+    // Home shelves — revision-keyed like `_albumsCache`. Recently-added / on-this-day
+    // depend on membership + cache/artwork state → keyed on the combined revision;
+    // on-this-day also re-keys on the calendar day so it flips at midnight. Have-not-
+    // heard / buried-treasure depend on play stats → keyed on (content, stats).
+    @ObservationIgnored private var _recentlyAddedRev = -1
+    @ObservationIgnored private var _recentlyAddedCache: [Album] = []
+    @ObservationIgnored private var _onThisDayRev = -1
+    @ObservationIgnored private var _onThisDayDayKey = -1
+    @ObservationIgnored private var _onThisDayCache: [Album] = []
+    @ObservationIgnored private var _haveNotHeardContentRev = -1
+    @ObservationIgnored private var _haveNotHeardStatsRev = -1
+    @ObservationIgnored private var _haveNotHeardCache: [Track] = []
+    @ObservationIgnored private var _buriedTreasureContentRev = -1
+    @ObservationIgnored private var _buriedTreasureStatsRev = -1
+    @ObservationIgnored private var _buriedTreasureCache: [Track] = []
     @ObservationIgnored private var _statsCacheRev = -1
     @ObservationIgnored private var _statsCache = LibraryStats(
         songs: 0, albums: 0, artists: 0, totalDurationSeconds: 0,
@@ -125,6 +153,8 @@ final class AppModel {
     /// Warms the next queued track so advancing/skip is instant. Cancelled and
     /// replaced whenever the current track changes.
     private var prefetchTask: Task<Void, Never>?
+    /// The in-flight batch-download task (Download All), so it can be cancelled.
+    @ObservationIgnored private var batchDownloadTask: Task<Void, Never>?
 
     var hasSources: Bool { !sources.isEmpty }
     var hasLibrary: Bool { !tracks.isEmpty }
@@ -265,7 +295,8 @@ final class AppModel {
         let snapshot = await library.bootstrap()
         sourceConfigs = snapshot.configs
         tracks = snapshot.tracks
-        classicalCreditsByTrack = await library.loadClassicalCredits()
+        // Classical credits load once in post-launch maintenance (where they can be
+        // pruned against the fully-loaded library) — no duplicate load here.
         #if DEBUG
         await applyTestCredentialsIfNeeded()
         autoplayForTestingIfNeeded()
@@ -338,7 +369,11 @@ final class AppModel {
             // service copy so a download/queue started in the launch window isn't
             // clobbered back to the on-disk snapshot.
             self.tracks = self.mergingOptimisticCacheStates(into: refreshed)
-            self.rebuildIndex()
+            // This snapshot only refreshes cacheState (same membership + order, so
+            // the id→index map stays valid) — a full rebuildIndex (artist regex +
+            // haystack over the whole library) would be pure waste. Just invalidate
+            // the state-keyed caches.
+            self.libraryRevision &+= 1
             self.rebuildSources()
         }
     }
@@ -356,8 +391,12 @@ final class AppModel {
             let updated = try await library.scan(sourceID: sourceID) { [weak self] count in
                 Task { @MainActor in
                     guard let self, self.isScanning else { return }
-                    self.sourceMessages[sourceID] = "Scanning… \(count) files"
-                    self.rebuildSources()
+                    let label = "Scanning… \(count) files"
+                    self.sourceMessages[sourceID] = label
+                    // Rewrite only this source's row label — a full rebuildSources
+                    // (O(N) folder regroup over the whole library) per 20-file tick
+                    // was the scan-progress hitch.
+                    self.updateSourceScanLabel(sourceID: sourceID, label)
                 }
             }
             tracks = updated
@@ -584,6 +623,14 @@ final class AppModel {
         }
     }
 
+    /// Cheap in-place label rewrite for one source's row during a scan — touches
+    /// only `lastScanLabel`, avoiding a full `rebuildSources()` (which recomputes
+    /// folder counts by running `albumFolderComponents` over the whole library).
+    private func updateSourceScanLabel(sourceID: String, _ label: String) {
+        guard let i = sources.firstIndex(where: { $0.id == sourceID }) else { return }
+        sources[i].lastScanLabel = label
+    }
+
     private func rebuildIndex() {
         trackIndex = Dictionary(tracks.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
         // Build the artist index here (once), running the credited-artist regex a
@@ -617,7 +664,8 @@ final class AppModel {
         }
         searchHaystack = haystack
         refreshPlaylistArtwork()   // playlist tiles derive from resolved tracks
-        libraryRevision &+= 1   // invalidate albums/stats caches
+        contentRevision &+= 1   // metadata/membership changed → invalidate content-pure caches
+        libraryRevision &+= 1   // invalidate albums/stats + combined-keyed views
     }
 
     // MARK: Derived collections
@@ -644,7 +692,7 @@ final class AppModel {
     /// sort of a few-thousand-track library is far too slow to redo each time (it was
     /// the 2-3s stall when opening Songs), so it's cached like `albums`/`libraryStats`.
     var songsSortedByTitle: [Track] {
-        let rev = libraryRevision   // registers observation; recompute once per change
+        let rev = contentRevision   // pure over metadata → content revision only
         if _songsSortedRev != rev {
             _songsSortedCache = audioTracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
             _songsSortedRev = rev
@@ -841,7 +889,7 @@ final class AppModel {
     /// mix of sub-genres (Amaranthe: rock / symphonic metal / heavy metal) gets
     /// one consensus family, so a station pulls their whole catalog.
     var genreConsensusByArtist: [String: String] {
-        let rev = libraryRevision   // registers observation; recompute once per change
+        let rev = contentRevision   // pure over metadata → content revision only
         if _genreConsensusRev != rev { _genreConsensusCache = computeGenreConsensus(); _genreConsensusRev = rev }
         return _genreConsensusCache
     }
@@ -860,8 +908,15 @@ final class AppModel {
     }
 
     /// Canonical genres present in the library (sorted), for the Songs filter.
+    /// Cached like `genreConsensusByArtist` — pure over metadata, so keyed on the
+    /// content revision (an every-render Set-build over ~3k tracks was wasteful).
     var availableGenres: [String] {
-        Set(audioTracks.compactMap { MetadataGrouping.canonicalGenre($0.genre) }).sorted()
+        let rev = contentRevision
+        if _availableGenresRev != rev {
+            _availableGenresCache = Set(audioTracks.compactMap { MetadataGrouping.canonicalGenre($0.genre) }).sorted()
+            _availableGenresRev = rev
+        }
+        return _availableGenresCache
     }
 
     func tracks(forGenre genre: String) -> [Track] {
@@ -892,6 +947,11 @@ final class AppModel {
 
     var recentlyPlayed: [Track] { recentlyPlayedIDs.compactMap(track) }
     var recentlyAddedAlbums: [Album] {
+        let rev = libraryRevision   // membership + cache/artwork state
+        if _recentlyAddedRev != rev { _recentlyAddedCache = computeRecentlyAddedAlbums(); _recentlyAddedRev = rev }
+        return _recentlyAddedCache
+    }
+    private func computeRecentlyAddedAlbums() -> [Album] {
         var grouped: [String: [Track]] = [:]
         for track in tracks where track.kind == .audio { grouped[track.albumID, default: []].append(track) }
         return grouped.values.compactMap { group -> (album: Album, recency: Double)? in
@@ -920,33 +980,57 @@ final class AppModel {
     /// Audio you imported but never played. Sorted by a per-session-stable key so
     /// the rail spreads across the library yet doesn't reshuffle while scrolling.
     var haveNotHeard: [Track] {
-        audioTracks
-            .filter { autoCache.stat(for: $0.id).playCount == 0 }
-            .sorted { $0.id.hashValue < $1.id.hashValue }
-            .prefix(12)
-            .map { $0 }
+        let cRev = contentRevision, sRev = autoCache.statsRevision
+        if _haveNotHeardContentRev != cRev || _haveNotHeardStatsRev != sRev {
+            _haveNotHeardCache = audioTracks
+                .filter { autoCache.stat(for: $0.id).playCount == 0 }
+                .sorted { $0.id.hashValue < $1.id.hashValue }
+                .prefix(12)
+                .map { $0 }
+            _haveNotHeardContentRev = cRev
+            _haveNotHeardStatsRev = sRev
+        }
+        return _haveNotHeardCache
     }
 
     /// Tracks you used to play but haven't returned to in 90+ days, ranked so
     /// former favourites (more historical plays) surface first.
     var buriedTreasure: [Track] {
-        let cutoff = Date().timeIntervalSince1970 - 90 * 24 * 3600
-        return audioTracks
-            .compactMap { track -> (Track, Double)? in
-                let stat = autoCache.stat(for: track.id)
-                guard stat.playCount > 0, stat.lastPlayedAtEpoch > 0,
-                      stat.lastPlayedAtEpoch < cutoff else { return nil }
-                return (track, log2(Double(stat.playCount) + 1))
-            }
-            .sorted { $0.1 > $1.1 }
-            .prefix(12)
-            .map(\.0)
+        let cRev = contentRevision, sRev = autoCache.statsRevision
+        if _buriedTreasureContentRev != cRev || _buriedTreasureStatsRev != sRev {
+            let cutoff = Date().timeIntervalSince1970 - 90 * 24 * 3600
+            _buriedTreasureCache = audioTracks
+                .compactMap { track -> (Track, Double)? in
+                    let stat = autoCache.stat(for: track.id)
+                    guard stat.playCount > 0, stat.lastPlayedAtEpoch > 0,
+                          stat.lastPlayedAtEpoch < cutoff else { return nil }
+                    return (track, log2(Double(stat.playCount) + 1))
+                }
+                .sorted { $0.1 > $1.1 }
+                .prefix(12)
+                .map(\.0)
+            _buriedTreasureContentRev = cRev
+            _buriedTreasureStatsRev = sRev
+        }
+        return _buriedTreasureCache
     }
 
     /// Albums added to the library on this calendar day in a previous year.
     var onThisDayAlbums: [Album] {
+        let rev = libraryRevision   // membership + cache/artwork state
         let calendar = Calendar.current
         let now = Date()
+        // Re-key on the calendar day too, so a session left open across midnight
+        // rolls to the new day instead of showing yesterday's shelf.
+        let dayKey = calendar.component(.month, from: now) * 100 + calendar.component(.day, from: now)
+        if _onThisDayRev != rev || _onThisDayDayKey != dayKey {
+            _onThisDayCache = computeOnThisDayAlbums(calendar: calendar, now: now)
+            _onThisDayRev = rev
+            _onThisDayDayKey = dayKey
+        }
+        return _onThisDayCache
+    }
+    private func computeOnThisDayAlbums(calendar: Calendar, now: Date) -> [Album] {
         let today = calendar.dateComponents([.month, .day], from: now)
         let currentYear = calendar.component(.year, from: now)
         var grouped: [String: [Track]] = [:]
@@ -1439,7 +1523,7 @@ final class AppModel {
         // Cached revision-keyed: this is read in SettingsView.body, which also
         // re-evaluates on every EQ-slider frame — an uncached O(N) scan over ~3k
         // tracks there was a per-frame hitch.
-        let rev = libraryRevision
+        let rev = contentRevision   // pure over metadata → content revision only
         if _needsAttentionCacheRev != rev {
             _needsAttentionCache = audioTracks.filter { track in
                 track.artist == "Unknown Artist"
@@ -1670,13 +1754,53 @@ final class AppModel {
         guard !pending.isEmpty else { return }
         for t in pending where trackIndex[t.id] != nil { tracks[trackIndex[t.id]!].cacheState = .downloading }
         libraryRevision &+= 1
-        Task { [weak self] in
+        isBatchDownloading = true
+        batchDownloadTask = Task { [weak self] in
             guard let self else { return }
-            for t in pending {
+            defer { self.isBatchDownloading = false; self.batchDownloadTask = nil }
+            // Consecutive failures per source; 3 in a row means the source is
+            // likely down, so mark it unreachable and bail instead of grinding
+            // through the whole album against a dead NAS.
+            var consecutiveFailures: [String: Int] = [:]
+            for (idx, t) in pending.enumerated() {
+                if Task.isCancelled {
+                    self.resetDownloading(pending[idx...])   // Stop tapped — release the remainder
+                    return
+                }
                 let ok = await self.library.ensureCached(t)
                 self.setCacheState(trackID: t.id, ok ? .cached : .failed)
+                if ok {
+                    consecutiveFailures[t.sourceID] = 0
+                } else {
+                    let n = (consecutiveFailures[t.sourceID] ?? 0) + 1
+                    consecutiveFailures[t.sourceID] = n
+                    if n >= 3 {
+                        self.markSourceUnreachable(t.sourceID)
+                        self.resetDownloading(pending[(idx + 1)...])   // reset the untouched remainder
+                        return
+                    }
+                }
             }
         }
+    }
+
+    /// Cancel an in-flight batch download; the task resets any tracks it hasn't
+    /// reached yet from `.downloading` back to `.remoteOnly`.
+    func cancelBatchDownloads() {
+        batchDownloadTask?.cancel()
+    }
+
+    /// Return still-optimistically-`.downloading` tracks in `targets` to
+    /// `.remoteOnly` (a batch was cancelled or bailed), so none are left spinning.
+    private func resetDownloading(_ targets: ArraySlice<Track>) {
+        var changed = false
+        for t in targets {
+            guard let i = trackIndex[t.id], tracks.indices.contains(i),
+                  tracks[i].cacheState == .downloading else { continue }
+            tracks[i].cacheState = .remoteOnly
+            changed = true
+        }
+        if changed { libraryRevision &+= 1 }
     }
 
     private func removeDownloads(_ targets: [Track]) {
@@ -1795,6 +1919,10 @@ final class AppModel {
     }
 
     private func wireEngine() {
+        engine.onCrossfadeActiveChanged = { [weak self] active in
+            guard let self else { return }
+            Task { await self.library.setPreferPreciseStreamDuration(active) }
+        }
         engine.resolvePlayerItem = { [weak self] track in
             guard let self else { return nil }
             let item = await self.library.playableItem(for: track, offline: self.offlineMode)

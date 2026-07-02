@@ -40,7 +40,12 @@ struct RadioView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        // Each of these walks the whole library; the section builders referenced them
+        // again, so they ran several times per render. Resolve each ONCE per body pass.
+        let artistStations = self.artistStations
+        let genreStations = self.genreStations
+        let seedTracks = self.seedTracks
+        return NavigationStack {
             Group {
                 if model.audioTracks.isEmpty {
                     // Outside the ScrollView: Spacers collapse in a scroll view, so an
@@ -50,9 +55,9 @@ struct RadioView: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 24) {
                             startStation
-                            if !artistStations.isEmpty { artistSection }
-                            if !genreStations.isEmpty { genreSection }
-                            if !seedTracks.isEmpty { similarSection }
+                            if !artistStations.isEmpty { artistSection(artistStations) }
+                            if !genreStations.isEmpty { genreSection(genreStations) }
+                            if !seedTracks.isEmpty { similarSection(seedTracks) }
                         }
                         .padding(DesignTokens.phonePadding)
                         .padding(.bottom, 120)
@@ -108,7 +113,7 @@ struct RadioView: View {
         .buttonStyle(.plain)
     }
 
-    private var artistSection: some View {
+    private func artistSection(_ artistStations: [Artist]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             SectionHeader(title: "Artist Stations")
             ScrollView(.horizontal) {
@@ -140,7 +145,7 @@ struct RadioView: View {
         }
     }
 
-    private var genreSection: some View {
+    private func genreSection(_ genreStations: [GenreStation]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             SectionHeader(title: "Genre Stations")
             ScrollView(.horizontal) {
@@ -177,7 +182,7 @@ struct RadioView: View {
         }
     }
 
-    private var similarSection: some View {
+    private func similarSection(_ seedTracks: [Track]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionHeader(title: "Similar Stations")
             ForEach(seedTracks) { track in

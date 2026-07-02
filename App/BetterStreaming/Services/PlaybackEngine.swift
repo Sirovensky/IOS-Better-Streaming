@@ -112,6 +112,11 @@ final class PlaybackEngine {
     /// Reports a track's real duration once the asset resolves it, so the library
     /// (which has no duration from a tag-only scan) can persist + display it.
     var onDurationResolved: (@MainActor (String, Double) -> Void)?
+    /// Called when the crossfade setting changes, with whether a crossfade is now
+    /// active. The owner wires it to the streaming service's `preferPreciseDuration`
+    /// so streamed items load precise duration/timing while crossfade needs an
+    /// accurate track end. Called from init + the enhancement hooks below.
+    var onCrossfadeActiveChanged: (@MainActor (Bool) -> Void)?
 
     // MARK: Private
 
@@ -183,6 +188,18 @@ final class PlaybackEngine {
     /// Consecutive automatic stall recoveries for the current item; reset once it
     /// actually plays. Bounds runaway re-resolve loops on a truly dead source.
     private var recoveryAttempts = 0
+    /// Consecutive auto-skips past a track that failed to load after a non-user
+    /// advance. Bounds an unattended session against one dead file mid-queue: skip
+    /// forward up to `maxConsecutiveFailureSkips`, then stop as before. Reset once a
+    /// track actually reaches `.readyToPlay`.
+    private var consecutiveFailureSkips = 0
+    private static let maxConsecutiveFailureSkips = 2
+    /// True while the CURRENT load was reached via a non-user auto-advance, so a
+    /// failure can decide whether it's allowed to skip forward rather than halt.
+    private var currentLoadWasAutoAdvance = false
+    /// Keep the failed track's error message visible across the skip's next load
+    /// (`startCurrentItem` otherwise clears it as the new item begins resolving).
+    private var preserveErrorOnNextLoad = false
     /// How long the player may sit buffering (with no progress) before we rebuild
     /// the current item on a fresh connection. Longer than the SMB read timeout +
     /// reconnect (~12s) so the lower layer gets first chance to self-heal.
@@ -198,6 +215,14 @@ final class PlaybackEngine {
         observeInterruptions()
         observeRouteChanges()
         observeMediaServicesReset()
+        syncCrossfadeActive()
+    }
+
+    /// Whether a crossfade is currently configured (matches the 0.1 s threshold
+    /// used across the fade logic). Streamed items prefer precise duration/timing
+    /// while this is true so the end-of-track fade lands accurately.
+    private func syncCrossfadeActive() {
+        onCrossfadeActiveChanged?(enhancements.crossfadeSeconds > 0.1)
     }
 
     // Note: no explicit `deinit` to remove the periodic time observer — AVPlayer
@@ -243,6 +268,7 @@ final class PlaybackEngine {
         self.lastErrorMessage = nil
         self.needsInitialLoad = true
         self.currentArtwork = nil
+        clearArtworkCache()
         let track = queue[index]
         let generation = resolveGeneration
         if let loadArtwork {
@@ -612,6 +638,7 @@ final class PlaybackEngine {
     func gaplessSettingChanged() {
         clearPreload()
         preloadNextIfGapless()
+        syncCrossfadeActive()
     }
 
     /// Remove the preloaded next item from the queue and forget it. Called on any
@@ -694,6 +721,7 @@ final class PlaybackEngine {
         resolveGeneration += 1
         let generation = resolveGeneration
         recoveryAttempts = 0
+        consecutiveFailureSkips = 0
         isSeeking = false
         pendingSeekSeconds = nil
         resumeSeekTarget = 0
@@ -704,6 +732,7 @@ final class PlaybackEngine {
         duration = track?.durationSeconds ?? 0
         lastErrorMessage = nil
         currentArtwork = nil
+        clearArtworkCache()
         attachItemObservers(item, generation: generation)
         // The item is already playing (it was preloaded past readyToPlay), so the
         // status observer won't re-fire — count the play directly here.
@@ -721,8 +750,11 @@ final class PlaybackEngine {
 
     // MARK: Item lifecycle
 
-    private func startCurrentItem(autoPlay: Bool, resumeAt: Double = 0) {
+    private func startCurrentItem(autoPlay: Bool, resumeAt: Double = 0, automaticAdvance: Bool = false) {
         guard let track = currentTrack else { return }
+        currentLoadWasAutoAdvance = automaticAdvance
+        // A user-initiated selection breaks any auto-skip chain.
+        if !automaticAdvance { consecutiveFailureSkips = 0 }
         #if DEBUG
         AppLog.playback.debug("BETTERSTREAMING_PLAY start title=\(track.title) ext=\(track.fileExtension, privacy: .public) source=\(track.sourceID, privacy: .public) remote=\(track.remotePath ?? "nil") resumeAt=\(resumeAt)")
         #endif
@@ -738,10 +770,17 @@ final class PlaybackEngine {
         elapsed = resumeAt
         resumeSeekTarget = resumeAt
         duration = track.durationSeconds
-        lastErrorMessage = nil
+        // A failure-skip keeps the failed track's message on screen while the next
+        // track loads; every other load clears it.
+        if preserveErrorOnNextLoad {
+            preserveErrorOnNextLoad = false
+        } else {
+            lastErrorMessage = nil
+        }
 
         // Load artwork in parallel with asset resolution.
         currentArtwork = nil
+        clearArtworkCache()
         fetchArtwork(for: track, generation: generation)
 
         Task { [weak self] in
@@ -764,7 +803,7 @@ final class PlaybackEngine {
                 #if DEBUG
                 AppLog.playback.debug("BETTERSTREAMING_PLAY resolve_nil title=\(track.title) ext=\(track.fileExtension, privacy: .public)")
                 #endif
-                self.stopAfterFailure()
+                self.handleLoadFailure()
                 return
             }
             #if DEBUG
@@ -805,7 +844,11 @@ final class PlaybackEngine {
     /// Per-item EQ audio mix. Safe to set on a not-yet-current (preloaded) item.
     private func configureItemAudio(_ item: AVPlayerItem) {
         let e = enhancements
-        item.audioMix = e.eqEnabled
+        // A flat EQ (all bands + preamp at 0) is audibly a no-op, so skip the
+        // processing tap entirely — the tap adds a per-sample cost and a decode
+        // path we don't want on for nothing.
+        let hasEffect = e.eqEnabled && (e.eqBandsDB.contains { abs($0) > 0.01 } || abs(e.preampDB) > 0.01)
+        item.audioMix = hasEffect
             ? AudioEQTap.makeAudioMix(bandsDB: e.eqBandsDB, preampDB: e.preampDB)
             : nil
     }
@@ -928,6 +971,7 @@ final class PlaybackEngine {
     /// seek-in-place (instant for a local/cached file).
     func enhancementsDidChange() {
         applyVolume()
+        syncCrossfadeActive()
         // Refresh the already-preloaded next item's EQ mix too, else it plays its
         // whole duration with the stale mix (gaplessAdvanced skips configureItemAudio).
         if let next = preloadedNextItem { configureItemAudio(next) }
@@ -985,6 +1029,9 @@ final class PlaybackEngine {
                 switch status {
                 case .readyToPlay:
                     self.isBuffering = false
+                    // A track genuinely started: clear any prior failure state.
+                    self.consecutiveFailureSkips = 0
+                    self.lastErrorMessage = nil
                     if let assetDuration = self.player.currentItem?.duration.seconds,
                        assetDuration.isFinite, assetDuration > 0 {
                         self.duration = assetDuration
@@ -1013,7 +1060,7 @@ final class PlaybackEngine {
                     let itemError = self.player.currentItem?.error?.localizedDescription ?? "nil"
                     let errLog = self.player.currentItem?.errorLog()?.events.last
                     streamLog.error("item_failed err=\(itemError, privacy: .public) log=\(errLog?.errorStatusCode ?? 0):\(errLog?.errorComment ?? "nil", privacy: .public)")
-                    self.stopAfterFailure()
+                    self.handleLoadFailure()
                 default:
                     break
                 }
@@ -1096,7 +1143,7 @@ final class PlaybackEngine {
         let knownDuration = max(duration, itemDuration.isFinite ? itemDuration : 0)
         if playedSeconds < 0.75 && knownDuration < 0.75 {
             lastErrorMessage = "Playback ended before audio started."
-            stopAfterFailure()
+            handleLoadFailure()
             return
         }
         advance(userInitiated: false)
@@ -1108,15 +1155,30 @@ final class PlaybackEngine {
         let autoPlay = userInitiated ? isPlaying : true
         if currentIndex < queue.count - 1 {
             currentIndex += 1
-            startCurrentItem(autoPlay: autoPlay)
+            startCurrentItem(autoPlay: autoPlay, automaticAdvance: !userInitiated)
         } else if repeatMode == .all, !queue.isEmpty {
             currentIndex = 0
-            startCurrentItem(autoPlay: autoPlay)
+            startCurrentItem(autoPlay: autoPlay, automaticAdvance: !userInitiated)
         } else {
             // Reached the end of the queue.
             isPlaying = false
             player.pause()
             seek(toSeconds: 0)
+        }
+    }
+
+    /// A track that failed to resolve/play. When it was reached by a non-user
+    /// auto-advance and we haven't skipped too many in a row, skip forward to the
+    /// next track (unattended playback shouldn't halt on one dead file mid-queue);
+    /// otherwise stop and keep the failed selection visible.
+    private func handleLoadFailure() {
+        let hasNext = currentIndex < queue.count - 1 || (repeatMode == .all && !queue.isEmpty)
+        if currentLoadWasAutoAdvance, consecutiveFailureSkips < Self.maxConsecutiveFailureSkips, hasNext {
+            consecutiveFailureSkips += 1
+            preserveErrorOnNextLoad = true
+            advance(userInitiated: false)
+        } else {
+            stopAfterFailure()
         }
     }
 
@@ -1395,9 +1457,28 @@ final class PlaybackEngine {
             MPNowPlayingInfoPropertyPlaybackRate: (isPlaying && !isBuffering) ? 1.0 : 0.0
         ]
         if let art = currentArtwork {
-            info[MPMediaItemPropertyArtwork] = Self.nowPlayingArtwork(from: art)
+            info[MPMediaItemPropertyArtwork] = nowPlayingArtwork(for: art)
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    /// The last-built artwork wrapper and the image it wraps. updateNowPlayingInfo
+    /// runs on many transport events; rebuilding the (retained-closure) wrapper
+    /// each time is wasteful, so reuse it while the underlying image is unchanged.
+    private var cachedArtwork: MPMediaItemArtwork?
+    private var cachedArtworkImage: UIImage?
+
+    private func nowPlayingArtwork(for image: UIImage) -> MPMediaItemArtwork {
+        if let cachedArtwork, cachedArtworkImage === image { return cachedArtwork }
+        let artwork = Self.nowPlayingArtwork(from: image)
+        cachedArtwork = artwork
+        cachedArtworkImage = image
+        return artwork
+    }
+
+    private func clearArtworkCache() {
+        cachedArtwork = nil
+        cachedArtworkImage = nil
     }
 
     nonisolated private static func nowPlayingArtwork(from image: UIImage) -> MPMediaItemArtwork {

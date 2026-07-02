@@ -68,6 +68,12 @@ actor LibraryService {
     private let mediaStore: MediaStore
     private let streamingService = RemoteStreamingService()
 
+    /// Crossfade needs a precise track end on streamed items; the engine flips
+    /// this when the crossfade setting changes.
+    func setPreferPreciseStreamDuration(_ enabled: Bool) {
+        streamingService.preferPreciseDuration = enabled
+    }
+
     private var configs: [SourceConfig] = []
     private var allTracks: [Track] = []
     /// Outcome of the last attempt to load `sources.json`. `.failed` (file
@@ -467,27 +473,73 @@ actor LibraryService {
             AppLog.library.debug("BETTERSTREAMING_SCAN dir=\(dir.displayPath) entries=\(entries.count) dirs=\(dirCount) files=\(fileCount)")
             #endif
 
+            // Split this folder's entries: queue subfolders inline, collect media
+            // files in entry order. A reused (unchanged) file carries its prior track
+            // for free; a NEW file needs a 256KB head probe + parse.
+            var dirFiles: [(entry: RemoteEntry, kind: IndexedMediaKind, prior: Track?)] = []
             for entry in entries {
                 if Task.isCancelled { break }
                 switch entry.kind {
                 case .directory:
                     if visited.count + pending.count < 50_000 { pending.append(entry.path) }
                 case .file:
-                    guard let kind = classifier.classify(entry), scanned.count < 100_000 else { break }
+                    guard let kind = classifier.classify(entry), scanned.count + dirFiles.count < 100_000 else { break }
                     let key = reuseKey(path: entry.path.displayPath, size: entry.size, modifiedEpoch: entry.modifiedAt?.timeIntervalSince1970)
-                    if let prior = existing[key] {
-                        scanned.append(prior)   // unchanged — no re-probe, keep artwork
-                    } else {
-                        let ext = (entry.name as NSString).pathExtension
-                        let probe = await embeddedProbe(for: entry, client: client)
-                        let embedded = await parsedEmbedded(entry: entry, client: client, probe: probe, ext: ext)
-                        scanned.append(track(fromEntry: entry, kind: kind, cfg: cfg, embedded: embedded))
-                    }
-                    filesSeen += 1
-                    if filesSeen % 20 == 0 { progress?(filesSeen) }
+                    dirFiles.append((entry, kind, existing[key]))
                 default:
                     break
                 }
+            }
+
+            // Probe the NEW files with bounded concurrency (width 4) so their head
+            // reads overlap on the wire, then splice results back into the original
+            // entry order. SMB serializes ops on its own lock (only the parse
+            // overlaps there); WebDAV/SFTP/FTP genuinely overlap the reads. A nil
+            // probe still yields a filename-inferred track, exactly as before.
+            var resolved = [Track?](repeating: nil, count: dirFiles.count)
+            var toProbe: [Int] = []
+            for i in dirFiles.indices {
+                if let prior = dirFiles[i].prior {
+                    resolved[i] = prior   // unchanged — no re-probe, keep artwork
+                } else {
+                    toProbe.append(i)
+                }
+            }
+            // Collect inside the group closure and return, instead of mutating a
+            // captured local — region isolation forbids reusing a var after it's
+            // been sent into the group.
+            let probeIndices = toProbe
+            let probed: [(Int, Track)] = try await withThrowingTaskGroup(of: (Int, Track).self) { group in
+                var out: [(Int, Track)] = []
+                out.reserveCapacity(probeIndices.count)
+                var cursor = 0
+                func scheduleNext() {
+                    guard cursor < probeIndices.count else { return }
+                    let i = probeIndices[cursor]
+                    cursor += 1
+                    let entry = dirFiles[i].entry
+                    let kind = dirFiles[i].kind
+                    group.addTask { [self] in
+                        let ext = (entry.name as NSString).pathExtension
+                        let probe = await self.embeddedProbe(for: entry, client: client)
+                        let embedded = await self.parsedEmbedded(entry: entry, client: client, probe: probe, ext: ext)
+                        let t = await self.track(fromEntry: entry, kind: kind, cfg: cfg, embedded: embedded)
+                        return (i, t)
+                    }
+                }
+                for _ in 0..<4 { scheduleNext() }
+                while let pair = try await group.next() {
+                    out.append(pair)
+                    scheduleNext()
+                }
+                return out
+            }
+            for (i, track) in probed { resolved[i] = track }
+            for track in resolved {
+                guard let track else { continue }
+                scanned.append(track)
+                filesSeen += 1
+                if filesSeen % 20 == 0 { progress?(filesSeen) }
             }
         }
 
@@ -1046,12 +1098,10 @@ actor LibraryService {
     /// local sources), so the "X of Y" budget readout reflects the auto hot set.
     func autoCachedBytes() -> Int64 {
         loadAutoCacheIndexIfNeeded()
+        let sizesByHash = cacheFileSizesByHash()
         var total: Int64 = 0
         for track in allTracks where autoCachedIDs.contains(track.id) {
-            let url = Self.cacheFileURL(for: track, cacheDir: cacheDir)
-            if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
-                total += Int64(size)
-            }
+            if let size = sizesByHash[Self.stableHash(track.id)] { total += Int64(size) }
         }
         return total
     }
@@ -1342,6 +1392,13 @@ actor LibraryService {
         indexByID.reserveCapacity(allTracks.count)
         for (i, t) in allTracks.enumerated() { indexByID[t.id] = i }
 
+        // Read every existing override ONCE, then write the whole batch in ONE
+        // transaction — instead of a read + write round trip per fix.
+        let existing = Dictionary(
+            ((try? await mediaStore.listMetadataOverrides()) ?? []).map { ($0.identityKey, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var batch: [MetadataOverride] = []
         for fix in fixes {
             if let i = indexByID[fix.id] {
                 if let title = fix.title { allTracks[i].title = title }
@@ -1354,13 +1411,14 @@ actor LibraryService {
                     allTracks[i].albumID = MetadataGrouping.albumID(path: allTracks[i].remotePath ?? allTracks[i].folderPath, album: album)
                 }
             }
-            var merged = (try? await mediaStore.metadataOverride(identityKey: fix.id)) ?? MetadataOverride(identityKey: fix.id)
+            var merged = existing[fix.id] ?? MetadataOverride(identityKey: fix.id)
             if let title = fix.title { merged.title = title }
             if let artist = fix.artist { merged.artist = artist }
             if let album = fix.album { merged.album = album }
             merged.updatedAt = Date()
-            if !merged.isEmpty { _ = try? await mediaStore.upsertMetadataOverride(merged) }
+            if !merged.isEmpty { batch.append(merged) }
         }
+        try? await mediaStore.upsertMetadataOverrides(batch)
     }
 
     /// Remove a track's override and restore the file-scanned values. Returns the
@@ -1839,9 +1897,33 @@ actor LibraryService {
         return streamCacheDir.appendingPathComponent("\(base).\(ext)")
     }
 
+    /// One directory listing of the download cache, mapped `<hash> → byte size`.
+    /// Replaces the per-track `fileExists` fan-out (a 10k-file library did 10k
+    /// stat syscalls) — both `refreshCacheStates` (existence via keys) and
+    /// `autoCachedBytes` (sum via values) read this single listing. The basename
+    /// hash is the part before the first ".", exactly as `reconcileCacheFiles`
+    /// derives it; in-flight download temps are excluded so a `.part` isn't counted.
+    private func cacheFileSizesByHash() -> [String: Int] {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: cacheDir, includingPropertiesForKeys: [.fileSizeKey]
+        ) else { return [:] }
+        let tempSuffixes = [".part", ".download", ".promote"]
+        var result: [String: Int] = [:]
+        result.reserveCapacity(entries.count)
+        for url in entries where !tempSuffixes.contains(where: url.lastPathComponent.hasSuffix) {
+            let name = url.lastPathComponent
+            let base = name.firstIndex(of: ".").map { String(name[..<$0]) } ?? name
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            result[base] = size
+        }
+        return result
+    }
+
     private func refreshCacheStates() {
         loadAutoCacheIndexIfNeeded()
         let localIDs = Set(configs.filter { $0.proto == SourceProtocol.local.rawValue }.map(\.id))
+        let cachedHashes = Set(cacheFileSizesByHash().keys)
         var prunedIndex = false
         for index in allTracks.indices {
             if localIDs.contains(allTracks[index].sourceID) {
@@ -1849,7 +1931,7 @@ actor LibraryService {
                 continue
             }
             let id = allTracks[index].id
-            let isCached = FileManager.default.fileExists(atPath: Self.cacheFileURL(for: allTracks[index], cacheDir: cacheDir).path)
+            let isCached = cachedHashes.contains(Self.stableHash(id))
             if isCached {
                 // Auto-cached/streamed files are evictable (.prefetched); manual
                 // downloads are pinned (.cached).

@@ -142,10 +142,10 @@ struct AlbumDetailView: View {
     @Environment(AppModel.self) private var model
     var albumID: String
 
-    private var albumTracks: [Track] { model.tracks(forAlbum: albumID) }
-
     var body: some View {
-        ScrollView {
+        // One fetch per body pass, reused by the header, list, title and toolbar.
+        let albumTracks = model.tracks(forAlbum: albumID)
+        return ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
                 if let first = albumTracks.first {
                     MediaDetailHeader(
@@ -182,6 +182,14 @@ struct AlbumDetailView: View {
         .navigationTitle(albumTracks.first?.album ?? "Album")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if model.isBatchDownloading {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { model.cancelBatchDownloads() } label: {
+                        Image(systemName: "stop.circle")
+                    }
+                    .accessibilityLabel("Stop downloads")
+                }
+            }
             if !albumTracks.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -314,21 +322,22 @@ struct ArtistDetailView: View {
     @Environment(AppModel.self) private var model
     var artistID: String
 
-    private var artistTracks: [Track] { model.tracks(forArtist: artistID) }
     private var artistAlbums: [Album] { model.albums.filter { $0.artistID == artistID } }
 
-    /// Top 5 by play count; empty when the artist has no plays yet (so the section
-    /// hides rather than showing an arbitrary "top" of all-zero songs).
-    private var topSongs: [Track] {
-        let ranked = artistTracks
-            .map { ($0, model.autoCache.stat(for: $0.id).playCount) }
-            .filter { $0.1 > 0 }
-            .sorted { $0.1 > $1.1 }
-        return Array(ranked.prefix(5).map(\.0))
-    }
-
     var body: some View {
-        ScrollView {
+        // One fetch per body pass, reused by the header, top-songs, all-songs and title.
+        let artistTracks = model.tracks(forArtist: artistID)
+        // Top 5 by play count; empty when the artist has no plays yet (so the section
+        // hides rather than showing an arbitrary "top" of all-zero songs).
+        let topSongs = Array(
+            artistTracks
+                .map { ($0, model.autoCache.stat(for: $0.id).playCount) }
+                .filter { $0.1 > 0 }
+                .sorted { $0.1 > $1.1 }
+                .prefix(5)
+                .map(\.0)
+        )
+        return ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 if let name = model.artistName(artistID) ?? artistTracks.first?.artist {
                     VStack(spacing: 12) {
@@ -338,12 +347,12 @@ struct ArtistDetailView: View {
                         HStack(spacing: 12) {
                             Button {
                                 model.engine.setShuffle(false)
-                                model.engine.play(model.tracks(forArtist: artistID))
+                                model.engine.play(artistTracks)
                             } label: {
                                 Label("Play", systemImage: "play.fill").frame(maxWidth: .infinity)
                             }.buttonStyle(PrimaryActionButtonStyle())
                             Button {
-                                model.engine.playShuffled(model.tracks(forArtist: artistID))
+                                model.engine.playShuffled(artistTracks)
                             } label: {
                                 Label("Shuffle", systemImage: "shuffle").frame(maxWidth: .infinity)
                             }.buttonStyle(SecondaryActionButtonStyle())
@@ -394,6 +403,14 @@ struct ArtistDetailView: View {
         .navigationTitle(model.artistName(artistID) ?? "Artist")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if model.isBatchDownloading {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { model.cancelBatchDownloads() } label: {
+                        Image(systemName: "stop.circle")
+                    }
+                    .accessibilityLabel("Stop downloads")
+                }
+            }
             // Only surface the ⋯ when it'll hold an item: an artist mid-download is
             // fully-downloaded (nothing remote-only) yet has-nothing-cached, which would
             // otherwise render an empty menu — unlike the album menu, which always keeps
@@ -980,35 +997,37 @@ struct AllPlaylistsView: View {
 /// wired all over the app but had no screen listing the result.
 struct FavoritesView: View {
     @Environment(AppModel.self) private var model
+    @State private var cache = SectionCache<Track>()
 
-    private var favorites: [Track] {
+    private func buildFavorites() -> [Track] {
         model.favorites.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
 
     var body: some View {
-        Group {
-            if favorites.isEmpty {
+        // Sort + section once per library revision (favouriting bumps it), not per body.
+        let _ = cache.resolve(rev: model.libraryRevision, variant: "", sectioned: true,
+                              build: buildFavorites, sectionKey: { $0.title })
+        let list = cache.items
+        let sections = cache.sections
+        return Group {
+            if list.isEmpty {
                 ContentUnavailableView {
                     Label("No Favourites", systemImage: "star")
                 } description: {
                     Text("Star songs to see them here.")
                 }
             } else {
-                let list = favorites
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        PlayShuffleBar(
-                            play: { model.engine.setShuffle(false); model.engine.play(list) },
-                            shuffle: { model.engine.playShuffled(list) }
-                        )
-                        .padding(.bottom, 6)
-                        ForEach(list) { track in
-                            TrackRowView(track: track, context: list)
-                            Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
-                        }
+                AlphabetIndexedScroll(sections: sections) {
+                    PlayShuffleBar(
+                        play: { model.engine.setShuffle(false); model.engine.play(list) },
+                        shuffle: { model.engine.playShuffled(list) }
+                    )
+                    .padding(.bottom, 6)
+                } sectionContent: { section in
+                    ForEach(section.items) { track in
+                        TrackRowView(track: track, context: list)
+                        Divider().overlay(DesignTokens.borderSubtle.opacity(0.08))
                     }
-                    .padding(.horizontal, DesignTokens.phonePadding)
-                    .padding(.bottom, 120)
                 }
             }
         }

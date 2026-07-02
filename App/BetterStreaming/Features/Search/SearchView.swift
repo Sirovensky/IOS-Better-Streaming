@@ -26,6 +26,10 @@ struct SearchView: View {
     @State private var matchingAlbums: [Album] = []
     @State private var matchingArtists: [Artist] = []
     @State private var searchTask: Task<Void, Never>?
+    // The trimmed query the current `results` were computed for. During the 150ms
+    // debounce this lags the live query, so we only show "No Results" once it catches
+    // up — otherwise an empty in-flight state flashed the no-results view mid-typing.
+    @State private var searchedQuery = ""
 
     /// Auto-focus the keyboard only on the FIRST time Search appears this app run —
     /// not every time the tab is re-entered or a pushed result is popped.
@@ -38,10 +42,14 @@ struct SearchView: View {
             Group {
                 if trimmedQuery.isEmpty {
                     browse
-                } else if results.isEmpty && matchingAlbums.isEmpty && matchingArtists.isEmpty {
+                } else if !results.isEmpty || !matchingAlbums.isEmpty || !matchingArtists.isEmpty {
+                    resultsList
+                } else if searchedQuery == trimmedQuery {
                     ContentUnavailableView.search(text: query)
                 } else {
-                    resultsList
+                    // Debounce in flight for a new query: hold blank rather than flash
+                    // "No Results" before runSearch has actually looked.
+                    Color.clear
                 }
             }
             .appScreenBackground()
@@ -82,6 +90,7 @@ struct SearchView: View {
             results = []
             matchingAlbums = []
             matchingArtists = []
+            searchedQuery = ""
             return
         }
         results = model.searchResults(q)
@@ -90,6 +99,7 @@ struct SearchView: View {
             $0.title.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil
                 || $0.artist.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil
         }
+        searchedQuery = trimmed
     }
 
     /// Recents are recorded on submit; also record when the user acts on a result, so

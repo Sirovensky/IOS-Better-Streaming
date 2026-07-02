@@ -39,6 +39,12 @@ final class RemoteStreamingService: NSObject, @unchecked Sendable {
     private var sessionOrder: [String] = []
     private var activeRequests: [ObjectIdentifier: LoadingRequestBox] = [:]
 
+    /// When true, streaming assets are built asking AVFoundation for precise
+    /// duration/timing. Crossfade needs an accurate track end, so the owner sets
+    /// this while a crossfade is configured. Off by default — precise timing makes
+    /// AVFoundation scan more of the file up front, which we avoid for plain play.
+    var preferPreciseDuration = false
+
     func playerItem(
         client: any RemoteFileSystemClient,
         path: RemotePath,
@@ -73,7 +79,10 @@ final class RemoteStreamingService: NSObject, @unchecked Sendable {
         }
         for old in evicted { Task { await old.teardown() } }
 
-        let asset = AVURLAsset(url: Self.url(id: id, ext: fallbackExtension))
+        let options: [String: Any] = preferPreciseDuration
+            ? [AVURLAssetPreferPreciseDurationAndTimingKey: true]
+            : [:]
+        let asset = AVURLAsset(url: Self.url(id: id, ext: fallbackExtension), options: options)
         asset.resourceLoader.setDelegate(self, queue: callbackQueue)
         return AVPlayerItem(asset: asset)
     }
@@ -146,6 +155,12 @@ private final class LoadingRequestBox: @unchecked Sendable {
 
 private actor RemoteStreamSession {
     private static let readChunkSize: Int64 = 512 * 1024
+    /// The ranges sidecar is a resume hint, not a source of truth, so it's written
+    /// in ~8 MB steps (and at every fill-loop exit) rather than per 512 KB chunk —
+    /// that used to hammer the disk with a full re-encode every chunk.
+    private static let persistThresholdBytes: Int64 = 8 * 1024 * 1024
+    /// Bytes newly cached since the sidecar was last written.
+    private var unpersistedBytes: Int64 = 0
 
     private let id: String
     private let client: any RemoteFileSystemClient
@@ -251,6 +266,9 @@ private actor RemoteStreamSession {
 
     /// Write the merged ranges (plus source identity for validation) to the sidecar.
     private func persistRanges() {
+        // After promotion the partial + sidecar are gone (the complete copy is the
+        // source of truth); never resurrect the sidecar.
+        guard !promoted else { return }
         let sidecar = RangesSidecar(
             sourceSize: metadata.size,
             sourceModifiedAtEpoch: metadata.modifiedAt?.timeIntervalSince1970,
@@ -258,6 +276,14 @@ private actor RemoteStreamSession {
         )
         guard let data = try? JSONEncoder().encode(sidecar) else { return }
         try? data.write(to: sidecarURL, options: .atomic)
+        unpersistedBytes = 0
+    }
+
+    /// Flush any ranges cached since the last sidecar write. Called at every
+    /// fill-loop exit so an interrupted session's progress isn't lost between the
+    /// 8 MB debounce steps.
+    private func flushRangesIfNeeded() {
+        if unpersistedBytes > 0 { persistRanges() }
     }
 
     /// Delete the session's partial scratch file and its ranges sidecar. Safe even
@@ -271,6 +297,9 @@ private actor RemoteStreamSession {
     }
 
     func respond(to box: LoadingRequestBox) async {
+        // Persist any debounced ranges on every exit (success, supersede, give-up,
+        // cancel, short-read). No-op when nothing new was cached or after promotion.
+        defer { flushRangesIfNeeded() }
         let request = box.request
 
         // Answer the content-information request on its OWN and finish it without
@@ -506,6 +535,12 @@ private actor RemoteStreamSession {
             try? fm.removeItem(at: completeCacheURL)
             try fm.moveItem(at: tmp, to: completeCacheURL)   // atomic rename on one volume
             promoted = true
+            // The complete copy is now authoritative; drop the partial + sidecar so
+            // they don't linger as dead scratch (cachedData falls back to the
+            // complete file, writeCache is guarded by `promoted`). Open read handles
+            // on the partial stay valid until closed (unlinked-but-open on Unix).
+            try? fm.removeItem(at: partialCacheURL)
+            try? fm.removeItem(at: sidecarURL)
             #if DEBUG
             streamLog.debug("BETTERSTREAMING_STREAM promoted ext=\(self.fallbackExtension, privacy: .public) bytes=\(totalLength)")
             #endif
@@ -535,7 +570,8 @@ private actor RemoteStreamSession {
             }
         }
         cachedRanges = merged
-        persistRanges()
+        unpersistedBytes += newRange.count
+        if unpersistedBytes >= Self.persistThresholdBytes { persistRanges() }
     }
 }
 

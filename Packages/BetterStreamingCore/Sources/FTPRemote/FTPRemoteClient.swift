@@ -18,6 +18,21 @@ public actor FTPRemoteClient: RemoteFileSystemClient {
     private let username: String?
     private let password: String?
 
+    /// One connected + logged-in control connection cached across operations.
+    /// Opening a fresh TCP socket and replaying USER/PASS/TYPE on every op (and
+    /// on every 512 KB streaming chunk) cost ~7 round-trips each; reusing one
+    /// control connection collapses that to the single command exchange. Dropped
+    /// and lazily reconnected on any thrown error, and torn down in disconnect().
+    private var controlConnection: FTPControlConnection?
+
+    /// Serialises every operation so only ONE is in flight on the shared control
+    /// connection at a time. The control connection is a single command/reply
+    /// stream — two concurrent ops (AVPlayer's fill loop + a scrub read) would
+    /// otherwise interleave commands and desync the protocol. FIFO, so a queued
+    /// read is never starved. Mirrors SMBRemoteClient's op lock.
+    private var opLocked = false
+    private var opWaiters: [CheckedContinuation<Void, Never>] = []
+
     public init(
         host: String,
         port: Int = 21,
@@ -154,28 +169,85 @@ public actor FTPRemoteClient: RemoteFileSystemClient {
     }
 }
 
+extension FTPRemoteClient {
+    /// Tear down the cached control connection without blocking. Idempotent; the
+    /// next operation reconnects and logs in lazily.
+    public func disconnect() async {
+        guard let controlConnection else { return }
+        self.controlConnection = nil
+        controlConnection.cancel()
+    }
+}
+
 private extension FTPRemoteClient {
     func withControlConnection<T>(
         path: RemotePath,
         _ body: (FTPControlConnection) async throws -> T
     ) async throws -> T {
+        await acquireOpLock()
+        defer { releaseOpLock() }
+        var used: FTPControlConnection?
+        do {
+            let control = try await activeControl()
+            used = control
+            return try await body(control)
+        } catch {
+            // Drop + tear down the cached connection so the next op reconnects on
+            // a fresh one. A wedged receive surfaces as `.timeout` (see the data /
+            // control read timeouts); orphaning the socket lets any in-flight read
+            // unwind. Only reset if it's still the connection we used.
+            resetControl(ifCurrent: used)
+            throw Self.map(error, path: path)
+        }
+    }
+
+    /// Return the cached, logged-in control connection, opening + authenticating a
+    /// fresh one on first use (or after a reset).
+    func activeControl() async throws -> FTPControlConnection {
+        if let controlConnection {
+            return controlConnection
+        }
         let control: FTPControlConnection
         do {
             // A user-entered port outside 1...65535 used to trap in the NWEndpoint
             // initialiser (hard crash). Surface it as a typed error instead.
             control = try FTPControlConnection(host: host, port: port)
         } catch {
-            throw Self.map(error, path: path)
+            throw error
         }
         do {
             try await control.connect()
             try await login(control)
-            let result = try await body(control)
-            control.cancel()
-            return result
         } catch {
             control.cancel()
-            throw Self.map(error, path: path)
+            throw error
+        }
+        controlConnection = control
+        return control
+    }
+
+    /// Drop and cancel the cached control connection iff it is still the one that
+    /// failed (a sibling op may have already reconnected a healthy one).
+    func resetControl(ifCurrent failed: FTPControlConnection?) {
+        guard let failed, let current = controlConnection, current === failed else { return }
+        controlConnection = nil
+        failed.cancel()
+    }
+
+    /// Acquire the per-client operation lock (FIFO). Held across one op.
+    func acquireOpLock() async {
+        if !opLocked {
+            opLocked = true
+            return
+        }
+        await withCheckedContinuation { opWaiters.append($0) }
+    }
+
+    func releaseOpLock() {
+        if opWaiters.isEmpty {
+            opLocked = false
+        } else {
+            opWaiters.removeFirst().resume()
         }
     }
 
@@ -320,6 +392,13 @@ private final class FTPControlConnection: @unchecked Sendable {
     private let connection: NWConnection
     private var buffer = Data()
 
+    /// Wall-clock ceiling for a single connect / send / receive. NWConnection has
+    /// no receive timeout, so a stalled receive (dropped packet, Wi-Fi power-save,
+    /// server hiccup) never returns; this bounds it. On a trip the client drops
+    /// the cached connection and reconnects lazily. Generous so a slow-but-alive
+    /// link isn't cut.
+    static let opTimeoutNanos: UInt64 = 30_000_000_000   // 30s
+
     init(host: String, port: Int) throws {
         self.host = host
         self.port = port
@@ -327,34 +406,38 @@ private final class FTPControlConnection: @unchecked Sendable {
     }
 
     func connect() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let resume = OneShotResume()
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if resume.claim() { continuation.resume() }
-                case .failed(let error):
-                    if resume.claim() { continuation.resume(throwing: error) }
-                case .cancelled:
-                    if resume.claim() { continuation.resume(throwing: RemoteFileSystemError.serverDisconnected) }
-                default:
-                    break
+        try await RemoteTimeout.run(Self.opTimeoutNanos) { [self] in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let resume = OneShotResume()
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        if resume.claim() { continuation.resume() }
+                    case .failed(let error):
+                        if resume.claim() { continuation.resume(throwing: error) }
+                    case .cancelled:
+                        if resume.claim() { continuation.resume(throwing: RemoteFileSystemError.serverDisconnected) }
+                    default:
+                        break
+                    }
                 }
+                connection.start(queue: queue)
             }
-            connection.start(queue: queue)
         }
     }
 
     func send(_ command: String) async throws -> FTPReply {
         let line = command + "\r\n"
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: Data(line.utf8), completion: .contentProcessed { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            })
+        try await RemoteTimeout.run(Self.opTimeoutNanos) { [self] in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                connection.send(content: Data(line.utf8), completion: .contentProcessed { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                })
+            }
         }
         return try await readReply()
     }
@@ -409,16 +492,18 @@ private final class FTPControlConnection: @unchecked Sendable {
     }
 
     private func receive() async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, isComplete, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let data, !data.isEmpty {
-                    continuation.resume(returning: data)
-                } else if isComplete {
-                    continuation.resume(returning: Data())
-                } else {
-                    continuation.resume(returning: Data())
+        try await RemoteTimeout.run(Self.opTimeoutNanos) { [self] in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, isComplete, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else if let data, !data.isEmpty {
+                        continuation.resume(returning: data)
+                    } else if isComplete {
+                        continuation.resume(returning: Data())
+                    } else {
+                        continuation.resume(returning: Data())
+                    }
                 }
             }
         }
@@ -499,26 +584,33 @@ private final class FTPDataConnection: @unchecked Sendable {
     private let queue = DispatchQueue(label: "BetterStreaming.FTP.data")
     private let connection: NWConnection
 
+    /// Same rationale as the control connection: bound connect / receive so a
+    /// stalled data transfer can't wedge the op-lock (and the whole client)
+    /// forever. The caller aborts the transfer by cancelling the data socket.
+    static let opTimeoutNanos: UInt64 = 30_000_000_000   // 30s
+
     init(host: String, port: Int) throws {
         self.connection = NWConnection(host: NWEndpoint.Host(host), port: try FTPPort.make(port), using: .tcp)
     }
 
     func connect() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let resume = OneShotResume()
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if resume.claim() { continuation.resume() }
-                case .failed(let error):
-                    if resume.claim() { continuation.resume(throwing: error) }
-                case .cancelled:
-                    if resume.claim() { continuation.resume(throwing: RemoteFileSystemError.serverDisconnected) }
-                default:
-                    break
+        try await RemoteTimeout.run(Self.opTimeoutNanos) { [self] in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let resume = OneShotResume()
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        if resume.claim() { continuation.resume() }
+                    case .failed(let error):
+                        if resume.claim() { continuation.resume(throwing: error) }
+                    case .cancelled:
+                        if resume.claim() { continuation.resume(throwing: RemoteFileSystemError.serverDisconnected) }
+                    default:
+                        break
+                    }
                 }
+                connection.start(queue: queue)
             }
-            connection.start(queue: queue)
         }
     }
 
@@ -563,12 +655,14 @@ private final class FTPDataConnection: @unchecked Sendable {
     }
 
     private func receive() async throws -> (data: Data, isComplete: Bool) {
-        try await withCheckedThrowingContinuation { continuation in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 262_144) { data, _, isComplete, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: (data ?? Data(), isComplete))
+        try await RemoteTimeout.run(Self.opTimeoutNanos) { [self] in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(data: Data, isComplete: Bool), Error>) in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 262_144) { data, _, isComplete, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: (data ?? Data(), isComplete))
+                    }
                 }
             }
         }

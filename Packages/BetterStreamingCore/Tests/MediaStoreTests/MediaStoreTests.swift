@@ -464,6 +464,40 @@ import MediaStore
     #expect(try await store.metadataOverride(identityKey: old.stableKey) == nil)
 }
 
+/// The batch upsert (bulk auto-fix, one transaction) must land exactly what N
+/// sequential single upserts would — including merging onto a pre-existing row.
+@Test func batchUpsertMatchesSequentialSingleUpserts() async throws {
+    let sourceID = SourceID()
+    let shareID = ShareID()
+    let ids = (0..<5).map { identity(sourceID: sourceID, shareID: shareID, path: "Music/Track\($0).mp3", size: Int64($0)) }
+    let overrides = ids.enumerated().map {
+        MetadataOverride(identityKey: $0.element.stableKey,
+                         title: "Title \($0.offset)", artist: "Artist \($0.offset)", updatedAt: testDate(Double($0.offset)))
+    }
+
+    // Store A: one pre-existing row, then the whole set applied in a single batch.
+    let batchStore = MediaStore(configuration: .inMemory())
+    try await batchStore.upsertMetadataOverride(
+        MetadataOverride(identityKey: ids[0].stableKey, album: "Prior Album", updatedAt: testDate(-1))
+    )
+    try await batchStore.upsertMetadataOverrides(overrides)
+
+    // Store B: the same pre-existing row, then each override upserted one by one.
+    let singleStore = MediaStore(configuration: .inMemory())
+    try await singleStore.upsertMetadataOverride(
+        MetadataOverride(identityKey: ids[0].stableKey, album: "Prior Album", updatedAt: testDate(-1))
+    )
+    for override in overrides { try await singleStore.upsertMetadataOverride(override) }
+
+    let batched = try await batchStore.listMetadataOverrides().sorted { $0.identityKey < $1.identityKey }
+    let singled = try await singleStore.listMetadataOverrides().sorted { $0.identityKey < $1.identityKey }
+    #expect(batched == singled)
+    #expect(batched.count == 5)
+    // The upsert overwrites every column from `excluded`, so a batched row's album
+    // (not set by the fix) is cleared to nil exactly as the single path clears it.
+    #expect(batched.first { $0.identityKey == ids[0].stableKey }?.album == nil)
+}
+
 private func identity(
     sourceID: SourceID,
     shareID: ShareID,

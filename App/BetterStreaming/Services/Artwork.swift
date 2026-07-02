@@ -15,8 +15,22 @@ enum ThumbnailLoader {
         return c
     }()
 
+    private static func thumbnailOptions(maxPixel: CGFloat) -> [CFString: Any] {
+        [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel
+        ]
+    }
+
     static func cached(_ url: URL, maxPixel: CGFloat) -> UIImage? {
-        cache.object(forKey: "\(url.path)#\(Int(maxPixel))" as NSString)
+        cached(key: url.path, maxPixel: maxPixel)
+    }
+
+    /// Sync cache probe by an explicit key (file path or a remote URL string).
+    static func cached(key: String, maxPixel: CGFloat) -> UIImage? {
+        cache.object(forKey: "\(key)#\(Int(maxPixel))" as NSString)
     }
 
     /// Load a file-URL image downsampled to ~`maxPixel` px, off the main thread,
@@ -25,13 +39,24 @@ enum ThumbnailLoader {
         let key = "\(url.path)#\(Int(maxPixel))" as NSString
         if let hit = cache.object(forKey: key) { return hit }
         let image = await Task.detached(priority: .utility) { () -> UIImage? in
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixel
-            ]
+            let options = thumbnailOptions(maxPixel: maxPixel)
             guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+            return UIImage(cgImage: cg)
+        }.value
+        if let image { cache.setObject(image, forKey: key) }
+        return image
+    }
+
+    /// Downsample already-fetched image `data` (a remote cover) through the same
+    /// off-main-thread + NSCache path files use, so a scrolling list never holds a
+    /// full-resolution remote cover in memory. Keyed by `cacheKey` (the remote URL).
+    static func thumbnail(from data: Data, cacheKey: String, maxPixel: CGFloat) async -> UIImage? {
+        let key = "\(cacheKey)#\(Int(maxPixel))" as NSString
+        if let hit = cache.object(forKey: key) { return hit }
+        let image = await Task.detached(priority: .utility) { () -> UIImage? in
+            let options = thumbnailOptions(maxPixel: maxPixel)
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
                   let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
             return UIImage(cgImage: cg)
         }.value
@@ -135,11 +160,17 @@ struct ArtworkView: View {
     private func loadImage() async {
         guard let url else { image = nil; return }
         // Sync cache hit first → no flicker for already-decoded covers.
-        if let hit = ThumbnailLoader.cached(url, maxPixel: maxPixel) { image = hit; return }
         if url.isFileURL {
+            if let hit = ThumbnailLoader.cached(url, maxPixel: maxPixel) { image = hit; return }
             image = await ThumbnailLoader.thumbnail(for: url, maxPixel: maxPixel)
-        } else if let (data, _) = try? await URLSession.shared.data(from: url) {
-            image = UIImage(data: data)
+        } else {
+            // Remote covers ride the same downsample + cache path as files. Probe the
+            // cache before hitting the network so a re-appear never re-downloads.
+            let key = url.absoluteString
+            if let hit = ThumbnailLoader.cached(key: key, maxPixel: maxPixel) { image = hit; return }
+            if let (data, _) = try? await URLSession.shared.data(from: url) {
+                image = await ThumbnailLoader.thumbnail(from: data, cacheKey: key, maxPixel: maxPixel)
+            }
         }
     }
 }

@@ -27,6 +27,13 @@ public actor WebDAVRemoteClient: RemoteFileSystemClient {
     private let session: URLSession
     private let authorizationHeader: String?
 
+    /// Set once the server answers a ranged GET with a real `206 Partial Content`.
+    /// After that we know it honours `Range`, so subsequent reads use the bulk
+    /// `session.data` path instead of walking the body byte-by-byte. Until then
+    /// we stream (via `session.bytes`) to guard against a `Range`-ignoring server
+    /// returning the WHOLE file (a 1 GB FLAC) and triggering jetsam.
+    private var serverHonorsRange = false
+
     private static let downloadChunkSize = 262_144
 
     /// Creates a WebDAV client.
@@ -118,18 +125,38 @@ public actor WebDAVRemoteClient: RemoteFileSystemClient {
             let lower = range.lowerBound
             let upper = range.upperBound - 1
             request.setValue("bytes=\(lower)-\(upper)", forHTTPHeaderField: "Range")
+            let windowLength = Int(range.upperBound - range.lowerBound)
 
-            // Stream the body instead of `session.data`. A server that ignores the
-            // Range header returns 200 with the WHOLE file; buffering it (a 1 GB
-            // FLAC during a 256 KB metadata probe) triggers jetsam. Stream, skip to
-            // the window on a 200, take the window, then break to cancel the task.
+            // Once the server has proven it honours Range, read the (already
+            // small, ranged) body in one bulk `session.data` transfer instead of
+            // iterating the AsyncBytes stream one UInt8 at a time.
+            if serverHonorsRange {
+                let (data, response) = try await session.data(for: request)
+                let http = try Self.httpResponse(response)
+                guard http.statusCode == 206 || http.statusCode == 200 else {
+                    throw Self.statusError(http.statusCode, path: path)
+                }
+                if http.statusCode == 200 {
+                    // Server changed its mind (proxy in the path). The whole file
+                    // is already buffered; slice the window out of it.
+                    let start = min(Int(range.lowerBound), data.count)
+                    let end = min(start + windowLength, data.count)
+                    return data.subdata(in: start..<end)
+                }
+                return data.count > windowLength ? data.prefix(windowLength) : data
+            }
+
+            // First read against this server (or the last read got a 200): stream
+            // the body via `session.bytes`. A server that ignores Range returns
+            // 200 with the WHOLE file; buffering it (a 1 GB FLAC during a 256 KB
+            // metadata probe) triggers jetsam. Stream, skip to the window on a 200,
+            // take the window, then break to cancel the transfer.
             let (byteStream, response) = try await session.bytes(for: request)
             let http = try Self.httpResponse(response)
             guard http.statusCode == 206 || http.statusCode == 200 else {
                 throw Self.statusError(http.statusCode, path: path)
             }
 
-            let windowLength = Int(range.upperBound - range.lowerBound)
             let bytesToSkip = http.statusCode == 200 ? Int(range.lowerBound) : 0
             // A Range-ignoring server forces a byte-walk to the window. Near-EOF
             // reads (MP4 tail probes) would walk the whole file — refuse instead
@@ -137,16 +164,29 @@ public actor WebDAVRemoteClient: RemoteFileSystemClient {
             guard bytesToSkip <= 4 * 1_024 * 1_024 else {
                 throw RemoteFileSystemError.unsupportedRange
             }
-            var result = Data(capacity: min(windowLength, Self.downloadChunkSize))
-            var skipped = 0
-            for try await byte in byteStream {
-                if skipped < bytesToSkip {
-                    skipped += 1
-                    continue
+            // Preallocate the full window so the drain does bulk-capacity appends
+            // (no repeated reallocation). On a 206 there's nothing to skip.
+            var result = Data(capacity: windowLength)
+            if http.statusCode == 206 {
+                // Confirmed Range support: fast-path every subsequent read.
+                serverHonorsRange = true
+                for try await byte in byteStream {
+                    result.append(byte)
+                    if result.count >= windowLength {
+                        break   // got the window; leaving the loop cancels the transfer
+                    }
                 }
-                result.append(byte)
-                if result.count >= windowLength {
-                    break   // got the window; leaving the loop cancels the transfer
+            } else {
+                var skipped = 0
+                for try await byte in byteStream {
+                    if skipped < bytesToSkip {
+                        skipped += 1
+                        continue
+                    }
+                    result.append(byte)
+                    if result.count >= windowLength {
+                        break
+                    }
                 }
             }
             return result
@@ -160,9 +200,39 @@ public actor WebDAVRemoteClient: RemoteFileSystemClient {
             let request = makeRequest(for: path, method: "GET")
             // Use URLSession's download task (chunked, off-thread IO) instead of a
             // per-byte AsyncBytes loop, which pegged a core for minutes on a large
-            // FLAC. Progress arrives via a task-specific delegate.
-            let delegate = WebDAVDownloadProgressDelegate(progress: progress)
-            let (downloadedURL, response) = try await session.download(for: request, delegate: delegate)
+            // FLAC. Byte-progress callbacks fire on URLSession's delegate queue in
+            // order but concurrently; forwarding each via its own detached Task let
+            // them land out of order (the progress bar jumped backwards). Instead
+            // funnel them through an AsyncStream drained by ONE ordered Task,
+            // throttled so we don't spam the sink.
+            // Latest-wins buffering: caps memory (matters when there's no sink
+            // draining) and, with the throttle below, keeps progress monotonic.
+            let (updates, continuation) = AsyncStream<TransferProgress>.makeStream(
+                bufferingPolicy: .bufferingNewest(1)
+            )
+            let consumer: Task<Void, Never>? = progress.map { sink in
+                Task {
+                    var lastFire = Date.distantPast
+                    for await update in updates {
+                        let now = Date()
+                        if now.timeIntervalSince(lastFire) >= 0.1 {
+                            lastFire = now
+                            await sink(update)
+                        }
+                    }
+                }
+            }
+            let delegate = WebDAVDownloadProgressDelegate(continuation: continuation)
+            let (downloadedURL, response): (URL, URLResponse)
+            do {
+                (downloadedURL, response) = try await session.download(for: request, delegate: delegate)
+            } catch {
+                continuation.finish()
+                await consumer?.value
+                throw error
+            }
+            continuation.finish()
+            await consumer?.value   // let the ordered drain settle before the final report
             let http = try Self.httpResponse(response)
             guard http.statusCode == 200 || http.statusCode == 206 else {
                 try? FileManager.default.removeItem(at: downloadedURL)
@@ -502,12 +572,13 @@ private final class MultiStatusParserDelegate: NSObject, XMLParserDelegate {
 }
 
 /// Per-task download delegate that reports byte progress. A task-specific
-/// delegate keeps the actor's shared `URLSession` delegate-free.
+/// delegate keeps the actor's shared `URLSession` delegate-free. Byte counts are
+/// yielded into an `AsyncStream` so a single consumer delivers them in order.
 private final class WebDAVDownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    private let progress: ProgressSink?
+    private let continuation: AsyncStream<TransferProgress>.Continuation
 
-    init(progress: ProgressSink?) {
-        self.progress = progress
+    init(continuation: AsyncStream<TransferProgress>.Continuation) {
+        self.continuation = continuation
     }
 
     func urlSession(
@@ -517,9 +588,8 @@ private final class WebDAVDownloadProgressDelegate: NSObject, URLSessionDownload
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
-        guard let progress else { return }
         let total: Int64? = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : nil
-        Task { await progress(TransferProgress(completedBytes: totalBytesWritten, totalBytes: total)) }
+        continuation.yield(TransferProgress(completedBytes: totalBytesWritten, totalBytes: total))
     }
 
     // Required by the protocol. The async `download(for:delegate:)` returns the
