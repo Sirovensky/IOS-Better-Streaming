@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Better Streaming</string>
+	<string>Evensong</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -36,7 +36,7 @@
 		<string>_ftp._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Better Streaming connects to your local NAS or computer to stream and cache your media.</string>
+	<string>Evensong connects to your local NAS or computer to stream and cache your media.</string>
 	<key>NSSupportsLiveActivities</key>
 	<false/>
 	<key>UIUserInterfaceStyle</key>

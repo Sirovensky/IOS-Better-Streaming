@@ -187,7 +187,7 @@ struct OnboardingView: View {
                 }
             }
 
-            Text("Local Network access lets Better Streaming find and connect to your server.")
+            Text("Local Network access lets Evensong find and connect to your server.")
                 .font(.caption2).foregroundStyle(DesignTokens.textTertiary)
         }
     }
@@ -198,7 +198,7 @@ struct OnboardingView: View {
         @Bindable var autoCache = model.autoCache
 
         return VStack(alignment: .leading, spacing: 16) {
-            stepTitle("Stay ready offline", "Better Streaming can keep the music you play most ready without the source.")
+            stepTitle("Stay ready offline", "Evensong can keep the music you play most ready without the source.")
 
             VStack(spacing: 0) {
                 Toggle(isOn: $autoCache.isEnabled) {

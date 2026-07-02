@@ -43,7 +43,7 @@ targets:
     info:
       path: App/BetterStreaming/Info.plist
       properties:
-        CFBundleDisplayName: Better Streaming
+        CFBundleDisplayName: Evensong
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ITSAppUsesNonExemptEncryption: false
@@ -55,7 +55,7 @@ targets:
         UIBackgroundModes:
           - audio
         UILaunchScreen: {}
-        NSLocalNetworkUsageDescription: Better Streaming connects to your local NAS or computer to stream and cache your media.
+        NSLocalNetworkUsageDescription: Evensong connects to your local NAS or computer to stream and cache your media.
         NSBonjourServices:
           - _smb._tcp
           - _webdav._tcp

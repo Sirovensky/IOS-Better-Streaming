@@ -348,7 +348,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             SectionHeader(title: "About")
             VStack(alignment: .leading, spacing: 6) {
-                Text("Better Streaming")
+                Text("Evensong")
                     .font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.textPrimary)
                 Text("Your own music library from your NAS or server. Open source, private by design — nothing leaves your devices and your network.")
                     .font(.caption).foregroundStyle(DesignTokens.textSecondary)
