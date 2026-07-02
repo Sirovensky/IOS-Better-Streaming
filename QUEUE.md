@@ -541,15 +541,8 @@ Verdict: #2–#7 confirmed correct as written (no Swift-6/actor/deadlock/reentra
 
 ## FEATURE BACKLOG (user approved earlier)
 
-0. **slskd remote control (future, NEVER in the App Store binary).** Not an
-   embedded Soulseek client — a REST client for the user's OWN self-hosted slskd
-   daemon: search, enqueue, transfer progress; downloads land on the NAS share →
-   rescan picks them up → metadata repair cleans the rips. Phone never touches
-   the P2P network (privacy answer: peers see the NAS's slskd, not the phone).
-   Distribution: config-gated module or a separate sideload/TestFlight-internal
-   build — App Store guideline 5.2.3 makes shipping it in the store binary an
-   app-wide removal risk. Weekend-scale: mirrors the existing source-config +
-   keychain + download-progress patterns. (Discussed 2026-07-01.)
+*(slskd remote-control was considered 2026-07-01 and REJECTED by the user — too
+much hassle vs. value. Don't re-propose.)*
 
 1. **Playlists + .m3u import** — biggest gap.
 2. **Gapless + crossfade** (`AVQueuePlayer` / preroll). Coordinate with streaming work.
