@@ -45,6 +45,12 @@ struct RootTabView: View {
                 }
                 .tint(DesignTokens.brandPrimary)
                 .sensoryFeedback(.selection, trigger: selectedTab)
+                // The frosted player only covers the tab bar VISUALLY — touches
+                // still reached it (tab items lit up under the open player). Block
+                // interaction while fully open; the moment a drag starts or the
+                // close settles, `presented` flips and the tabs work again.
+                .allowsHitTesting(!(model.isNowPlayingPresented && dragFraction == nil))
+                .accessibilityHidden(model.isNowPlayingPresented && dragFraction == nil)
             }
             // Pin the whole stack to the real screen bottom so the keyboard never
             // shoves the floating player up above it. Must live on the ZStack: the
