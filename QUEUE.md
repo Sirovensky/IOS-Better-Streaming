@@ -14,6 +14,10 @@ Goal: Apple-Music/Spotify-quality player over the user's own SMB/WebDAV/FTP/SFTP
 - **Supply chain:** `swift-nio-ssh` resolves to a fork `github.com/Wellz26/swift-nio-ssh` (Citadel 0.12.1 points there; we declare it directly for the SFTP host-key fix). Audit/replace when possible.
 - **SMBClient is now VENDORED** at `Packages/SMBClient/` (was remote `kishikawakatsumi/SMBClient` 0.3.1; `BetterStreamingCore/Package.swift` uses `.package(path: "../SMBClient")`). It is patched (bounds-checked `ByteReader`, `FileReader` no-progress break — see ACTIVE BUG #1 FIX 8). Do NOT revert to the remote dep without re-applying these patches, or the `EXC_BREAKPOINT` crash-loop returns. Re-pull the upstream only via a patch/merge that preserves them.
 
+## USER-REPORTED (2026-07-01 eve, on device)
+
+- **Tab bar still touchable under the OPEN full player.** With the player fully open, tapping where the tab bar sits doesn't switch tabs but the tab item lights up (UIKit highlight) — touches are reaching the `TabView` beneath the morph overlay. Distinct from the tracked transient tap-through during the close animation: this is at rest, p == 1. FIX: while `presented && dragFraction == nil` (fully open), block interaction on the underlying `TabView` — `.allowsHitTesting(false)` on the TabView (not the overlay) keyed on that state, or `UITabBar.isUserInteractionEnabled` via the existing selectedTab binding host in `RootTabView.swift`. Verify: open player → tap bottom edge → no highlight; collapse → tabs work immediately.
+
 ## READTHROUGH 2026-07-01 — STATUS AFTER THE FIX SWEEP (same day, 17:45)
 
 **~75 fixes + 15 features from Parts 1-3 are IMPLEMENTED, re-reviewed, and ON THE DEVICE** (five Opus fix waves + manual edits + two adversarial re-review passes whose confirmed findings were also fixed). Verified: package tests 48→**88 green**, app tests 29→**36 green**, sim build + device build green, installed to the iPhone (1.0.0), sim screenshots checked (Home / full player / mini bar). CHANGELOG `[2026-07-01 17:30]` has the full summary. Treat the Parts 1-3 lists below as the *audit record*; the items still genuinely OPEN are:
