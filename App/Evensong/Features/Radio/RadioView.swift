@@ -29,12 +29,29 @@ struct RadioView: View {
     }
 
     private var seedTracks: [Track] {
-        var seen = Set<String>()
+        // Diversity-constrained seeds: one per album, at most two per artist.
+        // Without this a fresh library (no play history) padded the list from
+        // the head of the library array — 12 rows of one artist's albums.
+        var seenIDs = Set<String>()
+        var seenAlbums = Set<String>()
+        var perArtist: [String: Int] = [:]
         var result: [Track] = []
-        for track in model.recentlyPlayed + model.audioTracks {
-            guard seen.insert(track.id).inserted else { continue }
+        func consider(_ track: Track) {
+            guard result.count < 12,
+                  seenIDs.insert(track.id).inserted,
+                  seenAlbums.insert(track.albumID).inserted,
+                  perArtist[track.artistID, default: 0] < 2 else { return }
+            perArtist[track.artistID, default: 0] += 1
             result.append(track)
-            if result.count == 12 { break }
+        }
+        model.recentlyPlayed.forEach(consider)
+        if result.count < 12 {
+            // Pad by a per-session-stable hash order — a cheap spread across the
+            // whole library instead of its alphabetical head.
+            for track in model.audioTracks.sorted(by: { $0.id.hashValue < $1.id.hashValue }) {
+                consider(track)
+                if result.count == 12 { break }
+            }
         }
         return result
     }
